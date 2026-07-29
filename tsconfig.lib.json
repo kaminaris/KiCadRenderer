@@ -1,0 +1,27 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"skipLibCheck": true,
+		"esModuleInterop": true,
+		"isolatedModules": true,
+		"noEmit": true,
+		"baseUrl": ".",
+		"paths": {
+			"@kicad-io/*": ["../kicad-io/src/*"]
+		}
+	},
+	"include": [
+		"index.ts",
+		"KicadRenderSession.ts",
+		"math/**/*.ts",
+		"paint/**/*.ts",
+		"render/**/*.ts",
+		"text/**/*.ts",
+		"PathUtils.ts",
+		"SheetTree.ts",
+		"RegisterDefaultClasses.ts"
+	]
+}
