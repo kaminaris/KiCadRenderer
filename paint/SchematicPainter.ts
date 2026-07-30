@@ -48,6 +48,10 @@ export interface SchPaintedItem {
 	 * which placement was hit without re-parsing the element tree itself.
 	 */
 	refDesignator?: string;
+	/** kind:'label' — net/label text (global/local label name). */
+	labelName?: string;
+	/** kind:'label' — 'global' | 'local' | 'hierarchical'. */
+	labelKind?: string;
 }
 
 /** A hierarchical sheet reference — surfaced separately from the painted
@@ -90,6 +94,11 @@ export interface SchematicDocInfo {
 	sheetCount?: number;
 	/** When false, skip Sheet/File/Title page frame. Defaults to true. */
 	showDrawingSheet?: boolean;
+	/**
+	 * When true, keep the current camera zoom/pan after reload (e.g. local
+	 * rewire on drag). Default false — first open still auto-fits.
+	 */
+	preserveView?: boolean;
 }
 
 export function defaultSchLayerState(layersPresent: string[]): Map<string, SchLayerVisibilityState> {
@@ -505,6 +514,7 @@ export class SchematicPainter {
 		const id = wire.getUuid() ?? `wire:${ start.x },${ start.y }-${ end.x },${ end.y }`;
 		return {
 			id, layer, kind: 'wire', shape, bbox: shapeToBBox(shape), hitTestable: true, element: wire,
+			defaultColor: readWireStrokeColor(wire) ?? color,
 			draw: (renderer, drawColor) => {
 				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: drawColor, strokeWidth: width });
 			},
@@ -845,10 +855,9 @@ export class SchematicPainter {
 		// Reference/Value/Footprint/etc — real per-instance values and
 		// positions live on the PLACED instance's own properties, not the
 		// library def (same WithProperties + getVisibleProperties pattern
-		// already used for footprints). Built BEFORE the symbol hit box so
-		// Reference/Value labels expand the selectable AABB — passives like
-		// Device:R are only ~2mm wide; users naturally click the "R1"/"10k"
-		// text beside the body, which previously sat outside the hit region.
+		// already used for footprints). These are drawn as (non-hitTestable)
+		// text items; they are deliberately EXCLUDED from the symbol hit box
+		// below, so clicking a part's "R1"/"10k" text never selects the part.
 		if (typeof instance.getVisibleProperties === 'function') {
 			const visibleProps = instance.getVisibleProperties();
 			for (const name of Object.keys(visibleProps)) {
@@ -895,10 +904,12 @@ export class SchematicPainter {
 			}
 		}
 
-		// One hit-testable box per instance covering body + pins + visible
-		// field text. Individual shapes above are intentionally NOT
-		// hitTestable (clicking exactly on one arc segment isn't useful), but
-		// a click/drag editor needs SOME way to select "this whole symbol".
+		// One hit-testable box per instance covering the symbol's BODY GRAPHICS
+		// + PINS only — never the Reference/Value/field text or library
+		// markings. Clicking a part's "R1" / "10k" text must not grab or drag
+		// the symbol. Individual shapes above are intentionally NOT hitTestable
+		// (clicking exactly on one arc segment isn't useful), but a click/drag
+		// editor needs SOME way to select "this whole symbol".
 		// Deliberately bucketed on the 'Graphics' layer (not 'Symbols') so it
 		// sits at the BOTTOM of hit-test priority, below Wires/Junctions/
 		// NoConnects/Pins in SCHEMATIC_LAYER_ORDER — this box is large and
@@ -913,13 +924,10 @@ export class SchematicPainter {
 			let maxX = -Infinity;
 			let maxY = -Infinity;
 			for (const it of items) {
-				// Skip library body text ("&", gate markings) — those sit on
-				// the body already. Keep instance field text (Reference/
-				// Value/…) so clicking the label selects the part.
-				if (it.kind === 'text' && !String(it.id).includes(':prop:')) {
-					continue;
-				}
-				if (it.kind === 'label') {
+				// Body + pins only. Exclude ALL text (library markings AND
+				// instance field text like Reference/Value) and labels — they
+				// must not contribute to the click/drag hit region.
+				if (it.kind === 'text' || it.kind === 'label') {
 					continue;
 				}
 				minX = Math.min(minX, it.bbox.x);
@@ -1413,7 +1421,8 @@ export class SchematicPainter {
 		const id = `local-label:${ x },${ y }:${ name }`;
 		const bbox = { x: worldPos.x - textSize * 3, y: worldPos.y - textSize, w: textSize * 6, h: textSize * 2 };
 		return {
-			id, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: label,
+			id, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: label,
+			labelName: name, labelKind: 'local',
 			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 		};
 	}
@@ -1489,7 +1498,8 @@ export class SchematicPainter {
 		const flagShape: PaintedShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
-			hitTestable: false, element: label, defaultColor: schColors.labelGlobal,
+			hitTestable: true, element: label, defaultColor: schColors.labelGlobal,
+			labelName: name, labelKind: 'global',
 			draw: (renderer, color) => renderer.line(worldPts, { strokeColor: color, strokeWidth: thickness || 0.15 }),
 		});
 		return items;
@@ -1706,6 +1716,16 @@ export class SchematicPainter {
 
 		return items;
 	}
+}
+
+/** KiCad 9 permits an explicit `(stroke … (color r g b a))` on wires. */
+function readWireStrokeColor(wire: any): string | null {
+	const stroke = typeof wire?.findFirstChildByName === 'function' ? wire.findFirstChildByName('stroke') : null;
+	const color = typeof stroke?.findFirstChildByName === 'function' ? stroke.findFirstChildByName('color') : null;
+	const values = Array.isArray(color?.attributes) ? color.attributes.map((a: any) => Number(a?.value)) : [];
+	if (values.length < 3 || values.slice(0, 3).some((value: number) => !Number.isFinite(value))) return null;
+	const [r, g, b, alpha = 1] = values;
+	return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
 // KiCad's DefaultValues.label_size_ratio, used by global labels' box

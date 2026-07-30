@@ -43,6 +43,18 @@ export interface HitResult {
 	layer: string;
 	/** kind:'symbol' only — the placed instance's Reference designator (e.g. "CBST1"). */
 	refDesignator?: string;
+	/** kind:'label' — net/label text. */
+	labelName?: string;
+	labelKind?: string;
+}
+
+/** Placed schematic symbol pose for edit/drag without a circuit recipe. */
+export interface SymbolPoseInfo {
+	ref: string;
+	libId: string;
+	x: number;
+	y: number;
+	rotation: number;
 }
 
 /**
@@ -256,7 +268,9 @@ export class KicadRenderSession {
 		// refDesignator only exists on SchPaintedItem (kind:'symbol'), not on
 		// the board's PaintedItem — 'kind' in hit narrows which one we have.
 		const refDesignator = 'refDesignator' in hit ? hit.refDesignator : undefined;
-		return { id: hit.id, kind: hit.kind, layer: hit.layer, refDesignator };
+		const labelName = 'labelName' in hit ? hit.labelName : undefined;
+		const labelKind = 'labelKind' in hit ? hit.labelKind : undefined;
+		return { id: hit.id, kind: hit.kind, layer: hit.layer, refDesignator, labelName, labelKind };
 	}
 
 	/**
@@ -282,6 +296,26 @@ export class KicadRenderSession {
 			kind: hit.kind,
 			layer: hit.layer,
 			refDesignator: hit.refDesignator
+		};
+	}
+
+	/** Hit-test schematic labels (global / local) for drag editing. */
+	hitTestLabelAtScreen(screenPos: Vec2): HitResult | null {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			return null;
+		}
+		const worldPos = this.screenToWorld(screenPos);
+		const labels = this.schScene.hitTestItems.filter(item => item.kind === 'label');
+		const hit = hitTest(labels, worldPos.x, worldPos.y);
+		if (!hit) {
+			return null;
+		}
+		return {
+			id: hit.id,
+			kind: hit.kind,
+			layer: hit.layer,
+			labelName: hit.labelName,
+			labelKind: hit.labelKind,
 		};
 	}
 
@@ -456,6 +490,21 @@ export class KicadRenderSession {
 	}
 
 	/**
+	 * Serialize the currently loaded schematic AST (including any pose
+	 * mutations from {@link moveSymbolByRef}). Empty string if none loaded.
+	 */
+	getSchematicText(): string {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
+			return '';
+		}
+		const root = this.schematicRoot.rootElement;
+		if (typeof root.write === 'function') {
+			return String(root.write());
+		}
+		return '';
+	}
+
+	/**
 	 * Scope for this first pass (see SchematicPainter's own doc comment for
 	 * the full list): a single .kicad_sch file's own content only — sheet
 	 * elements render as boxes with their name/file text, but the child
@@ -478,7 +527,9 @@ export class KicadRenderSession {
 		this.geometryDirty = true;
 		this.selectedId = null;
 
-		this.fitSchematicContent();
+		if (!docInfo?.preserveView) {
+			this.fitSchematicContent();
+		}
 		this.scheduleRender();
 
 		return { parseMs, buildMs, layersPresent: this.schScene.layersPresent };
@@ -491,6 +542,11 @@ export class KicadRenderSession {
 	 * drag/rotate cheap enough to call on every frame — no server round trip,
 	 * no re-parsing, just mutate the AST node and re-run the paint pass.
 	 * Returns false if no symbol with that reference is in the loaded doc.
+	 *
+	 * Instance property fields (Reference/Value/…) are stored in absolute
+	 * schematic coordinates in `.kicad_sch`, so they are translated (and
+	 * rotated around the symbol origin when rotation changes) along with
+	 * the body — matching KiCad's own move behavior.
 	 */
 	moveSymbolByRef(reference: string, x: number, y: number, rotation?: number): boolean {
 		if (this.documentType !== 'schematic' || !this.schematicRoot) {
@@ -500,14 +556,220 @@ export class KicadRenderSession {
 		if (!instance || typeof instance.setOrigin !== 'function') {
 			return false;
 		}
-		const current = typeof instance.getOrigin === 'function' ? instance.getOrigin() : { rotation: 0 };
-		instance.setOrigin(x, y, rotation ?? current.rotation ?? 0);
+		const current = typeof instance.getOrigin === 'function'
+			? instance.getOrigin()
+			: { x: 0, y: 0, rotation: 0 };
+		const oldX = Number(current.x ?? 0);
+		const oldY = Number(current.y ?? 0);
+		const oldRot = Number(current.rotation ?? 0);
+		const newRot = rotation ?? oldRot;
+		const dRot = ((newRot - oldRot) % 360 + 360) % 360;
+
+		const props: any[] = typeof instance.getProperties === 'function'
+			? instance.getProperties()
+			: [];
+		for (const prop of props) {
+			if (!prop || typeof prop.getOrigin !== 'function' || typeof prop.setOrigin !== 'function') {
+				continue;
+			}
+			const po = prop.getOrigin();
+			const relX = Number(po.x ?? 0) - oldX;
+			const relY = Number(po.y ?? 0) - oldY;
+			let nx = relX;
+			let ny = relY;
+			if (dRot === 90) {
+				nx = -relY;
+				ny = relX;
+			}
+			else if (dRot === 180) {
+				nx = -relX;
+				ny = -relY;
+			}
+			else if (dRot === 270) {
+				nx = relY;
+				ny = -relX;
+			}
+			// Field text must stay READABLE: KiCad only ever draws Reference /
+			// Value at 0° or 90°, never upside-down (180°) or mirrored (270°).
+			// The position rotates with the symbol; the text angle is normalised.
+			const propRot = Number(po.rotation ?? 0);
+			const readableRot = (((propRot + dRot) % 360) + 360) % 360 % 180;
+			prop.setOrigin(x + nx, y + ny, readableRot);
+		}
+
+		instance.setOrigin(x, y, newRot);
 
 		this.schScene = this.schematicPainter.build(this.schematicRoot, this.schematicDocInfo);
 		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
 		this.geometryDirty = true;
 		this.scheduleRender();
 		return true;
+	}
+
+	/**
+	 * Re-place a symbol's visible Reference/Value fields to computed anchors
+	 * (from the layout lib's `symbolFieldLayout`), so a rotated/moved part's
+	 * labels sit cleanly beside the body, upright, and clear of the wires.
+	 */
+	autoplaceSymbolFields(reference: string, layout: {
+		refX: number;
+		refY: number;
+		valX: number;
+		valY: number;
+		fieldRot: number;
+		justify: 'left' | 'middle';
+	}): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return false;
+		}
+		const instance: any = this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
+		if (!instance || typeof instance.getPropertyByName !== 'function') {
+			return false;
+		}
+		const place = (name: string, fx: number, fy: number): void => {
+			const prop = instance.getPropertyByName(name);
+			if (!prop || typeof prop.setOrigin !== 'function') {
+				return;
+			}
+			prop.setOrigin(fx, fy, layout.fieldRot);
+			if (typeof prop.setJustify === 'function') {
+				prop.setJustify(layout.justify);
+			}
+		};
+		place('Reference', layout.refX, layout.refY);
+		place('Value', layout.valX, layout.valY);
+
+		this.schScene = this.schematicPainter.build(this.schematicRoot, this.schematicDocInfo);
+		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
+		this.geometryDirty = true;
+		this.scheduleRender();
+		return true;
+	}
+
+	/**
+	 * Move a global/local/hierarchical label by paint-item id (e.g. `"uuid:flag"` or
+	 * `"uuid"`). Label net name is unchanged — only the attach point moves.
+	 */
+	moveLabelById(paintId: string, x: number, y: number, rotation?: number): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return false;
+		}
+		const items = this.schScene?.hitTestItems ?? [];
+		const item = items.find(it => it.id === paintId || it.id.startsWith(`${paintId}:`));
+		const el = item?.element;
+		if (!el || typeof el.setOrigin !== 'function') {
+			// Fall back: search root children by uuid prefix in paint id.
+			const uuid = paintId.replace(/:(flag|text)$/, '');
+			const root = this.schematicRoot.rootElement;
+			const kids: any[] = root?.children ?? [];
+			for (const kid of kids) {
+				if (
+					(kid?.name === 'global_label' || kid?.name === 'hierarchical_label' || kid?.name === 'label')
+					&& typeof kid.getUuid === 'function'
+					&& String(kid.getUuid()) === uuid
+					&& typeof kid.setOrigin === 'function'
+				) {
+					const cur = kid.getOrigin?.() ?? { rotation: 0 };
+					kid.setOrigin(x, y, rotation ?? cur.rotation ?? 0);
+					this.schScene = this.schematicPainter.build(this.schematicRoot, this.schematicDocInfo);
+					this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
+					this.geometryDirty = true;
+					this.scheduleRender();
+					return true;
+				}
+				if (
+					kid?.name === 'label'
+					&& typeof kid.setOrigin !== 'function'
+				) {
+					// Plain local labels may only have KicadElementAt child.
+					const at = typeof kid.findFirstChildByName === 'function'
+						? kid.findFirstChildByName('at')
+						: null;
+					const kidUuid = typeof kid.getUuid === 'function' ? String(kid.getUuid()) : '';
+					if (at && (kidUuid === uuid || paintId.includes(String(at.x)))) {
+						at.x = x;
+						at.y = y;
+						if (rotation !== undefined) {
+							at.rotation = rotation;
+						}
+						this.schScene = this.schematicPainter.build(this.schematicRoot, this.schematicDocInfo);
+						this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
+						this.geometryDirty = true;
+						this.scheduleRender();
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+		const cur = typeof el.getOrigin === 'function' ? el.getOrigin() : { rotation: 0 };
+		el.setOrigin(x, y, rotation ?? cur.rotation ?? 0);
+		this.schScene = this.schematicPainter.build(this.schematicRoot, this.schematicDocInfo);
+		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
+		this.geometryDirty = true;
+		this.scheduleRender();
+		return true;
+	}
+
+	/**
+	 * Direct children of the root schematic that are placed symbol instances
+	 * (not library definitions). Used by circuit edit without a recipe seed.
+	 */
+	listSymbolPoses(): SymbolPoseInfo[] {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return [];
+		}
+		const out: SymbolPoseInfo[] = [];
+		const root = this.schematicRoot.rootElement;
+		const kids: any[] = root?.children ?? [];
+		for (const instance of kids) {
+			if (
+				!instance
+				|| instance.name !== 'symbol'
+				|| typeof instance.getReference !== 'function'
+				|| typeof instance.getOrigin !== 'function'
+			) {
+				continue;
+			}
+			const ref = String(instance.getReference() ?? '').trim();
+			if (!ref) {
+				continue;
+			}
+			const origin = instance.getOrigin();
+			const libId = typeof instance.getLibId === 'function'
+				? String(instance.getLibId() ?? '')
+				: '';
+			out.push({
+				ref,
+				libId,
+				x: Number(origin?.x ?? 0),
+				y: Number(origin?.y ?? 0),
+				rotation: Number(origin?.rotation ?? 0),
+			});
+		}
+		return out;
+	}
+
+	getSymbolPose(reference: string): SymbolPoseInfo | null {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return null;
+		}
+		const instance = this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
+		if (!instance || typeof instance.getOrigin !== 'function') {
+			return null;
+		}
+		const origin = instance.getOrigin();
+		const libId = typeof instance.getLibId === 'function' ? String(instance.getLibId() ?? '') : '';
+		const ref = typeof instance.getReference === 'function'
+			? String(instance.getReference() ?? reference)
+			: reference;
+		return {
+			ref,
+			libId,
+			x: Number(origin?.x ?? 0),
+			y: Number(origin?.y ?? 0),
+			rotation: Number(origin?.rotation ?? 0),
+		};
 	}
 
 	// ---- Rendering ----
