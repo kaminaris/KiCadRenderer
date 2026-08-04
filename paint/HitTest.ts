@@ -22,17 +22,25 @@ export interface Hittable {
  * Broad-phase is a linear scan for the spike — fine up to a few thousand
  * items; swap for a spatial index (grid/R-tree) if a real dense board
  * proves it's needed.
+ *
+ * `tolerance` (world units, default 0) is real KiCad's screen-pixel click
+ * accuracy already converted to world units by the caller — see
+ * shapeContainsPoint's doc comment. Inflating the bbox check by the same
+ * amount is required, not just an optimization: without it, a click just
+ * outside a thin unfilled shape's tight bbox (e.g. right at a rect's edge)
+ * could get broad-phase-rejected before shapeContainsPoint ever runs, even
+ * though the precise edge test would have accepted it.
  */
-export function hitTest<T extends Hittable>(items: T[], worldX: number, worldY: number): T | null {
+export function hitTest<T extends Hittable>(items: T[], worldX: number, worldY: number, tolerance = 0): T | null {
 	// Iterate in reverse paint order so the most recently drawn (topmost)
 	// item wins on overlap, matching normal 2D compositing expectations.
 	for (let i = items.length - 1; i >= 0; i--) {
 		const item = items[i]!;
 		const { x, y, w, h } = item.bbox;
-		if (worldX < x || worldX > x + w || worldY < y || worldY > y + h) {
+		if (worldX < x - tolerance || worldX > x + w + tolerance || worldY < y - tolerance || worldY > y + h + tolerance) {
 			continue;
 		}
-		if (shapeContainsPoint(item.shape, worldX, worldY)) {
+		if (shapeContainsPoint(item.shape, worldX, worldY, tolerance)) {
 			return item;
 		}
 	}

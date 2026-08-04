@@ -4,7 +4,7 @@ import { Matrix3 } from '../math/Matrix3';
 import { Renderer } from '../render/Renderer';
 import { schColors, schematicLayerOrder } from './SchematicColors';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry, measureStrokeTextSize } from './TextPaint';
-import { PaintedShape, shapeToBBox, distanceToSegment } from './PaintedShape';
+import { PaintedShape, shapeToBBox, distanceToSegment, polygonEdgeDistance } from './PaintedShape';
 import { arcToPolyline, circleToRing, KicadStrokeLineType, strokeDashedPolyline } from './StrokeDash';
 import {
 	defaultWksItems, defaultWksSetup, expandWksTextVars, resolveWksAnchor, withinWksMargin, wksPaperSizes,
@@ -1735,7 +1735,13 @@ export class SchematicPainter {
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
 			hitTestable: flagHitTestable, element, defaultColor: color,
-			labelName: flagHitTestable ? text : undefined, labelKind: flagHitTestable ? 'hier' : undefined,
+			// flagHitTestable is only ever false for buildSheet()'s sheet-pin
+			// reuse of this shape (buildHierLabel's own call always passes
+			// true) — tagging that case 'sheet-pin' (rather than leaving
+			// labelKind undefined) lets buildDanglingFlags() recognize a
+			// sheet pin as a real connection point without making it
+			// independently clickable, which stays intentionally false.
+			labelName: flagHitTestable ? text : undefined, labelKind: flagHitTestable ? 'hier' : 'sheet-pin',
 			draw: (renderer, drawColor) => renderer.line(worldPts, { strokeColor: drawColor, strokeWidth: thickness || 0.15 }),
 		});
 		return items;
@@ -1993,7 +1999,16 @@ export class SchematicPainter {
 		// plus a hitTestable :flag item) sharing one element — filtering to
 		// hitTestable gives exactly one representative per logical label,
 		// same trick buildPlaceSubmenu-adjacent code elsewhere relies on.
-		const labels = (layerBuckets.get('Labels') ?? []).filter(it => it.kind === 'label' && it.hitTestable);
+		// Sheet pins are the one deliberate exception: buildHierLabelShape's
+		// sheet-pin reuse tags its :flag item labelKind:'sheet-pin' while
+		// keeping hitTestable:false (a pin isn't independently selectable
+		// apart from its sheet) — included here anyway because a sheet pin
+		// IS a real electrical connection point, and excluding it from this
+		// map meant a wire/label/anything else landing exactly on one could
+		// never find it "occupied", so it (and the sheet pin itself) always
+		// showed dangling even when genuinely connected.
+		const labels = (layerBuckets.get('Labels') ?? [])
+			.filter(it => it.kind === 'label' && (it.hitTestable || it.labelKind === 'sheet-pin'));
 
 		for (const item of wireLike) {
 			if (item.shape.type !== 'segment') {
@@ -2041,6 +2056,21 @@ export class SchematicPainter {
 		const liesOnAnyBusSpan = (x: number, y: number): boolean =>
 			buses.some(bus => bus.shape.type === 'segment'
 				&& distanceToSegment(x, y, bus.shape.x1, bus.shape.y1, bus.shape.x2, bus.shape.y2) < JUNCTION_POINT_EPS);
+		// A directive label (netclass_flag) anchored on a rule area's border
+		// is considered "connected" to it even with no wire touching either —
+		// confirmed in the user's local checkout:
+		// SCH_DIRECTIVE_LABEL::IsDangling() (sch_label.cpp) is
+		// `m_isDangling && m_connected_rule_areas.empty()`, and
+		// SCH_RULE_AREA::RefreshContainedItemsAndDirectives (sch_rule_area.cpp)
+		// populates that set via `GetPolyShape().CollideEdge(label's anchor
+		// point, nullptr, 5)` — an anchor-vs-polygon-EDGE test, same shape as
+		// the bus-entry exception above, just against a (possibly
+		// multi-sided) rule area outline instead of a single bus segment.
+		const ruleAreaPolygons = (layerBuckets.get('RuleAreas') ?? [])
+			.map(it => it.shape)
+			.filter((s): s is Extract<PaintedShape, { type: 'polygon' }> => s.type === 'polygon');
+		const liesOnAnyRuleAreaBorder = (x: number, y: number): boolean =>
+			ruleAreaPolygons.some(shape => polygonEdgeDistance(shape.points, shape.closed, x, y) < JUNCTION_POINT_EPS);
 		const flags: SchPaintedItem[] = [];
 
 		for (const item of wireLike) {
@@ -2066,6 +2096,9 @@ export class SchematicPainter {
 		for (const item of labels) {
 			const origin = typeof item.element?.getOrigin === 'function' ? item.element.getOrigin() : null;
 			if (!origin || !isDangling(origin.x, origin.y)) {
+				continue;
+			}
+			if (item.labelKind === 'directive' && liesOnAnyRuleAreaBorder(origin.x, origin.y)) {
 				continue;
 			}
 			const color = brightenColor(item.defaultColor ?? colorForKind('label'), 0.3);

@@ -165,6 +165,14 @@ export class KicadRenderSession {
 	protected pendingFitItems: { bbox: { x: number; y: number; w: number; h: number } }[] | null = null;
 	/** Below this buffer size (device px), defer camera fit. */
 	protected static readonly minFitViewportPx = 32;
+	/** Real KiCad's own click-tolerance radius, in SCREEN pixels — a constant
+	 * regardless of zoom (eeschema/tools/sch_selection_tool.cpp's
+	 * `HITTEST_THRESHOLD_PIXELS`, confirmed in the user's local checkout).
+	 * hitTestToleranceWorld() converts this to world units at the current
+	 * zoom before every hit-test call — see PaintedShape.ts's edgeTolerance
+	 * doc comment for why a fixed world-space tolerance is wrong (too tight
+	 * zoomed out, needlessly loose zoomed in). */
+	protected static readonly hitTestPixelTolerance = 5;
 
 	/** Called after render() actually paints a frame (or clears an empty
 	 * one) — the caller can use this to update status/info text without
@@ -326,16 +334,25 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	/** Converts hitTestPixelTolerance to world units at the current zoom.
+	 * zoom<=0/NaN falls back to 0 (exact-match) rather than propagating NaN
+	 * into every subsequent comparison. */
+	protected hitTestToleranceWorld(): number {
+		const zoom = this.camera.zoom;
+		return Number.isFinite(zoom) && zoom > 0 ? KicadRenderSession.hitTestPixelTolerance / zoom : 0;
+	}
+
 	/** Geometric hit-test (against source data, not pixels) at a screen
 	 * position — returns the same shape the demo's click handler reports. */
 	hitTestAtScreen(screenPos: Vec2): HitResult | null {
 		const worldPos = this.screenToWorld(screenPos);
+		const tolerance = this.hitTestToleranceWorld();
 		// Branched (rather than reading a shared union-typed variable) so
 		// each hitTest() call sees a concretely-typed array — a union of
 		// two array types doesn't let TS infer hitTest<T>'s T cleanly.
 		const hit = this.documentType === 'schematic'
-			? (this.schScene ? hitTest(this.schScene.hitTestItems, worldPos.x, worldPos.y) : null)
-			: (this.scene ? hitTest(this.scene.hitTestItems, worldPos.x, worldPos.y) : null);
+			? (this.schScene ? hitTest(this.schScene.hitTestItems, worldPos.x, worldPos.y, tolerance) : null)
+			: (this.scene ? hitTest(this.scene.hitTestItems, worldPos.x, worldPos.y, tolerance) : null);
 		if (!hit) {
 			return null;
 		}
@@ -361,7 +378,7 @@ export class KicadRenderSession {
 		}
 		const worldPos = this.screenToWorld(screenPos);
 		const symbols = this.schScene.hitTestItems.filter(item => item.kind === 'symbol');
-		const hit = hitTest(symbols, worldPos.x, worldPos.y);
+		const hit = hitTest(symbols, worldPos.x, worldPos.y, this.hitTestToleranceWorld());
 		if (!hit) {
 			return null;
 		}
@@ -380,7 +397,7 @@ export class KicadRenderSession {
 		}
 		const worldPos = this.screenToWorld(screenPos);
 		const labels = this.schScene.hitTestItems.filter(item => item.kind === 'label');
-		const hit = hitTest(labels, worldPos.x, worldPos.y);
+		const hit = hitTest(labels, worldPos.x, worldPos.y, this.hitTestToleranceWorld());
 		if (!hit) {
 			return null;
 		}
@@ -1507,7 +1524,19 @@ export class KicadRenderSession {
 		while ((bbox.w / spacing) > 200 && guard++ < 32) {
 			spacing *= coarsen;
 		}
-		const r = 0.15 / zoom;
+		// Screen-CONSTANT dot size regardless of zoom (r*zoom cancels the
+		// zoom out) — matches real KiCad's own grid, whose dot/cross size is
+		// likewise a small constant number of screen pixels, not a fixed
+		// world-space size (common/gal/gal_display_options.cpp's
+		// m_gridLineWidth default 1.0, confirmed in the user's local
+		// checkout). Previously 0.15 here — that made every dot exactly
+		// 0.15 SCREEN PIXELS in radius at ANY zoom, i.e. permanently
+		// sub-pixel and invisible; this was the actual "grid doesn't show"
+		// bug, not a WebGL cost concern (the loop/batching here was already
+		// written to be cheap on WebGL — capped dot count, plain rects
+		// instead of tessellated circles — see below).
+		const gridDotScreenRadiusPx = 1;
+		const r = gridDotScreenRadiusPx / zoom;
 		if (!Number.isFinite(r) || r <= 0) {
 			return;
 		}

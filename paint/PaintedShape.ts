@@ -44,8 +44,36 @@ export function shapeToBBox(shape: PaintedShape): { x: number; y: number; w: num
 // proportionally thicker hit band.
 const MIN_HIT_TOLERANCE = 0.15;
 
-function edgeTolerance(strokeWidth: number | undefined): number {
-	return Math.max((strokeWidth ?? 0) / 2, MIN_HIT_TOLERANCE);
+// `tolerance` is additive with strokeWidth/2, matching real KiCad's own
+// EDA_SHAPE::hitTest formula exactly: `maxdist = aAccuracy; if (width > 0)
+// maxdist += width/2` (common/eda_shape.cpp, confirmed in the user's local
+// checkout) — aAccuracy there is a SCREEN-PIXEL threshold converted to world
+// units by the caller (eeschema's HITTEST_THRESHOLD_PIXELS, 5px, converted
+// via `view->ToWorld()`), which is what makes real KiCad's click target stay
+// a constant, comfortable SIZE ON SCREEN at any zoom level — a fixed
+// world-space tolerance is either too tight when zoomed out or needlessly
+// loose when zoomed in. KicadRenderSession.hitTestAtScreen computes and
+// passes that pixel-derived tolerance; MIN_HIT_TOLERANCE stays as a floor
+// so a caller that omits tolerance (passes 0) keeps exactly the old
+// behavior rather than regressing to "must click the exact zero-width line".
+function edgeTolerance(strokeWidth: number | undefined, tolerance: number): number {
+	return Math.max((strokeWidth ?? 0) / 2 + tolerance, MIN_HIT_TOLERANCE);
+}
+
+/** Distance from (x,y) to the nearest edge of a polyline/polygon — shared by
+ * the unfilled edge-only test below and, promoted to exported (same reason
+ * distanceToSegment was: avoid a second copy of this loop), by
+ * SchematicPainter's rule-area-border dangling-forgiveness check. */
+export function polygonEdgeDistance(points: { x: number; y: number }[], closed: boolean | undefined, x: number, y: number): number {
+	let min = Infinity;
+	for (let i = 0; i < points.length - 1; i++) {
+		min = Math.min(min, distanceToSegment(x, y, points[i]!.x, points[i]!.y, points[i + 1]!.x, points[i + 1]!.y));
+	}
+	if (closed && points.length > 1) {
+		const last = points[points.length - 1]!, first = points[0]!;
+		min = Math.min(min, distanceToSegment(x, y, last.x, last.y, first.x, first.y));
+	}
+	return min;
 }
 
 /**
@@ -68,49 +96,48 @@ function edgeTolerance(strokeWidth: number | undefined): number {
  * regardless of its own fill state — this app's buildRuleArea() does the
  * same by always passing `filled: false` rather than relying on rule areas
  * happening to always be unfilled in practice.
+ *
+ * `tolerance` (world units, default 0) is real KiCad's `aAccuracy` — see
+ * edgeTolerance's comment. Filled shapes also get it (inflating the area
+ * test outward), matching EDA_SHAPE::hitTest's own `arect.Inflate(aAccuracy)`
+ * for box/area hit-tests — a filled shape is already an easy target, so this
+ * mostly just keeps its OWN edge comfortably clickable too.
  */
-export function shapeContainsPoint(shape: PaintedShape, x: number, y: number): boolean {
+export function shapeContainsPoint(shape: PaintedShape, x: number, y: number, tolerance = 0): boolean {
 	switch (shape.type) {
 		case 'rect': {
 			if (shape.filled === false) {
-				const tol = edgeTolerance(shape.strokeWidth);
+				const tol = edgeTolerance(shape.strokeWidth, tolerance);
 				const x2 = shape.x + shape.w, y2 = shape.y + shape.h;
 				return distanceToSegment(x, y, shape.x, shape.y, x2, shape.y) <= tol
 					|| distanceToSegment(x, y, x2, shape.y, x2, y2) <= tol
 					|| distanceToSegment(x, y, x2, y2, shape.x, y2) <= tol
 					|| distanceToSegment(x, y, shape.x, y2, shape.x, shape.y) <= tol;
 			}
-			return x >= shape.x && x <= shape.x + shape.w && y >= shape.y && y <= shape.y + shape.h;
+			return x >= shape.x - tolerance && x <= shape.x + shape.w + tolerance
+				&& y >= shape.y - tolerance && y <= shape.y + shape.h + tolerance;
 		}
 		case 'circle': {
 			const dx = x - shape.cx;
 			const dy = y - shape.cy;
 			if (shape.filled === false) {
-				const tol = edgeTolerance(shape.strokeWidth);
+				const tol = edgeTolerance(shape.strokeWidth, tolerance);
 				return Math.abs(Math.hypot(dx, dy) - shape.r) <= tol;
 			}
-			return dx * dx + dy * dy <= shape.r * shape.r;
+			const rTol = shape.r + tolerance;
+			return dx * dx + dy * dy <= rTol * rTol;
 		}
 		case 'segment':
-			return distanceToSegment(x, y, shape.x1, shape.y1, shape.x2, shape.y2) <= shape.width / 2;
+			return distanceToSegment(x, y, shape.x1, shape.y1, shape.x2, shape.y2) <= shape.width / 2 + tolerance;
 		case 'polygon': {
 			if (shape.filled === false) {
-				const tol = edgeTolerance(shape.strokeWidth);
-				const pts = shape.points;
-				for (let i = 0; i < pts.length - 1; i++) {
-					if (distanceToSegment(x, y, pts[i]!.x, pts[i]!.y, pts[i + 1]!.x, pts[i + 1]!.y) <= tol) {
-						return true;
-					}
-				}
-				if (shape.closed && pts.length > 1) {
-					const last = pts[pts.length - 1]!, first = pts[0]!;
-					if (distanceToSegment(x, y, last.x, last.y, first.x, first.y) <= tol) {
-						return true;
-					}
-				}
-				return false;
+				const tol = edgeTolerance(shape.strokeWidth, tolerance);
+				return polygonEdgeDistance(shape.points, shape.closed, x, y) <= tol;
 			}
-			return pointInPolygon(shape.points, x, y);
+			if (pointInPolygon(shape.points, x, y)) {
+				return true;
+			}
+			return tolerance > 0 && polygonEdgeDistance(shape.points, shape.closed, x, y) <= tolerance;
 		}
 	}
 }
