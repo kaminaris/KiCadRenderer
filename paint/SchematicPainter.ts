@@ -1,8 +1,8 @@
 import { Vec2 } from '../math/Vec2';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
-import { Renderer } from '../render/Renderer';
-import { schColors, schematicLayerOrder } from './SchematicColors';
+import { EmbeddedImage, Renderer } from '../render/Renderer';
+import { schColors, schematicBackgroundColor, schematicLayerOrder } from './SchematicColors';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry, measureStrokeTextSize } from './TextPaint';
 import { PaintedShape, shapeToBBox, distanceToSegment, polygonEdgeDistance } from './PaintedShape';
 import { arcToPolyline, circleToRing, KicadStrokeLineType, strokeDashedPolyline } from './StrokeDash';
@@ -31,7 +31,7 @@ const pinTextMargin = 0.6096 * 0.15; // 24 mils * DefaultValues.text_offset_rati
 export interface SchPaintedItem {
 	id: string;
 	layer: string;
-	kind: 'wire' | 'bus' | 'junction' | 'no-connect' | 'symbol-graphic' | 'pin' | 'label' | 'sheet' | 'text' | 'frame' | 'symbol' | 'dangling';
+	kind: 'wire' | 'bus' | 'junction' | 'no-connect' | 'symbol-graphic' | 'pin' | 'label' | 'sheet' | 'table' | 'image' | 'text' | 'frame' | 'symbol' | 'dangling';
 	shape: PaintedShape;
 	bbox: { x: number; y: number; w: number; h: number };
 	hitTestable: boolean;
@@ -180,6 +180,7 @@ export class SchematicPainter {
 		};
 
 		const root = schematic.rootElement;
+		const schematicVersion = Number(root.findFirstChildByName?.('version')?.value) || 0;
 		const libSymbols = getLibSymbolsClass() ? root.findFirstChildByClass(getLibSymbolsClass()) : null;
 
 		if (getRuleAreaClass()) {
@@ -266,9 +267,33 @@ export class SchematicPainter {
 				pushItem(this.buildSchPolyline(poly));
 			}
 		}
+		if (getBezierClass()) {
+			for (const bezier of root.findChildrenByClass(getBezierClass())) {
+				const item = this.buildSchBezier(bezier);
+				if (item) {
+					pushItem(item);
+				}
+			}
+		}
+		if (getImageClass()) {
+			for (const image of root.findChildrenByClass(getImageClass())) {
+				const item = this.buildSchImage(image, schematicVersion);
+				if (item) {
+					pushItem(item);
+				}
+			}
+		}
 		if (getTextClass()) {
 			for (const text of root.findChildrenByClass(getTextClass())) {
 				const item = this.buildSchText(text);
+				if (item) {
+					pushItem(item);
+				}
+			}
+		}
+		if (getTextBoxClass()) {
+			for (const textBox of root.findChildrenByClass(getTextBoxClass())) {
+				const item = this.buildSchTextBox(textBox);
 				if (item) {
 					pushItem(item);
 				}
@@ -299,6 +324,13 @@ export class SchematicPainter {
 		if (getNetclassFlagClass()) {
 			for (const flag of root.findChildrenByClass(getNetclassFlagClass())) {
 				for (const item of this.buildNetclassFlag(flag)) {
+					pushItem(item);
+				}
+			}
+		}
+		if (getTableClass()) {
+			for (const table of root.findChildrenByClass(getTableClass())) {
+				for (const item of this.buildTable(table)) {
 					pushItem(item);
 				}
 			}
@@ -652,8 +684,11 @@ export class SchematicPainter {
 		const { width, type: lineType } = typeof circle.getStroke === 'function' ? circle.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof circle.getFill === 'function' ? circle.getFill() : 'none';
 		const id = circle.getUuid() ?? `sch-circle:${ center.x },${ center.y }`;
+		// Standalone schematic circles are annotation outlines.  Keep their
+		// picker permeable even when a file omits/normalizes the fill child;
+		// otherwise the enclosing disk steals clicks from objects inside it.
 		const shape: PaintedShape = {
-			type: 'circle', cx: center.x, cy: center.y, r: radius, filled: fillType !== 'none', strokeWidth: width,
+			type: 'circle', cx: center.x, cy: center.y, r: radius, filled: false, strokeWidth: width,
 		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: circle,
@@ -688,7 +723,15 @@ export class SchematicPainter {
 		const { width, type: lineType } = typeof arc.getStroke === 'function' ? arc.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof arc.getFill === 'function' ? arc.getFill() : 'none';
 		const id = arc.getUuid() ?? `sch-arc:${ local.centerX },${ local.centerY }`;
-		const shape: PaintedShape = { type: 'circle', cx: local.centerX, cy: local.centerY, r: local.radius };
+		// An arc must not use its enclosing circle as the hit shape: that makes
+		// every point inside the arc selectable and prevents selecting graphics
+		// placed underneath it.  Use the sampled arc outline so the shared
+		// unfilled-shape hit test only accepts the visible edge.
+		const hitPoints = arcToPolyline(new Vec2(local.centerX, local.centerY), local.radius, local.startAngle, local.endAngle)
+			.map(point => ({ x: point.x, y: point.y }));
+		const shape: PaintedShape = {
+			type: 'polygon', points: hitPoints, filled: fillType !== 'none', closed: false, strokeWidth: width,
+		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
 			defaultColor: schColors.graphic,
@@ -754,6 +797,74 @@ export class SchematicPainter {
 				}
 				drawStrokeOutline(renderer, strokePoints, width, lineType, color);
 			},
+		};
+	}
+
+	/** KiCad stores a cubic Bézier as start, control-1, control-2, end. The
+	 * renderer has polyline primitives only, so flatten it adaptively before
+	 * painting. The 0.05 mm flatness target keeps curves smooth without
+	 * burdening ordinary schematic decorations with excess segments. */
+	protected buildSchBezier(bezier: any): SchPaintedItem | null {
+		const points: { x: number; y: number }[] = typeof bezier.getPoints === 'function' ? bezier.getPoints() : [];
+		if (points.length !== 4) {
+			return null;
+		}
+		const curve = cubicBezierToPolyline(
+			new Vec2(points[0]!.x, points[0]!.y), new Vec2(points[1]!.x, points[1]!.y),
+			new Vec2(points[2]!.x, points[2]!.y), new Vec2(points[3]!.x, points[3]!.y),
+		);
+		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const drawWidth = width || 0.15;
+		const id = bezier.getUuid() ?? `sch-bezier:${ points[0]!.x },${ points[0]!.y }`;
+		const shape: PaintedShape = {
+			type: 'polygon', points: curve.map(p => ({ x: p.x, y: p.y })),
+			filled: false, closed: false, strokeWidth: drawWidth,
+		};
+		return {
+			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: bezier,
+			defaultColor: schColors.graphic,
+			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color),
+		};
+	}
+
+	/** KiCad embedded images use their encoded resolution (or the 300-PPI
+	 * default), then multiply it by `(scale ...)`. Their `(at ...)` point is
+	 * the image center. */
+	protected buildSchImage(image: any, schematicVersion: number): SchPaintedItem | null {
+		const data: string | undefined = typeof image.getData === 'function' ? image.getData() : undefined;
+		if (!data) {
+			return null;
+		}
+		const info = embeddedImageInfo(data);
+		if (!info) {
+			return null;
+		}
+		const origin = typeof image.getOrigin === 'function' ? image.getOrigin() : { x: 0, y: 0 };
+		const scale = typeof image.getScale === 'function' ? image.getScale() : 1;
+		// Mirror KiCad's three image-scale eras. Before 20230121 image scale
+		// was authored for a fixed 300 PPI. From then until the 20260623 pHYs
+		// precision fix it used truncated pixels/cm; newer files use the full
+		// encoded resolution. KiCad compensates stored scales while loading;
+		// selecting the matching effective PPI produces the same final bounds.
+		const effectivePpi = schematicVersion > 0 && schematicVersion <= 20230121
+			? 300
+			: schematicVersion > 0 && schematicVersion < 20260623
+				? info.legacyPpi
+				: info.ppi;
+		const pixelSizeMm = 25.4 / effectivePpi;
+		const width = info.width * pixelSizeMm * (Number.isFinite(scale) ? scale : 1);
+		const height = info.height * pixelSizeMm * (Number.isFinite(scale) ? scale : 1);
+		if (!(width > 0) || !(height > 0)) {
+			return null;
+		}
+		const x = origin.x - width / 2;
+		const y = origin.y - height / 2;
+		const id = image.getUuid?.() ?? `sch-image:${origin.x},${origin.y}`;
+		const shape: PaintedShape = { type: 'rect', x, y, w: width, h: height };
+		const embedded: EmbeddedImage = { data, mimeType: info.mimeType };
+		return {
+			id, layer: 'Images', kind: 'image', shape, bbox: shapeToBBox(shape), hitTestable: true, element: image,
+			draw: renderer => renderer.image(embedded, new Vec2(x, y), width, height),
 		};
 	}
 
@@ -896,6 +1007,14 @@ export class SchematicPainter {
 			if (getPolylineClass()) {
 				for (const poly of subUnit.findChildrenByClass(getPolylineClass())) {
 					items.push(this.buildSymPolyline(poly, instanceMatrix, instanceId));
+				}
+			}
+			if (getBezierClass()) {
+				for (const bezier of subUnit.findChildrenByClass(getBezierClass())) {
+					const item = this.buildSymBezier(bezier, instanceMatrix, instanceId);
+					if (item) {
+						items.push(item);
+					}
 				}
 			}
 		}
@@ -1237,6 +1356,95 @@ export class SchematicPainter {
 				}
 				drawStrokeOutline(renderer, worldPoints, width, lineType, color);
 			},
+		};
+	}
+
+	/** Root-level KiCad text boxes: a rectangular text area whose stored
+	 * rotation affects text layout, while `(at ...) + (size ...)` remain the
+	 * axis-aligned rectangle corners (matching SCH_TEXTBOX::GetDrawPos()). */
+	protected buildSchTextBox(textBox: any): SchPaintedItem | null {
+		const value: string = textBox.value ?? '';
+		const origin = typeof textBox.getOrigin === 'function' ? textBox.getOrigin() : { x: 0, y: 0, rotation: 0 };
+		const size = textBox.findFirstChildByName?.('size');
+		const width = Number(size?.width ?? size?.attributes?.[0]?.value) || 0;
+		const height = Number(size?.height ?? size?.attributes?.[1]?.value) || 0;
+		if (!(width > 0) || !(height > 0)) {
+			return null;
+		}
+		const x = origin.x, y = origin.y;
+		const margins = textBox.findFirstChildByName?.('margins')?.attributes ?? [];
+		const margin = (index: number) => Number(margins[index]?.value) || 0;
+		const left = margin(0), top = margin(1), right = margin(2), bottom = margin(3);
+		const contentW = Math.max(0, width - left - right);
+		const contentH = Math.max(0, height - top - bottom);
+		const rotation = origin.rotation ?? 0;
+		const vertical = rotation === 90 || rotation === 270;
+		const { size: textSize, thickness } = readElementFontMetrics(textBox);
+		const anchor = readJustifyAnchor(textBox);
+		// SCH_TEXTBOX swaps the alignment axes for vertical text: its ordinary
+		// horizontal alignment chooses Y, and vertical alignment chooses X.
+		const textPos = vertical
+			? new Vec2(x + left + anchor.y * contentW, y + top + (1 - anchor.x) * contentH)
+			: new Vec2(x + left + anchor.x * contentW, y + top + anchor.y * contentH);
+		const wrappedValue = wrapTableCellText(value, vertical ? contentH : contentW, textSize);
+		const textAngle = vertical ? 90 : 0;
+		const geometry = value ? computeStrokeTextGeometry(wrappedValue, textPos, textSize, textAngle, false, thickness, anchor) : null;
+		const { width: strokeWidth, type: strokeType } = typeof textBox.getStroke === 'function'
+			? textBox.getStroke()
+			: { width: 0, type: 'solid' as KicadStrokeLineType };
+		// KiCad's `(stroke (width 0))` on a text box means its effective
+		// default pen width, rather than an intentionally hidden border.
+		const effectiveStrokeWidth = strokeWidth || pinThickness;
+		const fillType = typeof textBox.getFill === 'function' ? textBox.getFill() : 'none';
+		const fillNode = textBox.findFirstChildByName?.('fill');
+		const fillColor = fillType === 'color'
+			? fillNode?.getColor?.() ?? schColors.componentBody
+			: fillType === 'background' ? schematicBackgroundColor : undefined;
+		const strokeNode = textBox.findFirstChildByName?.('stroke');
+		// KicadElementStroke.getColor() intentionally falls back to transparent
+		// when a color child is absent. For a text box that means “use the
+		// Notes-layer color”, not a transparent border.
+		const strokeColor = strokeNode?.findFirstChildByName?.('color')?.getColor?.() as string | undefined;
+		const id = textBox.getUuid?.() ?? `sch-text-box:${x},${y}`;
+		// Same hit-test contract as ordinary schematic rectangles: an unfilled
+		// text box is selectable by its border only, so it cannot steal clicks
+		// from symbols/wires visually inside it. A filled box remains an area.
+		const shape: PaintedShape = {
+			type: 'rect', x, y, w: width, h: height,
+			filled: fillType !== 'none', strokeWidth: effectiveStrokeWidth,
+		};
+		return {
+			id, layer: 'Graphics', kind: 'text', shape, bbox: shapeToBBox(shape), hitTestable: true, element: textBox,
+			defaultColor: schColors.note,
+			draw: (renderer, color) => {
+				if (fillColor) renderer.rect(new Vec2(x, y), width, height, { fillColor });
+				if (geometry) drawStrokeTextGeometry(renderer, geometry, color);
+				drawStrokeOutline(renderer, [
+					new Vec2(x, y), new Vec2(x + width, y), new Vec2(x + width, y + height), new Vec2(x, y + height), new Vec2(x, y),
+				], effectiveStrokeWidth, strokeType, strokeColor || color);
+			},
+		};
+	}
+
+	protected buildSymBezier(bezier: any, instanceMatrix: Matrix3, instanceId: string): SchPaintedItem | null {
+		const points: { x: number; y: number }[] = typeof bezier.getPoints === 'function' ? bezier.getPoints() : [];
+		if (points.length !== 4) {
+			return null;
+		}
+		const curve = cubicBezierToPolyline(
+			flippedTransform(instanceMatrix, points[0]!.x, points[0]!.y), flippedTransform(instanceMatrix, points[1]!.x, points[1]!.y),
+			flippedTransform(instanceMatrix, points[2]!.x, points[2]!.y), flippedTransform(instanceMatrix, points[3]!.x, points[3]!.y),
+		);
+		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
+		const drawWidth = width || 0.25;
+		const id = bezier.getUuid() ?? `sym-bezier:${ instanceId }:${ points[0]!.x },${ points[0]!.y }`;
+		const shape: PaintedShape = {
+			type: 'polygon', points: curve.map(p => ({ x: p.x, y: p.y })),
+			filled: false, closed: false, strokeWidth: drawWidth,
+		};
+		return {
+			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: bezier,
+			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color),
 		};
 	}
 
@@ -1865,7 +2073,14 @@ export class SchematicPainter {
 		items.push({
 			id: `${ id }:box`, layer: 'Sheets', kind: 'sheet', shape, bbox: shape, hitTestable: false, element: sheet,
 			draw: (renderer, color) => {
-				renderer.rect(new Vec2(x, y), w, h, { strokeColor: color, strokeWidth: 0.25 });
+				// wDark renders hierarchical-sheet interiors as an opaque near-black
+				// panel, distinct from the dark-gray schematic canvas. The color was
+				// already part of the theme table but was never passed to rect().
+				renderer.rect(new Vec2(x, y), w, h, {
+					fillColor: schColors.sheetBackground,
+					strokeColor: color,
+					strokeWidth: 0.25,
+				});
 			},
 		});
 
@@ -1948,6 +2163,145 @@ export class SchematicPainter {
 			}
 		}
 
+		return items;
+	}
+
+	// ---- Tables ----
+
+	/** Paint KiCad's root-level `(table ...)` object (KiCad 8+). */
+	protected buildTable(table: any): SchPaintedItem[] {
+		const cellsRoot = table.findFirstChildByName?.('cells');
+		const cells = cellsRoot?.findChildrenByName?.('table_cell') ?? [];
+		if (!cells.length) {
+			return [];
+		}
+		const numberChild = (el: any, name: string, fallback = 0): number => {
+			const value = el.findFirstChildByName?.(name)?.attributes?.[0]?.value;
+			const parsed = Number(value);
+			return Number.isFinite(parsed) ? parsed : fallback;
+		};
+		const yesChild = (el: any, name: string): boolean => {
+			const value = el.findFirstChildByName?.(name)?.attributes?.[0]?.value;
+			return value === true || value === 'yes';
+		};
+		const tableId = table.getUuid?.() ?? `table:${cells[0]!.getUuid?.() ?? 'anonymous'}`;
+		const columnCount = Math.max(1, Math.round(numberChild(table, 'column_count', 1)));
+		const border = table.findFirstChildByName?.('border');
+		const separators = table.findFirstChildByName?.('separators');
+		const strokeFor = (owner: any) => {
+			const stroke = owner?.findFirstChildByName?.('stroke');
+			const width = Number(stroke?.getWidth?.() ?? stroke?.findFirstChildByName?.('width')?.attributes?.[0]?.value);
+			const colorEl = stroke?.findFirstChildByName?.('color');
+			return {
+				width: Number.isFinite(width) && width > 0 ? width : pinThickness,
+				type: String(stroke?.getType?.() ?? stroke?.findFirstChildByName?.('type')?.attributes?.[0]?.value ?? 'solid') as KicadStrokeLineType,
+				color: colorEl?.getColor?.() as string | undefined,
+			};
+		};
+		const borderStroke = strokeFor(border);
+		const separatorStroke = strokeFor(separators);
+		const strokeColumns = yesChild(separators, 'cols');
+		const strokeRows = yesChild(separators, 'rows');
+		const strokeExternal = yesChild(border, 'external');
+		const strokeHeader = yesChild(border, 'header');
+
+		type TableCell = {
+			el: any; value: string; x: number; y: number; w: number; h: number;
+			col: number; row: number; colSpan: number; rowSpan: number;
+		};
+		const parsedCells: TableCell[] = cells.map((cell: any, index: number) => {
+			const at = cell.getOrigin?.() ?? cell.findFirstChildByName?.('at') ?? { x: 0, y: 0, rotation: 0 };
+			const size = cell.findFirstChildByName?.('size');
+			const span = cell.findFirstChildByName?.('span');
+			return {
+				el: cell,
+				value: String(cell.value ?? cell.attributes?.[0]?.value ?? ''),
+				x: Number(at.x) || 0,
+				y: Number(at.y) || 0,
+				w: Number(size?.width ?? size?.attributes?.[0]?.value) || 0,
+				h: Number(size?.height ?? size?.attributes?.[1]?.value) || 0,
+				col: index % columnCount,
+				row: Math.floor(index / columnCount),
+				colSpan: Math.max(0, Number(span?.attributes?.[0]?.value) || 1),
+				rowSpan: Math.max(0, Number(span?.attributes?.[1]?.value) || 1),
+			};
+		}).filter((cell: TableCell) => cell.colSpan > 0 && cell.rowSpan > 0 && cell.w > 0 && cell.h > 0);
+		if (!parsedCells.length) {
+			return [];
+		}
+
+		const minX = Math.min(...parsedCells.map(cell => cell.x));
+		const minY = Math.min(...parsedCells.map(cell => cell.y));
+		const maxX = Math.max(...parsedCells.map(cell => cell.x + cell.w));
+		const maxY = Math.max(...parsedCells.map(cell => cell.y + cell.h));
+		const bbox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+		const items: SchPaintedItem[] = [];
+
+		for (const cell of parsedCells) {
+			const margins = cell.el.findFirstChildByName?.('margins')?.attributes ?? [];
+			const margin = (index: number) => Number(margins[index]?.value) || 0;
+			const left = margin(0), right = margin(1), top = margin(2), bottom = margin(3);
+			const fill = cell.el.findFirstChildByName?.('fill');
+			const fillType = String(fill?.getType?.() ?? fill?.findFirstChildByName?.('type')?.attributes?.[0]?.value ?? 'none');
+			const colorEl = fill?.findFirstChildByName?.('color');
+			const fillColor = fillType === 'color'
+				? (colorEl?.getColor?.() ?? schColors.componentBody)
+				: fillType === 'background' ? schematicBackgroundColor : undefined;
+			if (fillColor) {
+				items.push({
+					id: `${tableId}:cell:${cell.el.getUuid?.() ?? `${cell.row},${cell.col}`}:fill`,
+					layer: 'Graphics', kind: 'table', shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
+					bbox: { x: cell.x, y: cell.y, w: cell.w, h: cell.h }, hitTestable: false, element: cell.el,
+					draw: renderer => renderer.rect(new Vec2(cell.x, cell.y), cell.w, cell.h, { fillColor }),
+				});
+			}
+			if (cell.value) {
+				const { size: textSize, thickness } = readElementFontMetrics(cell.el);
+				const anchor = readJustifyAnchor(cell.el);
+				const contentW = Math.max(0, cell.w - left - right);
+				const contentH = Math.max(0, cell.h - top - bottom);
+				const position = new Vec2(cell.x + left + anchor.x * contentW, cell.y + top + anchor.y * contentH);
+				const rotation = cell.el.getOrigin?.().rotation ?? 0;
+				const wrappedValue = wrapTableCellText(cell.value, contentW, textSize);
+				const geometry = computeStrokeTextGeometry(wrappedValue, position, textSize, rotation, false, thickness, anchor);
+				items.push({
+					id: `${tableId}:cell:${cell.el.getUuid?.() ?? `${cell.row},${cell.col}`}:text`,
+					layer: 'Graphics', kind: 'text', shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
+					bbox: { x: cell.x, y: cell.y, w: cell.w, h: cell.h }, hitTestable: false, element: cell.el,
+					defaultColor: schColors.note,
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+				});
+			}
+		}
+
+		const lines: Array<{ a: Vec2; b: Vec2; stroke: ReturnType<typeof strokeFor> }> = [];
+		const addLine = (a: Vec2, b: Vec2, stroke: ReturnType<typeof strokeFor>) => lines.push({ a, b, stroke });
+		const rowCount = Math.ceil(cells.length / columnCount);
+		for (const cell of parsedCells) {
+			if (cell.col + cell.colSpan < columnCount && (strokeColumns || (cell.row === 0 && strokeHeader))) {
+				addLine(new Vec2(cell.x + cell.w, cell.y), new Vec2(cell.x + cell.w, cell.y + cell.h), cell.row === 0 && strokeHeader ? borderStroke : separatorStroke);
+			}
+			if (cell.row + cell.rowSpan < rowCount && (strokeRows || (cell.row === 0 && strokeHeader))) {
+				addLine(new Vec2(cell.x, cell.y + cell.h), new Vec2(cell.x + cell.w, cell.y + cell.h), cell.row === 0 && strokeHeader ? borderStroke : separatorStroke);
+			}
+		}
+		if (strokeExternal) {
+			addLine(new Vec2(minX, minY), new Vec2(maxX, minY), borderStroke);
+			addLine(new Vec2(maxX, minY), new Vec2(maxX, maxY), borderStroke);
+			addLine(new Vec2(maxX, maxY), new Vec2(minX, maxY), borderStroke);
+			addLine(new Vec2(minX, maxY), new Vec2(minX, minY), borderStroke);
+		}
+		items.push({
+			id: `${tableId}:borders`, layer: 'Graphics', kind: 'table', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: table,
+			draw: (renderer, color) => {
+				for (const line of lines) {
+					const lineColor = line.stroke.color || color;
+					strokeDashedPolyline([line.a, line.b], line.stroke.width, line.stroke.type, segment =>
+						renderer.line(segment, { strokeColor: lineColor, strokeWidth: line.stroke.width }),
+					);
+				}
+			},
+		});
 		return items;
 	}
 
@@ -2203,6 +2557,97 @@ function drawStrokeOutline(renderer: Renderer, ring: Vec2[], width: number, line
 	});
 }
 
+/** Flattens a cubic Bézier using de Casteljau subdivision. Affine transforms
+ * preserve Bézier curves, so callers may pass either schematic-space or
+ * already-transformed symbol-space control points. */
+function cubicBezierToPolyline(start: Vec2, control1: Vec2, control2: Vec2, end: Vec2): Vec2[] {
+	const points = [start];
+	const midpoint = (a: Vec2, b: Vec2) => new Vec2((a.x + b.x) / 2, (a.y + b.y) / 2);
+	const flatten = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, depth: number): void => {
+		const flatness = Math.max(
+			distanceToSegment(b.x, b.y, a.x, a.y, d.x, d.y),
+			distanceToSegment(c.x, c.y, a.x, a.y, d.x, d.y),
+		);
+		if (depth >= 10 || flatness <= 0.05) {
+			points.push(d);
+			return;
+		}
+		const ab = midpoint(a, b), bc = midpoint(b, c), cd = midpoint(c, d);
+		const abc = midpoint(ab, bc), bcd = midpoint(bc, cd);
+		const split = midpoint(abc, bcd);
+		flatten(a, ab, abc, split, depth + 1);
+		flatten(split, bcd, cd, d, depth + 1);
+	};
+	flatten(start, control1, control2, end, 0);
+	return points;
+}
+
+/** Identifies the image formats KiCad embeds and reads their pixel extent
+ * without waiting for browser image decoding. This keeps hit testing and the
+ * initial fit-to-page correct even while the actual texture loads. */
+function embeddedImageInfo(data: string): { width: number; height: number; mimeType: string; ppi: number; legacyPpi: number } | null {
+	const byteAt = (index: number) => index < data.length ? data.charCodeAt(index) & 0xff : 0;
+	const be16 = (index: number) => (byteAt(index) << 8) | byteAt(index + 1);
+	const be32 = (index: number) => ((byteAt(index) * 0x1000000) + (byteAt(index + 1) << 16) + (byteAt(index + 2) << 8) + byteAt(index + 3)) >>> 0;
+	const le16 = (index: number) => byteAt(index) | (byteAt(index + 1) << 8);
+	// PNG signature + IHDR width/height. KiCad reads pHYs' pixels-per-meter
+	// metadata as pixels/cm, then rounds pixels/cm × 2.54 to integer PPI.
+	if (data.length >= 24 && byteAt(0) === 0x89 && byteAt(1) === 0x50 && byteAt(2) === 0x4e && byteAt(3) === 0x47) {
+		let ppi = 300;
+		let legacyPpi = 300;
+		let chunk = 8;
+		while (chunk + 12 <= data.length) {
+			const length = be32(chunk);
+			if (length > data.length - chunk - 12) break;
+			if (data.slice(chunk + 4, chunk + 8) === 'pHYs' && length >= 9 && byteAt(chunk + 8 + 8) === 1) {
+				const pixelsPerMeter = be32(chunk + 8);
+				const parsedPpi = Math.round((pixelsPerMeter / 100) * 2.54);
+				const parsedLegacyPpi = Math.round(Math.floor(pixelsPerMeter / 100) * 2.54);
+				if (parsedPpi > 1) ppi = parsedPpi;
+				if (parsedLegacyPpi > 1) legacyPpi = parsedLegacyPpi;
+				break;
+			}
+			chunk += length + 12;
+		}
+		return { width: be32(16), height: be32(20), mimeType: 'image/png', ppi, legacyPpi };
+	}
+	// GIF logical screen descriptor.
+	if (data.length >= 10 && data.slice(0, 3) === 'GIF') {
+		return { width: le16(6), height: le16(8), mimeType: 'image/gif', ppi: 300, legacyPpi: 300 };
+	}
+	// JPEG dimensions live in a Start Of Frame segment. Skip APP/comment
+	// sections until the first supported baseline/progressive SOF marker. A
+	// JFIF APP0 segment may also carry the physical pixel density that KiCad
+	// exposes as its image PPI.
+	if (data.length >= 4 && byteAt(0) === 0xff && byteAt(1) === 0xd8) {
+		let index = 2;
+		let ppi = 300;
+		while (index + 8 < data.length) {
+			if (byteAt(index) !== 0xff) {
+				index++;
+				continue;
+			}
+			while (byteAt(index) === 0xff) index++;
+			const marker = byteAt(index++);
+			if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+			const length = be16(index);
+			if (length < 2 || index + length > data.length) break;
+			const segmentData = index + 2;
+			if (marker === 0xe0 && length >= 14 && data.slice(segmentData, segmentData + 5) === 'JFIF\0') {
+				const unit = byteAt(segmentData + 7);
+				const density = be16(segmentData + 8);
+				const parsedPpi = unit === 1 ? density : unit === 2 ? Math.round(density * 2.54) : 0;
+				if (parsedPpi > 1) ppi = parsedPpi;
+			}
+			if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+				return { width: be16(index + 5), height: be16(index + 3), mimeType: 'image/jpeg', ppi, legacyPpi: ppi };
+			}
+			index += length;
+		}
+	}
+	return null;
+}
+
 // KiCad's SCH_TEXT::GetTextOffset ratio (DefaultValues.text_offset_ratio),
 // reused here for local net labels' wire clearance.
 const labelTextOffsetRatio = 0.15;
@@ -2252,6 +2697,55 @@ function textItem(id: string, layer: string, worldPos: Vec2, textSize: number, e
 		id, layer, kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element, defaultColor,
 		draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor),
 	};
+}
+
+/**
+ * KiCad table cells are text boxes: their text wraps to the usable cell width
+ * (after margins), unlike ordinary schematic text. Measure against the same
+ * stroke font used to paint the result so wrapping stays correct for narrow
+ * glyphs, wide glyphs, and escaped KiCad characters alike.
+ */
+function wrapTableCellText(value: string, maxWidthMm: number, textSizeMm: number): string {
+	if (!(maxWidthMm > 0) || !value) {
+		return value;
+	}
+	const fits = (text: string) => measureStrokeTextSize(text, textSizeMm).width <= maxWidthMm + 1e-6;
+	const lines: string[] = [];
+	for (const sourceLine of value.split('\n')) {
+		if (!sourceLine.trim()) {
+			lines.push('');
+			continue;
+		}
+		let line = '';
+		for (const word of sourceLine.trim().split(/\s+/)) {
+			const candidate = line ? `${line} ${word}` : word;
+			if (fits(candidate)) {
+				line = candidate;
+				continue;
+			}
+			if (line) {
+				lines.push(line);
+				line = '';
+			}
+			// KiCad also prevents a single unbroken token from overflowing a
+			// cell. Split it at glyph boundaries when there is no whitespace
+			// opportunity (URLs, reference designators, generated variables).
+			let fragment = '';
+			for (const char of Array.from(word)) {
+				const expanded = fragment + char;
+				if (fragment && !fits(expanded)) {
+					lines.push(fragment);
+					fragment = char;
+				}
+				else {
+					fragment = expanded;
+				}
+			}
+			line = fragment;
+		}
+		lines.push(line);
+	}
+	return lines.join('\n');
 }
 
 /** `(mirror x)` / `(mirror y)` has no registered @kicad-io class (confirmed
@@ -2643,6 +3137,8 @@ function colorForKind(kind: SchPaintedItem['kind']): string {
 		case 'pin': return schColors.pin;
 		case 'label': return schColors.labelLocal;
 		case 'sheet': return schColors.sheet;
+		case 'table': return schColors.note;
+		case 'image': return schColors.note;
 		case 'text': return schColors.reference;
 		case 'frame': return schColors.frame;
 		case 'dangling': return schColors.wire;
@@ -2653,13 +3149,13 @@ function colorForKind(kind: SchPaintedItem['kind']): string {
 // Lazily-resolved class registry — see the file-level comment for why this
 // doesn't need to (and shouldn't) hard-code an @kicad-io import path.
 let _Wire: any, _Bus: any, _BusEntry: any, _Junction: any, _NoConnect: any, _Symbol: any, _LibSymbols: any;
-let _GlobalLabel: any, _HierLabel: any, _Sheet: any, _Pin: any, _NetclassFlag: any, _RuleArea: any;
-let _Rect: any, _SymCircle: any, _SymArc: any, _Polyline: any, _At: any, _Size: any, _Text: any;
+let _GlobalLabel: any, _HierLabel: any, _Sheet: any, _Table: any, _Image: any, _Pin: any, _NetclassFlag: any, _RuleArea: any;
+let _Rect: any, _SymCircle: any, _SymArc: any, _Polyline: any, _Bezier: any, _At: any, _Size: any, _Text: any, _TextBox: any;
 
 export function registerSchematicIoClasses(classes: {
 	Wire?: any; Bus?: any; BusEntry?: any; Junction?: any; NoConnect?: any; Symbol?: any; LibSymbols?: any;
-	GlobalLabel?: any; HierLabel?: any; Sheet?: any; Pin?: any; NetclassFlag?: any; RuleArea?: any;
-	Rect?: any; SymCircle?: any; SymArc?: any; Polyline?: any; At?: any; Size?: any; Text?: any;
+	GlobalLabel?: any; HierLabel?: any; Sheet?: any; Table?: any; Image?: any; Pin?: any; NetclassFlag?: any; RuleArea?: any;
+	Rect?: any; SymCircle?: any; SymArc?: any; Polyline?: any; Bezier?: any; At?: any; Size?: any; Text?: any; TextBox?: any;
 }): void {
 	_Wire = classes.Wire;
 	_Bus = classes.Bus;
@@ -2671,6 +3167,8 @@ export function registerSchematicIoClasses(classes: {
 	_GlobalLabel = classes.GlobalLabel;
 	_HierLabel = classes.HierLabel;
 	_Sheet = classes.Sheet;
+	_Table = classes.Table;
+	_Image = classes.Image;
 	_Pin = classes.Pin;
 	_NetclassFlag = classes.NetclassFlag;
 	_RuleArea = classes.RuleArea;
@@ -2678,9 +3176,11 @@ export function registerSchematicIoClasses(classes: {
 	_SymCircle = classes.SymCircle;
 	_SymArc = classes.SymArc;
 	_Polyline = classes.Polyline;
+	_Bezier = classes.Bezier;
 	_At = classes.At;
 	_Size = classes.Size;
 	_Text = classes.Text;
+	_TextBox = classes.TextBox;
 }
 function getWireClass() { return _Wire; }
 function getBusClass() { return _Bus; }
@@ -2692,6 +3192,8 @@ function getLibSymbolsClass() { return _LibSymbols; }
 function getGlobalLabelClass() { return _GlobalLabel; }
 function getHierLabelClass() { return _HierLabel; }
 function getSheetClass() { return _Sheet; }
+function getTableClass() { return _Table; }
+function getImageClass() { return _Image; }
 function getPinClass() { return _Pin; }
 function getNetclassFlagClass() { return _NetclassFlag; }
 function getRuleAreaClass() { return _RuleArea; }
@@ -2699,6 +3201,8 @@ function getRectClass() { return _Rect; }
 function getSymCircleClass() { return _SymCircle; }
 function getSymArcClass() { return _SymArc; }
 function getPolylineClass() { return _Polyline; }
+function getBezierClass() { return _Bezier; }
 function getAtClass() { return _At; }
 function getSizeClass() { return _Size; }
 function getTextClass() { return _Text; }
+function getTextBoxClass() { return _TextBox; }

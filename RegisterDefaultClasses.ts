@@ -22,7 +22,7 @@ import { KicadElementGrLine, KicadElementGrRect, KicadElementFpLine, KicadElemen
 import { KicadElementGrArc, KicadElementFpArc }     from '@kicad-io/KicadElementArc';
 import { KicadElementGrCircle, KicadElementFpCircle }  from '@kicad-io/KicadElementCircle';
 import { KicadElementDimension } from '@kicad-io/KicadElementDimension';
-import { KicadElementGrText, KicadElementFpText, KicadElementText } from '@kicad-io/KicadElementText';
+import { KicadElementGrText, KicadElementFpText, KicadElementText, KicadElementTextBox } from '@kicad-io/KicadElementText';
 
 import { KicadElementWire }       from '@kicad-io/KicadElementWire';
 import { KicadElementBus, KicadElementBusEntry }        from '@kicad-io/KicadElementBus';
@@ -36,10 +36,12 @@ import { KicadElementSheet } from '@kicad-io/KicadElementSheet';
 import { KicadElementPin }   from '@kicad-io/KicadElementPin';
 import { KicadElementNetclassFlag } from '@kicad-io/KicadElementNetclassFlag';
 import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
+import { KicadElementTable } from '@kicad-io/KicadElementTable';
+import { KicadElementImage } from '@kicad-io/KicadElementImage';
 import { KicadElementRectangle } from '@kicad-io/KicadElementStartEnd';
 import { KicadElementCircle as KicadElementSymCircle } from '@kicad-io/KicadElementCircle';
 import { KicadElementArc as KicadElementSymArc }       from '@kicad-io/KicadElementArc';
-import { KicadElementPolyline } from '@kicad-io/KicadElementPolyline';
+import { KicadElementBezier, KicadElementPolyline } from '@kicad-io/KicadElementPolyline';
 import { KicadElementAt }   from '@kicad-io/KicadElementAt';
 import { KicadElementSize } from '@kicad-io/KicadElementSize';
 
@@ -88,13 +90,17 @@ export function registerDefaultKicadClasses(): void {
 		Pin: KicadElementPin,
 		NetclassFlag: KicadElementNetclassFlag,
 		RuleArea: KicadElementRuleArea,
+		Table: KicadElementTable,
+		Image: KicadElementImage,
 		Rect: KicadElementRectangle,
 		SymCircle: KicadElementSymCircle,
 		SymArc: KicadElementSymArc,
 		Polyline: KicadElementPolyline,
+		Bezier: KicadElementBezier,
 		At: KicadElementAt,
 		Size: KicadElementSize,
 		Text: KicadElementText,
+		TextBox: KicadElementTextBox,
 	});
 }
 

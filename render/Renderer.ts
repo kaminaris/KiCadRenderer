@@ -7,6 +7,13 @@ export interface RenderStyle {
 	fillColor?: string;
 }
 
+/** An image payload embedded directly in a KiCad schematic's `(data ...)`
+ * field. `data` is the decoded binary string supplied by kicad-io. */
+export interface EmbeddedImage {
+	data: string;
+	mimeType: string;
+}
+
 /**
  * Backend-agnostic drawing primitives. Keep this dumb — it should have no
  * notion of "footprint" or "symbol", only shapes. That split (dumb renderer +
@@ -22,6 +29,7 @@ export interface Renderer {
 	circle(center: Vec2, radius: number, style: RenderStyle): void;
 	arc(center: Vec2, radius: number, startAngleRad: number, endAngleRad: number, style: RenderStyle): void;
 	rect(topLeft: Vec2, width: number, height: number, style: RenderStyle): void;
+	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number): void;
 	/**
 	 * Multiple point rings filled as ONE path with the even-odd rule — needed
 	 * for glyph outlines (KiCad's text render_cache), where a letter like "G"
@@ -49,6 +57,9 @@ export interface Renderer {
 	 * WebGL equivalent.
 	 */
 	setOpacity?(opacity: number): void;
+
+	/** Called once an asynchronously decoded embedded image is ready. */
+	setImageLoadHandler?(handler: () => void): void;
 
 	/** World-to-clip-space (or world-to-screen, for Canvas2D) transform for
 	 * primitives drawn after this call. */

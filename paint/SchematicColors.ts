@@ -63,5 +63,5 @@ export const schColors = {
 // from file data. 'Frame' is last (drawn on top) — matches real KiCad
 // drawing the worksheet as the topmost overlay.
 export const schematicLayerOrder: string[] = [
-	'Sheets', 'RuleAreas', 'Graphics', 'Wires', 'Junctions', 'NoConnects', 'Symbols', 'Pins', 'Labels', 'Text', 'Frame', 'Dangling',
+	'Sheets', 'RuleAreas', 'Graphics', 'Images', 'Wires', 'Junctions', 'NoConnects', 'Symbols', 'Pins', 'Labels', 'Text', 'Frame', 'Dangling',
 ];

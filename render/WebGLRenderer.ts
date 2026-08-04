@@ -1,6 +1,6 @@
 import { Vec2 } from '../math/Vec2';
 import { Matrix3 } from '../math/Matrix3';
-import { Renderer, RenderStyle } from './Renderer';
+import { EmbeddedImage, Renderer, RenderStyle } from './Renderer';
 
 const vertexShaderSource = `
 	attribute vec2 aPosition;
@@ -22,6 +22,29 @@ const fragmentShaderSource = `
 	}
 `;
 
+const imageVertexShaderSource = `
+	attribute vec2 aPosition;
+	attribute vec2 aTexCoord;
+	uniform mat3 uMatrix;
+	varying vec2 vTexCoord;
+	void main() {
+		vec3 clip = uMatrix * vec3(aPosition, 1.0);
+		gl_Position = vec4(clip.xy, 0.0, 1.0);
+		vTexCoord = aTexCoord;
+	}
+`;
+
+const imageFragmentShaderSource = `
+	precision mediump float;
+	varying vec2 vTexCoord;
+	uniform sampler2D uTexture;
+	uniform float uOpacity;
+	void main() {
+		vec4 color = texture2D(uTexture, vTexCoord);
+		gl_FragColor = vec4(color.rgb * color.a * uOpacity, color.a * uOpacity);
+	}
+`;
+
 export interface CachedStencilJob {
 	fanPositionBuffer: WebGLBuffer;
 	fanVertexCount: number;
@@ -33,6 +56,25 @@ export interface RawStencilJob {
 	rings: Vec2[][];
 	color: [number, number, number, number];
 	minX: number; minY: number; maxX: number; maxY: number;
+}
+
+export interface CachedImageJob {
+	positionBuffer: WebGLBuffer;
+	texCoordBuffer: WebGLBuffer;
+	texture: WebGLTexture;
+	opacity: number;
+}
+
+export interface RawImageJob {
+	texture: WebGLTexture;
+	x: number; y: number; width: number; height: number;
+	opacity: number;
+}
+
+interface ImageRecord {
+	image: HTMLImageElement;
+	status: 'loading' | 'ready' | 'error';
+	texture?: WebGLTexture;
 }
 
 /**
@@ -78,6 +120,12 @@ export class WebGLRenderer implements Renderer {
 	protected matrixLocation: WebGLUniformLocation;
 	protected positionLocation: number;
 	protected colorLocation: number;
+	protected imageProgram: WebGLProgram;
+	protected imageMatrixLocation: WebGLUniformLocation;
+	protected imagePositionLocation: number;
+	protected imageTexCoordLocation: number;
+	protected imageTextureLocation: WebGLUniformLocation;
+	protected imageOpacityLocation: WebGLUniformLocation;
 
 	protected staticPositionBuffer: WebGLBuffer;
 	protected staticColorBuffer: WebGLBuffer;
@@ -90,7 +138,7 @@ export class WebGLRenderer implements Renderer {
 	// regardless of true paint order, since every stencil job got shoved to
 	// the end. Each command references a CONTIGUOUS vertex range of the one
 	// uploaded static buffer (regular) or a baked stencil job (even-odd).
-	protected staticCommands: ({ kind: 'regular'; start: number; count: number } | { kind: 'stencil'; job: CachedStencilJob })[] = [];
+	protected staticCommands: ({ kind: 'regular'; start: number; count: number } | { kind: 'stencil'; job: CachedStencilJob } | { kind: 'image'; job: CachedImageJob })[] = [];
 
 	protected dynamicPositionBuffer: WebGLBuffer;
 	protected dynamicColorBuffer: WebGLBuffer;
@@ -99,12 +147,14 @@ export class WebGLRenderer implements Renderer {
 	// the static and dynamic arrays depending on which build is active.
 	protected buildPositions: number[] = [];
 	protected buildColors: number[] = [];
-	protected buildCommands: ({ kind: 'regular'; start: number; count: number } | { kind: 'stencil'; job: RawStencilJob })[] = [];
+	protected buildCommands: ({ kind: 'regular'; start: number; count: number } | { kind: 'stencil'; job: RawStencilJob } | { kind: 'image'; job: RawImageJob })[] = [];
 	protected pendingRegularStart = 0;
 	protected buildingStatic = false;
 
 	protected currentOpacity = 1;
 	protected viewMatrix: Matrix3 = Matrix3.identity();
+	protected images = new Map<string, ImageRecord>();
+	protected imageLoadHandler: (() => void) | null = null;
 
 	constructor(canvas: HTMLCanvasElement) {
 		const gl = canvas.getContext('webgl', { stencil: true, antialias: true });
@@ -123,6 +173,16 @@ export class WebGLRenderer implements Renderer {
 			throw new Error(`WebGL program link failed: ${ gl.getProgramInfoLog(program) }`);
 		}
 		this.program = program;
+		const imageVs = this.compileShader(gl.VERTEX_SHADER, imageVertexShaderSource);
+		const imageFs = this.compileShader(gl.FRAGMENT_SHADER, imageFragmentShaderSource);
+		const imageProgram = gl.createProgram()!;
+		gl.attachShader(imageProgram, imageVs);
+		gl.attachShader(imageProgram, imageFs);
+		gl.linkProgram(imageProgram);
+		if (!gl.getProgramParameter(imageProgram, gl.LINK_STATUS)) {
+			throw new Error(`WebGL image program link failed: ${ gl.getProgramInfoLog(imageProgram) }`);
+		}
+		this.imageProgram = imageProgram;
 
 		this.staticPositionBuffer = gl.createBuffer()!;
 		this.staticColorBuffer = gl.createBuffer()!;
@@ -131,6 +191,11 @@ export class WebGLRenderer implements Renderer {
 		this.positionLocation = gl.getAttribLocation(program, 'aPosition');
 		this.colorLocation = gl.getAttribLocation(program, 'aColor');
 		this.matrixLocation = gl.getUniformLocation(program, 'uMatrix')!;
+		this.imagePositionLocation = gl.getAttribLocation(imageProgram, 'aPosition');
+		this.imageTexCoordLocation = gl.getAttribLocation(imageProgram, 'aTexCoord');
+		this.imageMatrixLocation = gl.getUniformLocation(imageProgram, 'uMatrix')!;
+		this.imageTextureLocation = gl.getUniformLocation(imageProgram, 'uTexture')!;
+		this.imageOpacityLocation = gl.getUniformLocation(imageProgram, 'uOpacity')!;
 
 		gl.enable(gl.BLEND);
 		gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -151,6 +216,10 @@ export class WebGLRenderer implements Renderer {
 
 	setOpacity(opacity: number): void {
 		this.currentOpacity = opacity;
+	}
+
+	setImageLoadHandler(handler: () => void): void {
+		this.imageLoadHandler = handler;
 	}
 
 	setViewMatrix(matrix: Matrix3): void {
@@ -201,9 +270,15 @@ export class WebGLRenderer implements Renderer {
 				gl.deleteBuffer(cmd.job.fanPositionBuffer);
 				gl.deleteBuffer(cmd.job.quadPositionBuffer);
 			}
+			else if (cmd.kind === 'image') {
+				gl.deleteBuffer(cmd.job.positionBuffer);
+				gl.deleteBuffer(cmd.job.texCoordBuffer);
+			}
 		}
 		this.staticCommands = this.buildCommands.map(cmd =>
-			cmd.kind === 'stencil' ? { kind: 'stencil', job: this.bakeStencilJob(cmd.job) } : cmd);
+			cmd.kind === 'stencil' ? { kind: 'stencil', job: this.bakeStencilJob(cmd.job) }
+				: cmd.kind === 'image' ? { kind: 'image', job: this.bakeImageJob(cmd.job) }
+					: cmd);
 
 		this.buildingStatic = false;
 		this.buildPositions.length = 0;
@@ -233,6 +308,21 @@ export class WebGLRenderer implements Renderer {
 		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad), gl.STATIC_DRAW);
 
 		return { fanPositionBuffer, fanVertexCount: fanPositions.length / 2, quadPositionBuffer, color: job.color };
+	}
+
+	protected bakeImageJob(job: RawImageJob): CachedImageJob {
+		const gl = this.gl;
+		const x1 = job.x + job.width, y1 = job.y + job.height;
+		const positions = [job.x, job.y, x1, job.y, x1, y1, job.x, job.y, x1, y1, job.x, y1];
+		// UNPACK_FLIP_Y_WEBGL makes v=0 correspond to the image's top row.
+		const texCoords = [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1];
+		const positionBuffer = gl.createBuffer()!;
+		gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+		const texCoordBuffer = gl.createBuffer()!;
+		gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texCoords), gl.STATIC_DRAW);
+		return { positionBuffer, texCoordBuffer, texture: job.texture, opacity: job.opacity };
 	}
 
 	/** Start accumulating per-frame content (the grid) into the DYNAMIC buffer. */
@@ -309,6 +399,56 @@ export class WebGLRenderer implements Renderer {
 		}
 	}
 
+	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number): void {
+		if (!this.buildingStatic || !(width > 0) || !(height > 0)) {
+			return;
+		}
+		const record = this.loadImage(image);
+		if (record.status !== 'ready') {
+			return;
+		}
+		const texture = record.texture ?? this.createTexture(record.image);
+		record.texture = texture;
+		// Keep image draw calls interleaved with regular vector geometry instead
+		// of drawing all textures in a final overlay pass.
+		this.flushPendingRegular();
+		this.buildCommands.push({ kind: 'image', job: { texture, x: topLeft.x, y: topLeft.y, width, height, opacity: this.currentOpacity } });
+	}
+
+	protected loadImage(source: EmbeddedImage): ImageRecord {
+		let record = this.images.get(source.data);
+		if (record) {
+			return record;
+		}
+		const image = new Image();
+		record = { image, status: 'loading' };
+		image.onload = () => {
+			record!.status = 'ready';
+			this.imageLoadHandler?.();
+		};
+		image.onerror = () => {
+			record!.status = 'error';
+			this.imageLoadHandler?.();
+		};
+		image.src = `data:${source.mimeType};base64,${btoa(source.data)}`;
+		this.images.set(source.data, record);
+		return record;
+	}
+
+	protected createTexture(image: HTMLImageElement): WebGLTexture {
+		const gl = this.gl;
+		const texture = gl.createTexture()!;
+		gl.bindTexture(gl.TEXTURE_2D, texture);
+		gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+		gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		return texture;
+	}
+
 	multiPolygon(rings: Vec2[][], style: RenderStyle): void {
 		const usableRings = rings.filter(r => r.length >= 3);
 		if (usableRings.length === 0) {
@@ -371,14 +511,19 @@ export class WebGLRenderer implements Renderer {
 			if (cmd.kind === 'regular') {
 				this.bindAndDraw(this.staticPositionBuffer, this.staticColorBuffer, cmd.start, cmd.count);
 			}
-			else {
+			else if (cmd.kind === 'stencil') {
 				this.drawCachedStencilJob(cmd.job);
+			}
+			else {
+				this.drawCachedImageJob(cmd.job);
 			}
 		}
 	}
 
 	protected bindAndDraw(positionBuffer: WebGLBuffer, colorBuffer: WebGLBuffer, first: number, vertexCount: number): void {
 		const gl = this.gl;
+		gl.useProgram(this.program);
+		gl.uniformMatrix3fv(this.matrixLocation, false, new Float32Array(this.viewMatrix.elements));
 		gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
 		gl.enableVertexAttribArray(this.positionLocation);
 		gl.vertexAttribPointer(this.positionLocation, 2, gl.FLOAT, false, 0, 0);
@@ -405,6 +550,8 @@ export class WebGLRenderer implements Renderer {
 	 */
 	protected drawCachedStencilJob(job: CachedStencilJob): void {
 		const gl = this.gl;
+		gl.useProgram(this.program);
+		gl.uniformMatrix3fv(this.matrixLocation, false, new Float32Array(this.viewMatrix.elements));
 		gl.clear(gl.STENCIL_BUFFER_BIT);
 		gl.enable(gl.STENCIL_TEST);
 
@@ -428,6 +575,23 @@ export class WebGLRenderer implements Renderer {
 		gl.drawArrays(gl.TRIANGLES, 0, 6);
 
 		gl.disable(gl.STENCIL_TEST);
+	}
+
+	protected drawCachedImageJob(job: CachedImageJob): void {
+		const gl = this.gl;
+		gl.useProgram(this.imageProgram);
+		gl.uniformMatrix3fv(this.imageMatrixLocation, false, new Float32Array(this.viewMatrix.elements));
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, job.texture);
+		gl.uniform1i(this.imageTextureLocation, 0);
+		gl.uniform1f(this.imageOpacityLocation, job.opacity);
+		gl.bindBuffer(gl.ARRAY_BUFFER, job.positionBuffer);
+		gl.enableVertexAttribArray(this.imagePositionLocation);
+		gl.vertexAttribPointer(this.imagePositionLocation, 2, gl.FLOAT, false, 0, 0);
+		gl.bindBuffer(gl.ARRAY_BUFFER, job.texCoordBuffer);
+		gl.enableVertexAttribArray(this.imageTexCoordLocation);
+		gl.vertexAttribPointer(this.imageTexCoordLocation, 2, gl.FLOAT, false, 0, 0);
+		gl.drawArrays(gl.TRIANGLES, 0, 6);
 	}
 
 	protected wantsStroke(style: RenderStyle): boolean {

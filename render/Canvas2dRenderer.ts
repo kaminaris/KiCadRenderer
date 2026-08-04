@@ -1,6 +1,6 @@
 import { Vec2 } from '../math/Vec2';
 import { Matrix3 } from '../math/Matrix3';
-import { Renderer, RenderStyle } from './Renderer';
+import { EmbeddedImage, Renderer, RenderStyle } from './Renderer';
 
 export interface FillBatch { path: Path2D; rule: CanvasFillRule; color: string }
 export interface StrokeBatch { path: Path2D; width: number; color: string }
@@ -31,11 +31,17 @@ export class Canvas2dRenderer implements Renderer {
 	protected batching = false;
 	protected fillBatches = new Map<string, FillBatch>();
 	protected strokeBatches = new Map<string, StrokeBatch>();
+	protected images = new Map<string, HTMLImageElement>();
+	protected imageLoadHandler: (() => void) | null = null;
 
 	constructor(protected ctx: CanvasRenderingContext2D) {}
 
 	setOpacity(opacity: number): void {
 		this.ctx.globalAlpha = opacity;
+	}
+
+	setImageLoadHandler(handler: () => void): void {
+		this.imageLoadHandler = handler;
 	}
 
 	setViewMatrix(matrix: Matrix3): void {
@@ -61,6 +67,13 @@ export class Canvas2dRenderer implements Renderer {
 	/** Commits every accumulated style bucket with one fill()/stroke() call each. */
 	endBatch(): void {
 		this.batching = false;
+		this.commitBatches();
+	}
+
+	/** Draw the currently accumulated vector paths without ending batch mode.
+	 * An image is an immediate Canvas operation, so this preserves exact paint
+	 * order when it appears between otherwise batched vector items. */
+	protected commitBatches(): void {
 		this.ctx.lineCap = 'round';
 		this.ctx.lineJoin = 'round';
 		for (const batch of this.fillBatches.values()) {
@@ -307,6 +320,24 @@ export class Canvas2dRenderer implements Renderer {
 		if (this.wantsStroke(style)) {
 			this.ctx.strokeRect(topLeft.x, topLeft.y, width, height);
 		}
+	}
+
+	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number): void {
+		let bitmap = this.images.get(image.data);
+		if (!bitmap) {
+			bitmap = new Image();
+			bitmap.onload = () => this.imageLoadHandler?.();
+			bitmap.onerror = () => this.imageLoadHandler?.();
+			bitmap.src = `data:${image.mimeType};base64,${btoa(image.data)}`;
+			this.images.set(image.data, bitmap);
+		}
+		if (!bitmap.complete || !bitmap.naturalWidth) {
+			return;
+		}
+		if (this.batching) {
+			this.commitBatches();
+		}
+		this.ctx.drawImage(bitmap, topLeft.x, topLeft.y, width, height);
 	}
 
 	protected appendRing(path: Path2D, points: Vec2[]): void {

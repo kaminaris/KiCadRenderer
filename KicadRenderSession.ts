@@ -17,7 +17,7 @@ import { KicadElementRectangle }       from '@kicad-io/KicadElementStartEnd';
 import { KicadElementCircle }          from '@kicad-io/KicadElementCircle';
 import { KicadElementArc }             from '@kicad-io/KicadElementArc';
 import { KicadElementPolyline }        from '@kicad-io/KicadElementPolyline';
-import { KicadElementText, KicadElementLabel } from '@kicad-io/KicadElementText';
+import { KicadElementText, KicadElementTextBox, KicadElementLabel } from '@kicad-io/KicadElementText';
 import { KicadElementGlobalLabel, type KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
 import { KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
 import { KicadElementNetclassFlag, type KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
@@ -68,6 +68,29 @@ export interface HitResult {
 	labelKind?: string;
 }
 
+export type ResizeHandle = 'nw' | 'n' | 'ne' | 'w' | 'center' | 'e' | 'sw' | 's' | 'se';
+
+/** The editable, axis-aligned bounds of a selected root-level rectangle or
+ * text box. These are deliberately separate from general hit bounds: the
+ * latter also cover symbols and every other painted item, none of which has
+ * the nine-handle resize contract. */
+export interface SelectionResizeBox {
+	id: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export type CurveAnchor = 'circle-center' | 'circle-radius' | 'arc-start' | 'arc-mid' | 'arc-end' | 'arc-center'
+	| 'bezier-start' | 'bezier-control-1' | 'bezier-control-2' | 'bezier-end';
+
+export interface SelectionCurveAnchors {
+	id: string;
+	kind: 'circle' | 'arc' | 'bezier';
+	anchors: { kind: CurveAnchor; x: number; y: number }[];
+}
+
 /**
  * Live, uncommitted state for the hand-drawn-editor's active tool — what's
  * been clicked so far plus the current cursor position. Drawn every frame by
@@ -84,6 +107,7 @@ export type EditPreviewState =
 	 *  [start, end] while dragging the mid-bulge (cursor = the mid point). */
 	| { kind: 'arc'; points: Vec2[]; cursor: Vec2 }
 	| { kind: 'text'; anchor: Vec2; text: string }
+	| { kind: 'text-box'; x: number; y: number; width: number; height: number; text: string }
 	| { kind: 'label'; anchor: Vec2; text: string; rotation: number }
 	| {
 		kind: 'global-label' | 'hier-label'; anchor: Vec2; text: string;
@@ -194,6 +218,13 @@ export class KicadRenderSession {
 			throw new Error('2D canvas context unavailable');
 		}
 		this.canvas2dRenderer = new Canvas2dRenderer(ctx);
+		const redrawAfterImageLoad = () => {
+			// WebGL keeps a static scene buffer, so a newly decoded texture needs
+			// a rebuild; Canvas2D harmlessly redraws the same scene on demand.
+			this.geometryDirty = true;
+			this.scheduleRender();
+		};
+		this.canvas2dRenderer.setImageLoadHandler(redrawAfterImageLoad);
 
 		let webglRenderer: WebGLRenderer | null = null;
 		if (canvasGl) {
@@ -208,6 +239,7 @@ export class KicadRenderSession {
 			}
 		}
 		this.webglRenderer = webglRenderer;
+		this.webglRenderer?.setImageLoadHandler(redrawAfterImageLoad);
 		this.backend = webglRenderer ? 'webgl' : 'canvas2d';
 	}
 
@@ -1112,6 +1144,87 @@ export class KicadRenderSession {
 		return this.attachToSchematicRoot(text);
 	}
 
+	getSelectionResizeBox(): SelectionResizeBox | null {
+		if (this.documentType !== 'schematic' || !this.selectedId || !this.schScene) {
+			return null;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === this.selectedId);
+		const el: any = item?.element;
+		if (!item || !el || (el.name !== 'rectangle' && el.name !== 'text_box')) {
+			return null;
+		}
+		const { x, y, w, h } = item.bbox;
+		return w > 0 && h > 0 ? { id: item.id, x, y, width: w, height: h } : null;
+	}
+
+	getSelectionCurveAnchors(): SelectionCurveAnchors | null {
+		if (this.documentType !== 'schematic' || !this.selectedId || !this.schScene) {
+			return null;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === this.selectedId);
+		const el: any = item?.element;
+		if (!item || !el) {
+			return null;
+		}
+		if (el.name === 'circle' && typeof el.getCenter === 'function' && typeof el.getRadius === 'function') {
+			const center = el.getCenter();
+			const radius = el.getRadius();
+			return {
+				id: item.id, kind: 'circle', anchors: [
+					{ kind: 'circle-center', x: center.x, y: center.y },
+					{ kind: 'circle-radius', x: center.x + radius, y: center.y },
+				],
+			};
+		}
+		if (el.name === 'arc' && typeof el.getStartMidEnd === 'function'
+			&& typeof el.getArcCenterRadiusAngles === 'function') {
+			try {
+				const { start, mid, end } = el.getStartMidEnd();
+				const geometry = el.getArcCenterRadiusAngles(false);
+				return {
+					id: item.id, kind: 'arc', anchors: [
+						{ kind: 'arc-start', x: start.x, y: start.y },
+						{ kind: 'arc-mid', x: mid.x, y: mid.y },
+						{ kind: 'arc-end', x: end.x, y: end.y },
+						{ kind: 'arc-center', x: geometry.centerX, y: geometry.centerY },
+					],
+				};
+			}
+			catch {
+				return null;
+			}
+		}
+		if (el.name === 'bezier' && typeof el.getPoints === 'function') {
+			const points = el.getPoints();
+			if (!Array.isArray(points) || points.length !== 4) return null;
+			const kinds: CurveAnchor[] = ['bezier-start', 'bezier-control-1', 'bezier-control-2', 'bezier-end'];
+			return {
+				id: item.id, kind: 'bezier',
+				anchors: points.map((point: { x: number; y: number }, index: number) => ({
+					kind: kinds[index]!, x: point.x, y: point.y,
+				})),
+			};
+		}
+		return null;
+	}
+
+	/** Creates a regular schematic `(text_box ...)` from two drag corners. */
+	addGraphicTextBox(x1: number, y1: number, x2: number, y2: number, value: string): string | null {
+		const width = Math.abs(x2 - x1);
+		const height = Math.abs(y2 - y1);
+		if (!(width > 0) || !(height > 0)) {
+			return null;
+		}
+		const textBox = new KicadElementTextBox(value);
+		textBox.setOrigin(Math.min(x1, x2), Math.min(y1, y2), 0);
+		textBox.setSize(width, height);
+		textBox.setFont(1.27, 1.27);
+		textBox.setJustify('left', 'top');
+		textBox.setStroke(0, 'solid');
+		textBox.setFill('none');
+		return this.attachToSchematicRoot(textBox);
+	}
+
 	/** Mirrors shared/kicad-layout/Place.ts's labelJustify(): 0 -> left, 180 ->
 	 *  right, vertical stubs (90/270) keep left — KiCad draws label text beside
 	 *  the wire regardless of stub direction. */
@@ -1326,6 +1439,113 @@ export class KicadRenderSession {
 		return true;
 	}
 
+	/** Resize one root-level rectangle or text box to normalized world bounds.
+	 * Like translateElementById(), this is a continuous-drag primitive: callers
+	 * push a single undo snapshot before the gesture, not for every mousemove. */
+	resizeElementBoundsById(id: string, x: number, y: number, width: number, height: number): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !(width > 0) || !(height > 0)) {
+			return false;
+		}
+		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
+		if (!el) {
+			return false;
+		}
+		if (el.name === 'rectangle' && typeof el.setStartEnd === 'function') {
+			el.setStartEnd(x, y, x + width, y + height);
+		}
+		else if (el.name === 'text_box' && typeof el.getOrigin === 'function'
+			&& typeof el.setOrigin === 'function' && typeof el.setSize === 'function') {
+			const origin = el.getOrigin();
+			el.setOrigin(x, y, origin.rotation ?? 0);
+			el.setSize(width, height);
+		}
+		else {
+			return false;
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** KiCad-style point-editor mutation for root circles/arcs. Arcs preserve
+	 * the other two defining points when dragging start/mid/end; their center
+	 * point translates the complete arc, matching KiCad's common arc-edit
+	 * mode. */
+	moveCurveAnchorById(id: string, anchor: CurveAnchor, x: number, y: number): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return false;
+		}
+		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
+		if (!el) {
+			return false;
+		}
+		if ((anchor === 'circle-center' || anchor === 'circle-radius') && el.name === 'circle') {
+			const center = el.getCenter?.();
+			if (!center) return false;
+			if (anchor === 'circle-center' && typeof el.setCenter === 'function') {
+				el.setCenter(x, y);
+			}
+			else if (anchor === 'circle-radius' && typeof el.setRadius === 'function') {
+				el.setRadius(Math.max(0.001, Math.hypot(x - center.x, y - center.y)));
+			}
+			else return false;
+		}
+		else if (anchor.startsWith('arc-') && el.name === 'arc' && typeof el.getStartMidEnd === 'function'
+			&& typeof el.setStartMidEnd === 'function') {
+			const { start, mid, end } = el.getStartMidEnd();
+			if (anchor === 'arc-start' || anchor === 'arc-mid' || anchor === 'arc-end') {
+				// KiCad's default KEEP_CENTER_ADJUST_ANGLE_RADIUS mode keeps the
+				// center.  Midpoint drags change only radius, while endpoint drags
+				// also adopt the cursor's angle for the dragged endpoint; the other
+				// endpoint is resized to the same radius.
+				if (typeof el.getArcCenterRadiusAngles !== 'function') return false;
+				let geometry: { centerX: number; centerY: number; radius: number };
+				try { geometry = el.getArcCenterRadiusAngles(false); }
+				catch { return false; }
+				const radius = Math.max(0.0254, Math.hypot(x - geometry.centerX, y - geometry.centerY));
+				const scale = radius / Math.max(geometry.radius, 1e-9);
+				const resize = (point: { x: number; y: number }) => ({
+					x: geometry.centerX + (point.x - geometry.centerX) * scale,
+					y: geometry.centerY + (point.y - geometry.centerY) * scale,
+				});
+				const cursorVector = { x: x - geometry.centerX, y: y - geometry.centerY };
+				const cursorLength = Math.hypot(cursorVector.x, cursorVector.y);
+				const cursorPoint = cursorLength > 1e-9
+					? { x: geometry.centerX + cursorVector.x * radius / cursorLength, y: geometry.centerY + cursorVector.y * radius / cursorLength }
+					: resize(anchor === 'arc-end' ? end : start);
+				const nextStart = anchor === 'arc-start' ? cursorPoint : resize(start);
+				const nextMid = resize(mid);
+				const nextEnd = anchor === 'arc-end' ? cursorPoint : resize(end);
+				el.setStartMidEnd(nextStart.x, nextStart.y, nextMid.x, nextMid.y, nextEnd.x, nextEnd.y);
+			}
+			else if (anchor === 'arc-center' && typeof el.getArcCenterRadiusAngles === 'function') {
+				let geometry: { centerX: number; centerY: number };
+				try { geometry = el.getArcCenterRadiusAngles(false); }
+				catch { return false; }
+				const dx = x - geometry.centerX;
+				const dy = y - geometry.centerY;
+				el.setStartMidEnd(start.x + dx, start.y + dy, mid.x + dx, mid.y + dy, end.x + dx, end.y + dy);
+			}
+			else return false;
+		}
+		else if (anchor.startsWith('bezier-') && el.name === 'bezier'
+			&& typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
+			const points = el.getPoints();
+			if (!Array.isArray(points) || points.length !== 4) return false;
+			const index = anchor === 'bezier-start' ? 0
+				: anchor === 'bezier-control-1' ? 1
+					: anchor === 'bezier-control-2' ? 2 : anchor === 'bezier-end' ? 3 : -1;
+			if (index < 0) return false;
+			const next = points.map((point: { x: number; y: number }, pointIndex: number) =>
+				pointIndex === index ? { x, y } : { x: point.x, y: point.y });
+			el.setPoints(next);
+		}
+		else {
+			return false;
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
 	/**
 	 * Rename an existing label's text in place — local labels/graphics text
 	 * have a plain settable `.value` (KicadElementTextBase), global/hier
@@ -1481,6 +1701,8 @@ export class KicadRenderSession {
 			// Always last — the hand-drawn editor's in-progress tool state draws
 			// on top of everything else, for both backends.
 			this.drawEditPreview(renderer);
+			this.drawSelectionResizeHandles(renderer);
+			this.drawSelectionCurveAnchors(renderer);
 			renderer.flush?.();
 
 			this.onRender?.(activeScene);
@@ -1491,11 +1713,16 @@ export class KicadRenderSession {
 		}
 	}
 
-	// Procedural — dots at a fixed world-space spacing across whatever the
-	// camera currently sees. Not document data, so it's recomputed cheaply
-	// every frame directly from the camera bbox rather than being part of
-	// the scene. Drawn through the Renderer interface (not raw ctx) so it
-	// works identically on both backends.
+	// Procedural — the grid is camera state, not document data, so it is
+	// recomputed every frame from the visible world rectangle. Drawn through
+	// Renderer rather than a raw Canvas context so Canvas2D and WebGL agree.
+	//
+	// This deliberately mirrors KiCad GAL's dot-grid rules (see
+	// common/gal/{cairo,opengl}/*_gal.cpp): retain the active grid until its
+	// screen pitch falls to 10 px, then show every tenth point; distinguish
+	// every tenth X/Y coordinate with a 2 px dimension. The old implementation
+	// used an arbitrary 200-column cap and ×2 steps, which made the grid change
+	// at unlike zoom levels and lost KiCad's major-dot rhythm.
 	protected drawGrid(renderer: Renderer): void {
 		const zoom = this.camera.zoom;
 		// zoom<=0 / NaN → singular view matrix → bbox is NaN and Vec2 throws.
@@ -1513,48 +1740,43 @@ export class KicadRenderSession {
 		if (![bbox.x, bbox.y, bbox.w, bbox.h].every(Number.isFinite) || bbox.w <= 0 || bbox.h <= 0) {
 			return;
 		}
-		// Coarsen spacing as you zoom out so the grid doesn't turn into
-		// visual noise (and doesn't force thousands of dot draws) at low zoom.
-		// Schematic: KiCad 50 mil (1.27 mm) — same as Circuit Design edit snap /
-		// FINE_GRID_MM. Board keeps 1 mm with coarser *5 steps.
+		// KiCad schematic's default grid is 50 mil / 1.27 mm. Pcbnew's
+		// default visible grid is 0.5 mm. Keep this active grid at all useful
+		// zoom levels; only the *visible representation* becomes coarser.
 		const schematic = this.documentType === 'schematic';
-		let spacing = schematic ? 1.27 : 1;
-		const coarsen = schematic ? 2 : 5;
-		let guard = 0;
-		while ((bbox.w / spacing) > 200 && guard++ < 32) {
-			spacing *= coarsen;
+		let spacing = schematic ? 1.27 : 0.5;
+		const gridTick = 10;
+		const minGridScreenSpacingPx = 10;
+		while (spacing * zoom <= minGridScreenSpacingPx) {
+			spacing *= gridTick;
 		}
-		// Screen-CONSTANT dot size regardless of zoom (r*zoom cancels the
-		// zoom out) — matches real KiCad's own grid, whose dot/cross size is
-		// likewise a small constant number of screen pixels, not a fixed
-		// world-space size (common/gal/gal_display_options.cpp's
-		// m_gridLineWidth default 1.0, confirmed in the user's local
-		// checkout). Previously 0.15 here — that made every dot exactly
-		// 0.15 SCREEN PIXELS in radius at ANY zoom, i.e. permanently
-		// sub-pixel and invisible; this was the actual "grid doesn't show"
-		// bug, not a WebGL cost concern (the loop/batching here was already
-		// written to be cheap on WebGL — capped dot count, plain rects
-		// instead of tessellated circles — see below).
-		const gridDotScreenRadiusPx = 1;
-		const r = gridDotScreenRadiusPx / zoom;
-		if (!Number.isFinite(r) || r <= 0) {
+		// KiCad grid points are rectangles, not circles. Keep a 2×2-device-px
+		// minor mark (rather than literal 1×1): a one-pixel WebGL quad can land
+		// between raster pixels and disappear entirely. This is the same
+		// screen-constant minimum used by the previous visible grid. Major dots
+		// double only along the corresponding major coordinate.
+		const minorDotScreenPx = 2;
+		const minorDotWorld = minorDotScreenPx / zoom;
+		if (!Number.isFinite(minorDotWorld) || minorDotWorld <= 0) {
 			return;
 		}
-		const startX = Math.floor(bbox.x / spacing) * spacing;
-		const startY = Math.floor(bbox.y / spacing) * spacing;
+		const startX = Math.round(bbox.x / spacing) - 1;
+		const endX = Math.round(bbox.x2 / spacing) + 1;
+		const startY = Math.round(bbox.y / spacing) - 1;
+		const endY = Math.round(bbox.y2 / spacing) + 1;
+		// WebGL uses premultiplied-alpha blending. The very low-opacity KiCad
+		// theme color that looked fine in the desktop renderer became almost
+		// indistinguishable from this viewer's dark background, so use a muted
+		// blue-gray with enough alpha to remain legible on the GPU canvas.
+		const gridColor = 'rgba(185, 198, 214, 0.30)';
 		renderer.beginBatch?.();
-		// Squares, not circles: a grid dot is a handful of pixels on
-		// screen, so a smooth circle is wasted precision — but more
-		// importantly, this loop can run up to ~200x200=40,000 times, and
-		// circle() tessellates a real N-gon (trig + several vertices) per
-		// call on the WebGL backend. A rect() is 2 triangles with no trig
-		// at all, and looks identical at this size.
-		let dots = 0;
-		const maxDots = 40_000;
-		for (let x = startX; x <= bbox.x2 && dots < maxDots; x += spacing) {
-			for (let y = startY; y <= bbox.y2 && dots < maxDots; y += spacing) {
-				renderer.rect(new Vec2(x - r, y - r), r * 2, r * 2, { fillColor: 'rgba(233, 230, 222, 0.15)' });
-				dots++;
+		for (let ix = startX; ix <= endX; ix++) {
+			const width = minorDotWorld * (ix % gridTick === 0 ? 2 : 1);
+			const x = ix * spacing;
+			for (let iy = startY; iy <= endY; iy++) {
+				const height = minorDotWorld * (iy % gridTick === 0 ? 2 : 1);
+				const y = iy * spacing;
+				renderer.rect(new Vec2(x - width / 2, y - height / 2), width, height, { fillColor: gridColor });
 			}
 		}
 		renderer.endBatch?.();
@@ -1652,6 +1874,16 @@ export class KicadRenderSession {
 				drawStrokeTextGeometry(renderer, geometry, color);
 				break;
 			}
+			case 'text-box': {
+				renderer.rect(new Vec2(p.x, p.y), p.width, p.height, { strokeColor: color, strokeWidth: 0.15 });
+				if (p.text) {
+					const geometry = computeStrokeTextGeometry(
+						p.text, new Vec2(p.x, p.y), 1.27, 0, false, 0.15, { x: 0, y: 0 }
+					);
+					drawStrokeTextGeometry(renderer, geometry, color);
+				}
+				break;
+			}
 			case 'label': {
 				if (!p.text) {
 					drawCrosshair(renderer, p.anchor, color);
@@ -1684,6 +1916,74 @@ export class KicadRenderSession {
 				renderer.circle(p.cursor, 0.6, { strokeColor: color, strokeWidth: 0.2 });
 				drawCrosshair(renderer, p.cursor, color);
 				break;
+		}
+	}
+
+	/** KiCad-style 3×3 resize affordance for the two selected root shapes that
+	 * have an axis-aligned editable box. Kept in the dynamic pass so handle
+	 * size remains constant in screen pixels while zooming. */
+	protected drawSelectionResizeHandles(renderer: Renderer): void {
+		const box = this.getSelectionResizeBox();
+		if (!box || !Number.isFinite(this.camera.zoom) || this.camera.zoom <= 0) {
+			return;
+		}
+		const x2 = box.x + box.width;
+		const y2 = box.y + box.height;
+		const cx = box.x + box.width / 2;
+		const cy = box.y + box.height / 2;
+		const color = '#ffcc00';
+		const deviceScale = window.devicePixelRatio || 1;
+		const lineWidth = deviceScale / this.camera.zoom;
+		const size = 7 * deviceScale / this.camera.zoom;
+		renderer.line([
+			new Vec2(box.x, box.y), new Vec2(x2, box.y), new Vec2(x2, y2), new Vec2(box.x, y2), new Vec2(box.x, box.y),
+		], { strokeColor: color, strokeWidth: lineWidth });
+		for (const point of [
+			new Vec2(box.x, box.y), new Vec2(cx, box.y), new Vec2(x2, box.y),
+			new Vec2(box.x, cy), new Vec2(cx, cy), new Vec2(x2, cy),
+			new Vec2(box.x, y2), new Vec2(cx, y2), new Vec2(x2, y2),
+		]) {
+			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
+				fillColor: color,
+				strokeColor: schematicBackgroundColor,
+				strokeWidth: lineWidth,
+			});
+		}
+	}
+
+	/** Mirrors KiCad's EDA_CIRCLE_POINT_EDIT_BEHAVIOR (center + radius) and
+	 * EDA_ARC_POINT_EDIT_BEHAVIOR (start/mid/end/center plus radial guides). */
+	protected drawSelectionCurveAnchors(renderer: Renderer): void {
+		const curve = this.getSelectionCurveAnchors();
+		if (!curve || !Number.isFinite(this.camera.zoom) || this.camera.zoom <= 0) {
+			return;
+		}
+		const color = '#ffcc00';
+		const deviceScale = window.devicePixelRatio || 1;
+		const lineWidth = deviceScale / this.camera.zoom;
+		const size = 7 * deviceScale / this.camera.zoom;
+		const byKind = new Map(curve.anchors.map(anchor => [anchor.kind, new Vec2(anchor.x, anchor.y)]));
+		if (curve.kind === 'arc') {
+			const center = byKind.get('arc-center')!;
+			const start = byKind.get('arc-start')!;
+			const end = byKind.get('arc-end')!;
+			renderer.line([center, start], { strokeColor: color, strokeWidth: lineWidth });
+			renderer.line([center, end], { strokeColor: color, strokeWidth: lineWidth });
+		}
+		else if (curve.kind === 'bezier') {
+			const start = byKind.get('bezier-start')!;
+			const control1 = byKind.get('bezier-control-1')!;
+			const control2 = byKind.get('bezier-control-2')!;
+			const end = byKind.get('bezier-end')!;
+			renderer.line([start, control1], { strokeColor: color, strokeWidth: lineWidth });
+			renderer.line([control2, end], { strokeColor: color, strokeWidth: lineWidth });
+		}
+		for (const point of byKind.values()) {
+			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
+				fillColor: color,
+				strokeColor: schematicBackgroundColor,
+				strokeWidth: lineWidth,
+			});
 		}
 	}
 }
