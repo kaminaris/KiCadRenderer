@@ -38,6 +38,26 @@ function dashLength(width: number): number {
 }
 
 /**
+ * A stroke width of 0 means "use KiCad's rendered default" — an established
+ * convention throughout this codebase (see buildWireLike's own comment),
+ * NOT a literal zero-width line. But dotLength/gapLength/dashLength above
+ * are all `ratio * width`, so a literal 0 here makes EVERY dash-pattern
+ * entry 0 — and strokeDashedSegment's while loop only advances by
+ * `min(pattern[i], remaining)` each iteration, so an all-zero pattern never
+ * advances at all, spinning forever (found via a real file: a schematic-
+ * level rectangle with `(stroke (width 0) (type dash))`, a common "dashed
+ * grouping box" annotation with no explicit width — hung the whole tab on
+ * load, not something that shows up in any small hand-built test fixture).
+ * Substituting the same 0.15mm default buildWireLike already uses keeps
+ * dash proportions sane for the default-width case; real KiCad does the
+ * equivalent by resolving a real pen width before ever calling its own
+ * (otherwise identical) GetDashLength/GetGapLength/GetDotLength formulas.
+ */
+function resolveDashWidth(width: number): number {
+	return width > 0 ? width : 0.15;
+}
+
+/**
  * Walks an already-ordered point chain (NOT auto-closed — pass a ring with
  * the start point repeated at the end for a closed shape) and invokes
  * `drawSegment` once per solid piece: one call for the whole chain when
@@ -70,6 +90,7 @@ function strokeDashedSegment(
 		return;
 	}
 	const dirVec = lineVec.multiply(1 / lineLen);
+	width = resolveDashWidth(width);
 
 	let pattern: number[];
 	switch (lineType) {
@@ -91,7 +112,14 @@ function strokeDashedSegment(
 	let drawnLen = 0;
 	let patternIndex = 0;
 	while (drawnLen < lineLen) {
-		const segLen = Math.min(pattern[patternIndex]!, lineLen - drawnLen);
+		let segLen = Math.min(pattern[patternIndex]!, lineLen - drawnLen);
+		// Belt-and-suspenders on top of resolveDashWidth() above: a 0-length
+		// pattern entry (any future formula change, a NaN width, ...) must
+		// never stall this loop — force forward progress rather than trust
+		// every possible pattern value to stay positive forever.
+		if (segLen <= 0) {
+			segLen = Math.min(lineLen * 0.01, lineLen - drawnLen);
+		}
 		// Even indices are the "on" pieces (dash/dot), odd indices are gaps.
 		if (patternIndex % 2 === 0 && segLen > 0) {
 			const segStart = start.add(dirVec.multiply(drawnLen));

@@ -34,6 +34,8 @@ import { KicadElementGlobalLabel }       from '@kicad-io/KicadElementGlobalLabel
 import { KicadElementHierarchicalLabel } from '@kicad-io/KicadElementHierarchicalLabel';
 import { KicadElementSheet } from '@kicad-io/KicadElementSheet';
 import { KicadElementPin }   from '@kicad-io/KicadElementPin';
+import { KicadElementNetclassFlag } from '@kicad-io/KicadElementNetclassFlag';
+import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
 import { KicadElementRectangle } from '@kicad-io/KicadElementStartEnd';
 import { KicadElementCircle as KicadElementSymCircle } from '@kicad-io/KicadElementCircle';
 import { KicadElementArc as KicadElementSymArc }       from '@kicad-io/KicadElementArc';
@@ -84,6 +86,8 @@ export function registerDefaultKicadClasses(): void {
 		HierLabel: KicadElementHierarchicalLabel,
 		Sheet: KicadElementSheet,
 		Pin: KicadElementPin,
+		NetclassFlag: KicadElementNetclassFlag,
+		RuleArea: KicadElementRuleArea,
 		Rect: KicadElementRectangle,
 		SymCircle: KicadElementSymCircle,
 		SymArc: KicadElementSymArc,

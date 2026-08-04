@@ -4,7 +4,7 @@ import { Matrix3 } from '../math/Matrix3';
 import { Renderer } from '../render/Renderer';
 import { schColors, schematicLayerOrder } from './SchematicColors';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry, measureStrokeTextSize } from './TextPaint';
-import { PaintedShape, shapeToBBox } from './PaintedShape';
+import { PaintedShape, shapeToBBox, distanceToSegment } from './PaintedShape';
 import { arcToPolyline, circleToRing, KicadStrokeLineType, strokeDashedPolyline } from './StrokeDash';
 import {
 	defaultWksItems, defaultWksSetup, expandWksTextVars, resolveWksAnchor, withinWksMargin, wksPaperSizes,
@@ -31,7 +31,7 @@ const pinTextMargin = 0.6096 * 0.15; // 24 mils * DefaultValues.text_offset_rati
 export interface SchPaintedItem {
 	id: string;
 	layer: string;
-	kind: 'wire' | 'bus' | 'junction' | 'no-connect' | 'symbol-graphic' | 'pin' | 'label' | 'sheet' | 'text' | 'frame' | 'symbol';
+	kind: 'wire' | 'bus' | 'junction' | 'no-connect' | 'symbol-graphic' | 'pin' | 'label' | 'sheet' | 'text' | 'frame' | 'symbol' | 'dangling';
 	shape: PaintedShape;
 	bbox: { x: number; y: number; w: number; h: number };
 	hitTestable: boolean;
@@ -182,6 +182,14 @@ export class SchematicPainter {
 		const root = schematic.rootElement;
 		const libSymbols = getLibSymbolsClass() ? root.findFirstChildByClass(getLibSymbolsClass()) : null;
 
+		if (getRuleAreaClass()) {
+			for (const ruleArea of root.findChildrenByClass(getRuleAreaClass())) {
+				const item = this.buildRuleArea(ruleArea);
+				if (item) {
+					pushItem(item);
+				}
+			}
+		}
 		if (getWireClass()) {
 			for (const wire of root.findChildrenByClass(getWireClass())) {
 				const item = this.buildWireLike(wire, 'Wires', schColors.wire);
@@ -288,6 +296,13 @@ export class SchematicPainter {
 				pushItem(item);
 			}
 		}
+		if (getNetclassFlagClass()) {
+			for (const flag of root.findChildrenByClass(getNetclassFlagClass())) {
+				for (const item of this.buildNetclassFlag(flag)) {
+					pushItem(item);
+				}
+			}
+		}
 		const sheets: SchematicSheetRef[] = [];
 		if (getSheetClass()) {
 			for (const sheet of root.findChildrenByClass(getSheetClass())) {
@@ -305,6 +320,12 @@ export class SchematicPainter {
 			for (const item of this.buildDrawingSheet(root, docInfo)) {
 				pushItem(item);
 			}
+		}
+
+		// Must run last — reads the fully-populated Wires/Pins/Junctions/
+		// NoConnects/Labels buckets to find point coincidences.
+		for (const item of this.buildDanglingFlags(layerBuckets)) {
+			pushItem(item);
 		}
 
 		const layersPresent = schematicLayerOrder.filter(l => layerBuckets.has(l));
@@ -546,7 +567,7 @@ export class SchematicPainter {
 		const id = entry.getUuid?.() ?? `bus_entry:${ x1 },${ y1 }`;
 		const shape: PaintedShape = { type: 'segment', x1, y1, x2, y2, width };
 		return {
-			id, layer: 'Wires', kind: 'wire', shape, bbox: shapeToBBox(shape), hitTestable: false, element: entry,
+			id, layer: 'Wires', kind: 'wire', shape, bbox: shapeToBBox(shape), hitTestable: true, element: entry,
 			draw: (renderer, color) => {
 				renderer.line([new Vec2(x1, y1), new Vec2(x2, y2)], { strokeColor: color, strokeWidth: width });
 			},
@@ -602,9 +623,18 @@ export class SchematicPainter {
 		const { width, type: lineType } = typeof rect.getStroke === 'function' ? rect.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof rect.getFill === 'function' ? rect.getFill() : 'none';
 		const id = rect.getUuid() ?? `sch-rect:${ start.x },${ start.y }`;
-		const shape: PaintedShape = { type: 'polygon', points: corners.map(p => ({ x: p.x, y: p.y })) };
+		// filled/closed/strokeWidth drive shapeContainsPoint's edge-only hit
+		// test for an unfilled rect (see PaintedShape.ts) — without this an
+		// unfilled "group these parts" annotation box permanently steals
+		// clicks from anything visually inside it, which is exactly the bug
+		// this fixes (real KiCad hit-tests only the 4 edges for an unfilled
+		// rectangle too — EDA_SHAPE::hitTest's SHAPE_T::RECTANGLE case).
+		const shape: PaintedShape = {
+			type: 'polygon', points: corners.map(p => ({ x: p.x, y: p.y })),
+			filled: fillType !== 'none', closed: true, strokeWidth: width,
+		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: rect,
+			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: rect,
 			defaultColor: schColors.graphic,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
@@ -622,9 +652,11 @@ export class SchematicPainter {
 		const { width, type: lineType } = typeof circle.getStroke === 'function' ? circle.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof circle.getFill === 'function' ? circle.getFill() : 'none';
 		const id = circle.getUuid() ?? `sch-circle:${ center.x },${ center.y }`;
-		const shape: PaintedShape = { type: 'circle', cx: center.x, cy: center.y, r: radius };
+		const shape: PaintedShape = {
+			type: 'circle', cx: center.x, cy: center.y, r: radius, filled: fillType !== 'none', strokeWidth: width,
+		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: circle,
+			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: circle,
 			defaultColor: schColors.graphic,
 			draw: (renderer, color) => {
 				const worldCenter = new Vec2(center.x, center.y);
@@ -658,7 +690,7 @@ export class SchematicPainter {
 		const id = arc.getUuid() ?? `sch-arc:${ local.centerX },${ local.centerY }`;
 		const shape: PaintedShape = { type: 'circle', cx: local.centerX, cy: local.centerY, r: local.radius };
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
 			defaultColor: schColors.graphic,
 			draw: (renderer, color) => {
 				const worldCenter = new Vec2(local.centerX, local.centerY);
@@ -680,25 +712,84 @@ export class SchematicPainter {
 		};
 	}
 
-	protected buildSchPolyline(poly: any): SchPaintedItem {
+	/**
+	 * `forceClosed` is for callers whose shape is closed BY TYPE regardless
+	 * of whether the file's own point list happens to repeat the first
+	 * point (rule areas — SHAPE_T::POLY in real KiCad, always a closed
+	 * ring) — a generic standalone polyline (the ordinary case, no
+	 * `forceClosed`) can legitimately be open (an arrow, a signal-path
+	 * annotation, …), so that case still only closes when the file's own
+	 * points already do. Only affects the STROKE pass — `worldPoints`
+	 * (used for the fill/hit-test shape) is never mutated, since a repeated
+	 * point isn't needed for either of those to be "closed" geometrically.
+	 */
+	protected buildSchPolyline(poly: any, forceClosed = false): SchPaintedItem {
 		const points: { x: number; y: number }[] = typeof poly.getPoints === 'function' ? poly.getPoints() : [];
 		const worldPoints = points.map(p => new Vec2(p.x, p.y));
 		const { width, type: lineType } = typeof poly.getStroke === 'function' ? poly.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof poly.getFill === 'function' ? poly.getFill() : 'none';
 		const first = points[0], last = points[points.length - 1];
 		const id = poly.getUuid() ?? `sch-poly:${ first?.x },${ first?.y }`;
-		const shape: PaintedShape = { type: 'polygon', points: worldPoints.map(p => ({ x: p.x, y: p.y })) };
-		const closed = points.length > 2 && first && last && first.x === last.x && first.y === last.y;
+		const alreadyClosed = points.length > 2 && first && last && first.x === last.x && first.y === last.y;
+		const closed = forceClosed || alreadyClosed;
+		const strokePoints = (forceClosed && !alreadyClosed && worldPoints.length > 1)
+			? [...worldPoints, worldPoints[0]!]
+			: worldPoints;
+		// filled/closed/strokeWidth drive shapeContainsPoint's edge-only hit
+		// test for an unfilled polyline (see PaintedShape.ts and buildSchRect's
+		// matching comment) — `closed` reuses the SAME value the fill/stroke
+		// decision above already uses, so a shape that's visually treated as
+		// closed also gets its wrap-around edge included in the hit-test.
+		const shape: PaintedShape = {
+			type: 'polygon', points: worldPoints.map(p => ({ x: p.x, y: p.y })),
+			filled: fillType !== 'none', closed, strokeWidth: width,
+		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: poly,
+			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: poly,
 			defaultColor: schColors.graphic,
 			draw: (renderer, color) => {
 				const fillColor = closed ? symbolFillColor(fillType, color) : undefined;
 				if (fillColor) {
 					renderer.polygon(worldPoints, { fillColor });
 				}
-				drawStrokeOutline(renderer, worldPoints, width, lineType, color);
+				drawStrokeOutline(renderer, strokePoints, width, lineType, color);
 			},
+		};
+	}
+
+	/**
+	 * Rule areas (KiCad 10, multichannel design matching / netclass-by-
+	 * region annotation) — confirmed in the user's local KiCad checkout
+	 * (eeschema/sch_rule_area.h/.cpp): SCH_RULE_AREA extends SCH_SHAPE
+	 * (SHAPE_T::POLY) and is drawn through the EXACT same generic shape-draw
+	 * path as any other polyline (sch_painter.cpp's `case SCH_RULE_AREA_T:
+	 * draw(static_cast<const SCH_SHAPE*>(aItem), ...)`), just on its own
+	 * LAYER_RULE_AREAS color. No separate rendering logic to port — this
+	 * delegates straight to buildSchPolyline() (which already handles
+	 * fill/dash-stroke correctly, including the width:0 dash fix above) and
+	 * only overrides layer/color/id/element. The DNP/exclude-from-sim/BOM/
+	 * board flags and the dynamic "which directive labels are attached to
+	 * this border" relationship (computed geometrically by real KiCad, not
+	 * stored in the file) don't affect the visual outline itself, so aren't
+	 * modeled here — this is deliberately outline-only, matching what
+	 * "since rule areas aren't rendering" actually needed.
+	 */
+	protected buildRuleArea(ruleArea: any): SchPaintedItem | null {
+		const polyline = typeof ruleArea.getPolyline === 'function' ? ruleArea.getPolyline() : null;
+		if (!polyline) {
+			return null;
+		}
+		const base = this.buildSchPolyline(polyline, true);
+		const id = polyline.getUuid() ?? base.id;
+		// Real KiCad's SCH_RULE_AREA::IsFilledForHitTesting() always returns
+		// false regardless of the shape's own fill state (confirmed in the
+		// user's local checkout) — a rule area is a permeable region marker,
+		// never meant to be solid-clickable even in some hypothetical filled
+		// state. Force it explicitly rather than relying on rule areas
+		// happening to always be unfilled in every file seen so far.
+		const shape: PaintedShape = base.shape.type === 'polygon' ? { ...base.shape, filled: false } : base.shape;
+		return {
+			...base, id, shape, layer: 'RuleAreas', defaultColor: schColors.ruleArea, element: ruleArea,
 		};
 	}
 
@@ -722,7 +813,7 @@ export class SchematicPainter {
 		const id = text.getUuid() ?? `sch-text:${ origin.x },${ origin.y }`;
 		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
 		return {
-			id, layer: 'Text', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: text,
+			id, layer: 'Text', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: text,
 			defaultColor: schColors.note,
 			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 		};
@@ -1201,12 +1292,29 @@ export class SchematicPainter {
 		const origin = pin.getOrigin();
 		const length = typeof pin.getLength === 'function' ? pin.getLength() : 2.54;
 		const isHidden = typeof pin.isHidden === 'function' ? pin.isHidden() : false;
+		const worldOuter = flippedTransform(instanceMatrix, origin.x, origin.y);
+		const id = pin.getUuid() ?? `pin:${ instanceId }:${ origin.x },${ origin.y }`;
+
 		if (isHidden) {
+			// Hidden is a DRAWING preference (KiCad's own "show hidden pins"
+			// toggle) — the pin is still electrically real, most commonly on
+			// power symbols (GND/VCC/...), where a wire landing exactly on
+			// this point is the single most common non-dangling connection
+			// in a typical schematic. Without this, buildDanglingFlags()
+			// would never see this point as occupied (it only reads back
+			// already-built paint items, not the AST) and would wrongly flag
+			// every wire touching a power symbol as dangling. A zero-length,
+			// invisible, non-hit-testable segment is enough to carry the
+			// position through — nothing else consumes the 'Pins' bucket.
+			const shape: PaintedShape = { type: 'segment', x1: worldOuter.x, y1: worldOuter.y, x2: worldOuter.x, y2: worldOuter.y, width: 0 };
+			items.push({
+				id, layer: 'Pins', kind: 'pin', shape, bbox: shapeToBBox(shape), hitTestable: false, element: pin,
+				draw: () => {},
+			});
 			return items;
 		}
 
 		const localDir = Angle.fromDegrees(-(origin.rotation ?? 0)).rotatePoint(new Vec2(1, 0), new Vec2(0, 0));
-		const worldOuter = flippedTransform(instanceMatrix, origin.x, origin.y);
 		const worldDirPoint = flippedTransform(instanceMatrix, origin.x + localDir.x, origin.y + localDir.y);
 		const dx = worldDirPoint.x - worldOuter.x, dy = worldDirPoint.y - worldOuter.y;
 		const dirLen = Math.hypot(dx, dy) || 1;
@@ -1214,7 +1322,6 @@ export class SchematicPainter {
 		const worldInner = new Vec2(worldOuter.x + ux * length, worldOuter.y + uy * length);
 
 		const width = 0.15;
-		const id = pin.getUuid() ?? `pin:${ instanceId }:${ origin.x },${ origin.y }`;
 
 		// Pin electrical-type/shape decorations (inverted bubble, clock
 		// triangle, low-input/output tri, non-logic X, no-connect X) — ports
@@ -1397,7 +1504,13 @@ export class SchematicPainter {
 	 * read generically: attributes[0] is the label text, an `(at ...)`
 	 * child still parses as a real KicadElementAt regardless. */
 	protected buildLocalLabel(label: any): SchPaintedItem | null {
-		const name = label.attributes?.[0]?.value as string | undefined;
+		// KicadElementLabel (typed class) moves its text into .value at parse
+		// time, clearing .attributes — attributes[0] only ever held the raw
+		// text back when local labels fell through to a generic, untyped
+		// KicadElement (pre-typed-class gap). Check .value first.
+		const name = (typeof label.value === 'string' && label.value)
+			? label.value
+			: label.attributes?.[0]?.value as string | undefined;
 		if (!name) {
 			return null;
 		}
@@ -1418,7 +1531,15 @@ export class SchematicPainter {
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = readJustifyAnchor(label);
 		const geometry = computeStrokeTextGeometry(name, worldPos, textSize, textAngle, false, undefined, anchor);
-		const id = `local-label:${ x },${ y }:${ name }`;
+		// getUuid() (not an x/y/name-derived id) — matches every other
+		// builder's convention, and is load-bearing here specifically:
+		// translateElementById's caller (main.ts's drag loop) holds onto the
+		// id for the whole gesture, but an x/y-derived id would change on
+		// every intermediate scene rebuild as the label moves, breaking the
+		// hit-test lookup after the first mousemove step.
+		const id = typeof label.getUuid === 'function' && label.getUuid()
+			? label.getUuid()
+			: `local-label:${ x },${ y }:${ name }`;
 		const bbox = { x: worldPos.x - textSize * 3, y: worldPos.y - textSize, w: textSize * 6, h: textSize * 2 };
 		return {
 			id, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: label,
@@ -1521,7 +1642,8 @@ export class SchematicPainter {
 		const anchor = readJustifyAnchor(label);
 		const id = label.getUuid() ?? `hlabel:${ origin.x },${ origin.y }`;
 		return this.buildHierLabelShape(
-			id, name, new Vec2(origin.x, origin.y), rotation, shape, textSize, thickness, anchor.x, label, schColors.labelHier
+			id, name, new Vec2(origin.x, origin.y), rotation, shape, textSize, thickness, anchor.x, label, schColors.labelHier,
+			true
 		);
 	}
 
@@ -1548,7 +1670,12 @@ export class SchematicPainter {
 	 */
 	protected buildHierLabelShape(
 		id: string, text: string, worldOrigin: Vec2, rotation: number, shape: string,
-		textSize: number, thickness: number, hAlign: number, element: any, color: string
+		textSize: number, thickness: number, hAlign: number, element: any, color: string,
+		/** True for a real, standalone hierarchical_label (selectable, like a
+		 *  global label's own flag). False for buildSheet()'s sheet-pin reuse
+		 *  of this same shape — a sheet pin isn't independently selectable
+		 *  apart from the sheet itself. */
+		flagHitTestable = false
 	): SchPaintedItem[] {
 		const items: SchPaintedItem[] = [];
 		// KiCad's own formula (text_offset_ratio * size + size, ~0.19mm of
@@ -1607,9 +1734,110 @@ export class SchematicPainter {
 		const flagShape: PaintedShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
-			hitTestable: false, element, defaultColor: color,
+			hitTestable: flagHitTestable, element, defaultColor: color,
+			labelName: flagHitTestable ? text : undefined, labelKind: flagHitTestable ? 'hier' : undefined,
 			draw: (renderer, drawColor) => renderer.line(worldPts, { strokeColor: drawColor, strokeWidth: thickness || 0.15 }),
 		});
+		return items;
+	}
+
+	/**
+	 * Directive Label — UI/class name for the `netclass_flag` tag (see
+	 * KicadElementNetclassFlag's doc comment). Ports
+	 * SCH_DIRECTIVE_LABEL::CreateGraphicShape + SCH_PAINTER::
+	 * draw(SCH_DIRECTIVE_LABEL*, ...) from the user's local KiCad checkout:
+	 * a short pole from the anchor point to a small glyph at its tip —
+	 * hollow circle (round), filled circle (dot), diamond outline, or
+	 * rectangle outline, picked by `shape`. Visible properties (Netclass,
+	 * and potentially a "Component Class" or other future ones) render as
+	 * separate text items, same pattern as buildSheet()'s property loop
+	 * below — reused rather than duplicated apart from the sheet-specific
+	 * Sheetname/Sheetfile anchor hardcoding, which doesn't apply here.
+	 */
+	protected buildNetclassFlag(flag: any): SchPaintedItem[] {
+		const items: SchPaintedItem[] = [];
+		const origin = flag.getOrigin();
+		const rotation = origin.rotation ?? 0;
+		const shape: string = typeof flag.getShape === 'function' ? flag.getShape() : 'round';
+		const pinLength = typeof flag.getPinLength === 'function' ? flag.getPinLength() : 2.54;
+		const worldOrigin = new Vec2(origin.x, origin.y);
+		const id = flag.getUuid() ?? `netclass_flag:${ origin.x },${ origin.y }`;
+
+		// File rotation (0/90/180/270) -> SPIN_STYLE (RIGHT/UP/LEFT/BOTTOM,
+		// per the parser's parseSchText T_at case) -> degrees applied to the
+		// shape's own LEFT-pointing local template — ported directly from
+		// CreateGraphicShape's spin-style switch (LEFT: no rotation, UP: -90,
+		// RIGHT: 180, BOTTOM: +90).
+		const shapeRotation = rotation === 0 ? 180 : rotation === 90 ? 270 : rotation === 180 ? 0 : 90;
+		const toWorld = (p: { x: number; y: number }): Vec2 => {
+			const r = rotateLocalPoint(p, shapeRotation);
+			return new Vec2(r.x + worldOrigin.x, r.y + worldOrigin.y);
+		};
+
+		const baseSize = 0.508; // m_symbolSize — eeschema's MilsToIU(20), a fixed constant (no file field for it)
+		const width = 0.15;
+		let hitShape: PaintedShape;
+		let draw: (renderer: Renderer, color: string) => void;
+
+		if (shape === 'round' || shape === 'dot') {
+			const symbolSize = shape === 'dot' ? baseSize * 0.7 : baseSize;
+			const lineStart = toWorld({ x: 0, y: 0 });
+			const lineEnd = toWorld({ x: 0, y: pinLength - symbolSize });
+			const circleCenter = toWorld({ x: 0, y: pinLength });
+			hitShape = { type: 'circle', cx: circleCenter.x, cy: circleCenter.y, r: symbolSize };
+			draw = (renderer, color) => {
+				renderer.line([lineStart, lineEnd], { strokeColor: color, strokeWidth: width });
+				if (shape === 'dot') {
+					renderer.circle(circleCenter, symbolSize, { fillColor: color });
+				}
+				else {
+					renderer.circle(circleCenter, symbolSize, { strokeColor: color, strokeWidth: width });
+				}
+			};
+		}
+		else {
+			const symbolSize = shape === 'rectangle' ? baseSize * 0.8 : baseSize;
+			const localPts = shape === 'diamond'
+				? [
+					{ x: 0, y: 0 }, { x: 0, y: pinLength - symbolSize }, { x: -2 * symbolSize, y: pinLength },
+					{ x: 0, y: pinLength + symbolSize }, { x: 2 * symbolSize, y: pinLength },
+					{ x: 0, y: pinLength - symbolSize }, { x: 0, y: 0 },
+				]
+				: [
+					{ x: 0, y: 0 }, { x: 0, y: pinLength - symbolSize }, { x: -2 * symbolSize, y: pinLength - symbolSize },
+					{ x: -2 * symbolSize, y: pinLength + symbolSize }, { x: 2 * symbolSize, y: pinLength + symbolSize },
+					{ x: 2 * symbolSize, y: pinLength - symbolSize }, { x: 0, y: pinLength - symbolSize }, { x: 0, y: 0 },
+				];
+			const worldPts = localPts.map(toWorld);
+			hitShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
+			draw = (renderer, color) => renderer.line(worldPts, { strokeColor: color, strokeWidth: width });
+		}
+
+		items.push({
+			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: hitShape, bbox: shapeToBBox(hitShape),
+			hitTestable: true, element: flag, labelKind: 'directive', defaultColor: schColors.labelDirective, draw,
+		});
+
+		if (typeof flag.getProperties === 'function') {
+			for (const prop of flag.getProperties()) {
+				const value: string | undefined = prop.propertyValue;
+				if (!value || (typeof prop.isHidden === 'function' && prop.isHidden())) {
+					continue;
+				}
+				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x: origin.x, y: origin.y, rotation: 0 };
+				const worldPos = new Vec2(propOrigin.x, propOrigin.y);
+				const { size: textSize } = readElementFontMetrics(prop);
+				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0, y: 1 };
+				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, undefined, anchor);
+				const bbox = { x: worldPos.x - textSize * 3, y: worldPos.y - textSize, w: textSize * 6, h: textSize * 2 };
+				items.push({
+					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
+					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: flag,
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+				});
+			}
+		}
+
 		return items;
 	}
 
@@ -1716,6 +1944,192 @@ export class SchematicPainter {
 
 		return items;
 	}
+
+	// ---- Dangling-end indicators (unconnected wire/pin/label markers) ----
+
+	/**
+	 * Real KiCad's own SCH_SCREEN::TestDanglingEnds() (confirmed by reading
+	 * it in the user's local KiCad checkout) is pure point coincidence — no
+	 * net/ERC analysis: an endpoint is "dangling" unless ANOTHER connectable
+	 * item's endpoint sits at the exact same point. (A wire T-ing into the
+	 * MIDDLE of another wire with no junction dot placed there still counts
+	 * as dangling — that's WHY real KiCad makes you drop a junction for a
+	 * 3-way/T connection; this mirrors that, deliberately NOT doing a general
+	 * segment-containment test.) Built from every already-computed paint
+	 * item's own resolved world coordinates — no separate AST walk or
+	 * re-transform needed, e.g. buildPin() already did the symbol-instance
+	 * math once, so this just reads shape.x1/y1 back off its paint item.
+	 *
+	 * ONE deliberate, source-verified exception to "exact coincidence only":
+	 * a bus entry tapping into a bus at an arbitrary point along its length
+	 * does NOT need an exact endpoint/junction there — real KiCad doesn't
+	 * require one either (eeschema/sch_bus_entry.cpp's
+	 * SCH_BUS_WIRE_ENTRY::UpdateDanglingState does an explicit point-on-
+	 * segment test against the bus, unlike the wire-to-wire case). See
+	 * liesOnAnyBusSpan() below.
+	 *
+	 * Markers match real KiCad exactly (same source): a hollow square on a
+	 * dangling wire/bus/label end (DANGLING_SYMBOL_SIZE, eeschema/
+	 * default_values.h) via drawDanglingIndicator(), a hollow circle on a
+	 * dangling pin (TARGET_PIN_RADIUS = 15 mils, eeschema/sch_pin.h) via
+	 * drawPinDanglingIndicator() — both eeschema/sch_painter.cpp. No-connect
+	 * markers and junctions are occupants only (they satisfy some OTHER
+	 * item's coincidence check) — they never carry a dangling flag
+	 * themselves; a pin under a no-connect marker is exactly the
+	 * "deliberately left open" case that marker exists to silence.
+	 */
+	protected buildDanglingFlags(layerBuckets: Map<string, SchPaintedItem[]>): SchPaintedItem[] {
+		const occupants = new Map<string, number>();
+		const bump = (x: number, y: number) => {
+			const key = pointKey(x, y);
+			occupants.set(key, (occupants.get(key) ?? 0) + 1);
+		};
+
+		const wireLike = layerBuckets.get('Wires') ?? [];
+		const pins = layerBuckets.get('Pins') ?? [];
+		const junctions = layerBuckets.get('Junctions') ?? [];
+		const noConnects = layerBuckets.get('NoConnects') ?? [];
+		// Global/hier labels contribute 2 items (a non-hitTestable :text item
+		// plus a hitTestable :flag item) sharing one element — filtering to
+		// hitTestable gives exactly one representative per logical label,
+		// same trick buildPlaceSubmenu-adjacent code elsewhere relies on.
+		const labels = (layerBuckets.get('Labels') ?? []).filter(it => it.kind === 'label' && it.hitTestable);
+
+		for (const item of wireLike) {
+			if (item.shape.type !== 'segment') {
+				continue;
+			}
+			bump(item.shape.x1, item.shape.y1);
+			bump(item.shape.x2, item.shape.y2);
+		}
+		for (const item of pins) {
+			if (item.shape.type !== 'segment') {
+				continue;
+			}
+			bump(item.shape.x1, item.shape.y1); // x1/y1 is always worldOuter — see buildPin
+		}
+		for (const item of junctions) {
+			if (item.shape.type !== 'circle') {
+				continue;
+			}
+			bump(item.shape.cx, item.shape.cy);
+		}
+		for (const item of noConnects) {
+			bump(item.bbox.x + item.bbox.w / 2, item.bbox.y + item.bbox.h / 2);
+		}
+		for (const item of labels) {
+			const origin = typeof item.element?.getOrigin === 'function' ? item.element.getOrigin() : null;
+			if (origin) {
+				bump(origin.x, origin.y);
+			}
+		}
+
+		// <= 1 (not === 1): a point should never be un-occupied by the time
+		// this checks it (the item itself always bumped its own point first),
+		// but treating "somehow 0" the same as "just myself" is a harmless
+		// belt-and-suspenders rather than a silent divide-by-assumption bug.
+		const isDangling = (x: number, y: number) => (occupants.get(pointKey(x, y)) ?? 0) <= 1;
+		const buses = wireLike.filter(it => it.kind === 'bus' && it.shape.type === 'segment');
+		// A bus entry taps a bus at an arbitrary point along its length — real
+		// KiCad doesn't require an exact endpoint/junction there (unlike
+		// wire-to-wire), just for the point to lie ANYWHERE on the bus's span
+		// (eeschema/sch_bus_entry.cpp's SCH_BUS_WIRE_ENTRY::UpdateDanglingState,
+		// confirmed in the user's local checkout). Bus entries are the only
+		// 'wire'-kind item with getSize() (buildBusEntry uses getOrigin+
+		// getSize; plain wires/buses use getPoints) — no separate kind needed
+		// to tell them apart.
+		const liesOnAnyBusSpan = (x: number, y: number): boolean =>
+			buses.some(bus => bus.shape.type === 'segment'
+				&& distanceToSegment(x, y, bus.shape.x1, bus.shape.y1, bus.shape.x2, bus.shape.y2) < JUNCTION_POINT_EPS);
+		const flags: SchPaintedItem[] = [];
+
+		for (const item of wireLike) {
+			if (item.shape.type !== 'segment') {
+				continue;
+			}
+			const isBusEntry = typeof item.element?.getSize === 'function';
+			const color = brightenColor(item.defaultColor ?? colorForKind(item.kind), 0.3);
+			if (isDangling(item.shape.x1, item.shape.y1) && !(isBusEntry && liesOnAnyBusSpan(item.shape.x1, item.shape.y1))) {
+				flags.push(danglingSquare(`${ item.id }:dangling:start`, item.shape.x1, item.shape.y1, color, item.element));
+			}
+			if (isDangling(item.shape.x2, item.shape.y2) && !(isBusEntry && liesOnAnyBusSpan(item.shape.x2, item.shape.y2))) {
+				flags.push(danglingSquare(`${ item.id }:dangling:end`, item.shape.x2, item.shape.y2, color, item.element));
+			}
+		}
+		for (const item of pins) {
+			if (item.shape.type !== 'segment' || !isDangling(item.shape.x1, item.shape.y1)) {
+				continue;
+			}
+			const color = brightenColor(colorForKind('pin'), 0.3);
+			flags.push(danglingCircle(`${ item.id }:dangling`, item.shape.x1, item.shape.y1, color, item.element));
+		}
+		for (const item of labels) {
+			const origin = typeof item.element?.getOrigin === 'function' ? item.element.getOrigin() : null;
+			if (!origin || !isDangling(origin.x, origin.y)) {
+				continue;
+			}
+			const color = brightenColor(item.defaultColor ?? colorForKind('label'), 0.3);
+			flags.push(danglingSquare(`${ item.id }:dangling`, origin.x, origin.y, color, item.element));
+		}
+
+		return flags;
+	}
+}
+
+// Real KiCad dangling-indicator constants, confirmed in the user's local
+// KiCad checkout (not guessed): DANGLING_SYMBOL_SIZE = 12 mils
+// (eeschema/default_values.h — "size of the rectangle indicating an
+// unconnected wire or label"), converted to the ~half-extent SCH_PAINTER
+// actually draws (own stroke half-width + 6 mils); TARGET_PIN_RADIUS = 15
+// mils (eeschema/sch_pin.h), a FIXED radius independent of pin width.
+const DANGLING_SQUARE_HALF = 0.23; // mm
+const DANGLING_CIRCLE_RADIUS = 0.381; // mm — 15 mils
+const DANGLING_STROKE_WIDTH = pinThickness;
+// 0.001mm — matches the precision real schematic coordinates actually carry.
+const JUNCTION_POINT_EPS = 1e-3;
+
+function pointKey(x: number, y: number): string {
+	// Quantized to 0.0001mm — absorbs float noise from rotation/mirror
+	// transforms without merging any two points a real schematic would
+	// actually treat as distinct (KiCad's own grid never goes finer than
+	// 0.01mm).
+	return `${ Math.round(x * 10000) },${ Math.round(y * 10000) }`;
+}
+
+/** Ports COLOR4D::Brightened() — blend toward white by `factor`. Real KiCad
+ * brightens dangling indicators specifically so they stay visible when they
+ * overlap a same-colored junction dot; matched here for the same reason. */
+function brightenColor(rgb: string, factor: number): string {
+	const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgb);
+	if (!m) {
+		return rgb;
+	}
+	const mix = (c: number) => Math.round(c + (255 - c) * factor);
+	return `rgb(${ mix(Number(m[1])) }, ${ mix(Number(m[2])) }, ${ mix(Number(m[3])) })`;
+}
+
+function danglingSquare(id: string, x: number, y: number, color: string, element: any): SchPaintedItem {
+	const half = DANGLING_SQUARE_HALF;
+	const shape: PaintedShape = { type: 'rect', x: x - half, y: y - half, w: half * 2, h: half * 2 };
+	return {
+		id, layer: 'Dangling', kind: 'dangling', shape, bbox: shape, hitTestable: false, element,
+		defaultColor: color,
+		draw: (renderer, drawColor) => {
+			renderer.rect(new Vec2(x - half, y - half), half * 2, half * 2,
+				{ strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH });
+		},
+	};
+}
+
+function danglingCircle(id: string, x: number, y: number, color: string, element: any): SchPaintedItem {
+	const shape: PaintedShape = { type: 'circle', cx: x, cy: y, r: DANGLING_CIRCLE_RADIUS };
+	return {
+		id, layer: 'Dangling', kind: 'dangling', shape, bbox: shapeToBBox(shape), hitTestable: false, element,
+		defaultColor: color,
+		draw: (renderer, drawColor) => {
+			renderer.circle(new Vec2(x, y), DANGLING_CIRCLE_RADIUS, { strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH });
+		},
+	};
 }
 
 /** KiCad 9 permits an explicit `(stroke … (color r g b a))` on wires. */
@@ -2198,6 +2612,7 @@ function colorForKind(kind: SchPaintedItem['kind']): string {
 		case 'sheet': return schColors.sheet;
 		case 'text': return schColors.reference;
 		case 'frame': return schColors.frame;
+		case 'dangling': return schColors.wire;
 		default: return schColors.componentOutline;
 	}
 }
@@ -2205,12 +2620,12 @@ function colorForKind(kind: SchPaintedItem['kind']): string {
 // Lazily-resolved class registry — see the file-level comment for why this
 // doesn't need to (and shouldn't) hard-code an @kicad-io import path.
 let _Wire: any, _Bus: any, _BusEntry: any, _Junction: any, _NoConnect: any, _Symbol: any, _LibSymbols: any;
-let _GlobalLabel: any, _HierLabel: any, _Sheet: any, _Pin: any;
+let _GlobalLabel: any, _HierLabel: any, _Sheet: any, _Pin: any, _NetclassFlag: any, _RuleArea: any;
 let _Rect: any, _SymCircle: any, _SymArc: any, _Polyline: any, _At: any, _Size: any, _Text: any;
 
 export function registerSchematicIoClasses(classes: {
 	Wire?: any; Bus?: any; BusEntry?: any; Junction?: any; NoConnect?: any; Symbol?: any; LibSymbols?: any;
-	GlobalLabel?: any; HierLabel?: any; Sheet?: any; Pin?: any;
+	GlobalLabel?: any; HierLabel?: any; Sheet?: any; Pin?: any; NetclassFlag?: any; RuleArea?: any;
 	Rect?: any; SymCircle?: any; SymArc?: any; Polyline?: any; At?: any; Size?: any; Text?: any;
 }): void {
 	_Wire = classes.Wire;
@@ -2224,6 +2639,8 @@ export function registerSchematicIoClasses(classes: {
 	_HierLabel = classes.HierLabel;
 	_Sheet = classes.Sheet;
 	_Pin = classes.Pin;
+	_NetclassFlag = classes.NetclassFlag;
+	_RuleArea = classes.RuleArea;
 	_Rect = classes.Rect;
 	_SymCircle = classes.SymCircle;
 	_SymArc = classes.SymArc;
@@ -2243,6 +2660,8 @@ function getGlobalLabelClass() { return _GlobalLabel; }
 function getHierLabelClass() { return _HierLabel; }
 function getSheetClass() { return _Sheet; }
 function getPinClass() { return _Pin; }
+function getNetclassFlagClass() { return _NetclassFlag; }
+function getRuleAreaClass() { return _RuleArea; }
 function getRectClass() { return _Rect; }
 function getSymCircleClass() { return _SymCircle; }
 function getSymArcClass() { return _SymArc; }
