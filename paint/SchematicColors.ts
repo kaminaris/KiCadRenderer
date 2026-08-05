@@ -40,6 +40,10 @@ export const schColors = {
 	sheetFilename: 'rgb(198, 120, 221)',
 	sheetLabel: 'rgb(198, 120, 221)',
 	note: 'rgb(97, 175, 239)',
+	// KiCad's DNP marker (the red X drawn over do-not-populate symbols).
+	// KiCad's wDark theme uses the DNP marker layer color
+	// (220, 9, 13, 0.85), rather than opaque pure red.
+	dnpMarker: 'rgba(220, 9, 13, 0.85)',
 	// Standalone schematic-level "graphic item" annotations (rectangle/
 	// circle/arc/polyline drawn directly on the sheet via eeschema's own
 	// drawing tools — NOT symbol body graphics, which live nested inside

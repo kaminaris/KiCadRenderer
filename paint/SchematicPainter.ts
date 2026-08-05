@@ -562,14 +562,25 @@ export class SchematicPainter {
 			return null;
 		}
 		const [start, end] = points;
-		const width = 0.15;
+		// Wires and buses carry the same `(stroke ...)` object as the other
+		// schematic graphics.  Previously this path ignored it and always sent
+		// one solid line to the renderer, which made valid `dash`, `dot`,
+		// `dash_dot`, and `dash_dot_dot` wires indistinguishable from solid ones.
+		// Keep the effective width in the painted shape too, so hit testing and
+		// the visible stroke agree (a zero-width KiCad stroke means the default
+		// pen width, not an invisible line).
+		const stroke = typeof wire.getStroke === 'function'
+			? wire.getStroke()
+			: { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const width = stroke.width || 0.15;
+		const lineType = (stroke.type ?? 'default') as KicadStrokeLineType;
 		const shape: PaintedShape = { type: 'segment', x1: start.x, y1: start.y, x2: end.x, y2: end.y, width };
 		const id = wire.getUuid() ?? `wire:${ start.x },${ start.y }-${ end.x },${ end.y }`;
 		return {
 			id, layer, kind: 'wire', shape, bbox: shapeToBBox(shape), hitTestable: true, element: wire,
-			defaultColor: readWireStrokeColor(wire) ?? color,
+			defaultColor: wire.getStrokeColorOverride?.() ?? color,
 			draw: (renderer, drawColor) => {
-				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: drawColor, strokeWidth: width });
+				drawStrokeOutline(renderer, [new Vec2(start.x, start.y), new Vec2(end.x, end.y)], width, lineType, drawColor);
 			},
 		};
 	}
@@ -579,10 +590,17 @@ export class SchematicPainter {
 		if (!item) {
 			return null;
 		}
-		// Buses draw thicker than ordinary wires — same geometry, different kind/width.
-		return { ...item, kind: 'bus', draw: (renderer, color) => {
-			const s = item.shape as { x1: number; y1: number; x2: number; y2: number };
-			renderer.line([new Vec2(s.x1, s.y1), new Vec2(s.x2, s.y2)], { strokeColor: color, strokeWidth: 0.3 });
+		// Buses draw thicker than ordinary wires.  Preserve their stroke type
+		// while applying the bus-specific default width.
+		const stroke = typeof bus.getStroke === 'function'
+			? bus.getStroke()
+			: { width: 0.3, type: 'solid' as KicadStrokeLineType };
+		const width = stroke.width || 0.3;
+		const lineType = (stroke.type ?? 'default') as KicadStrokeLineType;
+		const s = item.shape as { x1: number; y1: number; x2: number; y2: number };
+		const shape: PaintedShape = { ...item.shape, width } as PaintedShape;
+		return { ...item, shape, kind: 'bus', bbox: shapeToBBox(shape), draw: (renderer, color) => {
+			drawStrokeOutline(renderer, [new Vec2(s.x1, s.y1), new Vec2(s.x2, s.y2)], width, lineType, color);
 		} };
 	}
 
@@ -594,25 +612,34 @@ export class SchematicPainter {
 		}
 		const x1 = origin.x, y1 = origin.y;
 		const x2 = origin.x + size.width, y2 = origin.y + size.height;
-		const stroke = typeof entry.getStroke === 'function' ? entry.getStroke() : { width: 0 };
+		const stroke = typeof entry.getStroke === 'function'
+			? entry.getStroke()
+			: { width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const width = stroke.width || 0.15;
+		const lineType = (stroke.type ?? 'default') as KicadStrokeLineType;
 		const id = entry.getUuid?.() ?? `bus_entry:${ x1 },${ y1 }`;
 		const shape: PaintedShape = { type: 'segment', x1, y1, x2, y2, width };
 		return {
 			id, layer: 'Wires', kind: 'wire', shape, bbox: shapeToBBox(shape), hitTestable: true, element: entry,
+			defaultColor: entry.getStrokeColorOverride?.() ?? colorForKind('wire'),
 			draw: (renderer, color) => {
-				renderer.line([new Vec2(x1, y1), new Vec2(x2, y2)], { strokeColor: color, strokeWidth: width });
+				drawStrokeOutline(renderer, [new Vec2(x1, y1), new Vec2(x2, y2)], width, lineType, color);
 			},
 		};
 	}
 
 	protected buildJunction(junction: any): SchPaintedItem {
 		const origin = junction.getOrigin();
-		const radius = 0.4;
+		// A junction's own (diameter …) of 0 means "use the default size",
+		// same width:0 convention used everywhere else in this codebase —
+		// matches real KiCad's own JUNCTION_DIAMETER_DEFAULT fallback.
+		const storedDiameter = typeof junction.getDiameter === 'function' ? junction.getDiameter() : 0;
+		const radius = storedDiameter > 0 ? storedDiameter / 2 : 0.4;
 		const shape: PaintedShape = { type: 'circle', cx: origin.x, cy: origin.y, r: radius };
 		const id = junction.getUuid() ?? `junction:${ origin.x },${ origin.y }`;
 		return {
 			id, layer: 'Junctions', kind: 'junction', shape, bbox: shapeToBBox(shape), hitTestable: true, element: junction,
+			defaultColor: junction.getColorOverride?.() ?? undefined,
 			draw: (renderer, color) => {
 				renderer.circle(new Vec2(origin.x, origin.y), radius, { fillColor: color });
 			},
@@ -667,9 +694,9 @@ export class SchematicPainter {
 		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: rect,
-			defaultColor: schColors.graphic,
+			defaultColor: rect.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
-				const fillColor = symbolFillColor(fillType, color);
+				const fillColor = symbolFillColor(fillType, color, rect.getFillColorOverride?.() ?? undefined);
 				if (fillColor) {
 					renderer.polygon(corners, { fillColor });
 				}
@@ -692,10 +719,10 @@ export class SchematicPainter {
 		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: circle,
-			defaultColor: schColors.graphic,
+			defaultColor: circle.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
 				const worldCenter = new Vec2(center.x, center.y);
-				const fillColor = symbolFillColor(fillType, color);
+				const fillColor = symbolFillColor(fillType, color, circle.getFillColorOverride?.() ?? undefined);
 				if (fillColor) {
 					renderer.circle(worldCenter, radius, { fillColor });
 				}
@@ -734,10 +761,10 @@ export class SchematicPainter {
 		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
-			defaultColor: schColors.graphic,
+			defaultColor: arc.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
 				const worldCenter = new Vec2(local.centerX, local.centerY);
-				const fillColor = symbolFillColor(fillType, color);
+				const fillColor = symbolFillColor(fillType, color, arc.getFillColorOverride?.() ?? undefined);
 				if (fillColor) {
 					// A filled arc is a "pie slice" — the sampled arc points
 					// plus the center, closed into a polygon (ports kicanvas's
@@ -789,9 +816,9 @@ export class SchematicPainter {
 		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: poly,
-			defaultColor: schColors.graphic,
+			defaultColor: poly.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
-				const fillColor = closed ? symbolFillColor(fillType, color) : undefined;
+				const fillColor = closed ? symbolFillColor(fillType, color, poly.getFillColorOverride?.() ?? undefined) : undefined;
 				if (fillColor) {
 					renderer.polygon(worldPoints, { fillColor });
 				}
@@ -822,7 +849,7 @@ export class SchematicPainter {
 		};
 		return {
 			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: bezier,
-			defaultColor: schColors.graphic,
+			defaultColor: bezier.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color),
 		};
 	}
@@ -902,7 +929,12 @@ export class SchematicPainter {
 		// happening to always be unfilled in every file seen so far.
 		const shape: PaintedShape = base.shape.type === 'polygon' ? { ...base.shape, filled: false } : base.shape;
 		return {
-			...base, id, shape, layer: 'RuleAreas', defaultColor: schColors.ruleArea, element: ruleArea,
+			// getStrokeColorOverride() reads from `polyline` (the nested child
+			// that actually carries the (stroke …) data — base.defaultColor
+			// already resolved this the same way), not `ruleArea` itself, so
+			// a user-customized border color is respected same as any other
+			// shape; still defaults to the distinctive theme red otherwise.
+			...base, id, shape, layer: 'RuleAreas', defaultColor: polyline.getStrokeColorOverride?.() ?? schColors.ruleArea, element: ruleArea,
 		};
 	}
 
@@ -927,7 +959,7 @@ export class SchematicPainter {
 		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
 		return {
 			id, layer: 'Text', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: text,
-			defaultColor: schColors.note,
+			defaultColor: text.getFontColorOverride?.() ?? schColors.note,
 			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 		};
 	}
@@ -965,6 +997,9 @@ export class SchematicPainter {
 		const instanceMatrix = buildInstanceMatrix(origin.x, origin.y, origin.rotation ?? 0, mirror);
 		const instanceId = instance.getUuid() ?? `sym:${ origin.x },${ origin.y }`;
 		const placedUnit: number = typeof instance.getUnitId === 'function' ? instance.getUnitId() : 0;
+		const isDnp = typeof instance.isDnp === 'function'
+			? !!instance.isDnp()
+			: !!instance.findFirstChildByName?.('dnp')?.value;
 
 		const subUnits = this.relevantSubUnits(libDef, placedUnit);
 		// Two passes across ALL sub-units, not one pass per sub-unit: a
@@ -1127,6 +1162,17 @@ export class SchematicPainter {
 		// NoConnects/Pins in SCHEMATIC_LAYER_ORDER — this box is large and
 		// commonly overlaps a wire stub leaving the pin right at the
 		// symbol's edge; without this it would steal clicks from existing
+		if (isDnp) {
+			// KiCad dims every rendered part of a DNP symbol, including its
+			// fields and pins: desaturate the layer color, then mix it 50% toward
+			// the schematic background.  Do this at the item-color boundary so
+			// fills and strokes receive the same treatment and the selection
+			// highlight (applied later by paint()) can still override it.
+			for (const item of items) {
+				item.defaultColor = dnpDimmedColor(item.defaultColor ?? colorForKind(item.kind));
+			}
+		}
+
 		// wire/pin-based features (e.g. net-trace-on-click) elsewhere.
 		// Callers that need symbol-only picking (edit mode) use
 		// hitTestSymbolAtScreen() to ignore those overlays.
@@ -1186,6 +1232,63 @@ export class SchematicPainter {
 							strokeColor: color,
 							strokeWidth: 0.25,
 						});
+					},
+				});
+			}
+		}
+
+		if (isDnp) {
+			// SCH_SYMBOL::PlotDNP() builds the marker from the body-and-pins
+			// bounds, with an asymmetric margin based on how far pins extend
+			// beyond the body.  The previous implementation used one symmetric
+			// margin derived from the smallest overall dimension; that makes a
+			// vertically-pinned capacitor's X much too large and shifts it away
+			// from the actual body center.
+			const boundsOf = (candidates: SchPaintedItem[]) => {
+				let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+				for (const item of candidates) {
+					minX = Math.min(minX, item.bbox.x);
+					minY = Math.min(minY, item.bbox.y);
+					maxX = Math.max(maxX, item.bbox.x + item.bbox.w);
+					maxY = Math.max(maxY, item.bbox.y + item.bbox.h);
+				}
+				return { minX, minY, maxX, maxY };
+			};
+			const bodyItems = items.filter(item => item.kind === 'symbol-graphic');
+			const bodyAndPinsItems = items.filter(item => item.kind === 'symbol-graphic' || item.kind === 'pin');
+			const body = boundsOf(bodyItems);
+			const pins = boundsOf(bodyAndPinsItems);
+			if (Number.isFinite(pins.minX) && Number.isFinite(pins.minY) && pins.maxX > pins.minX && pins.maxY > pins.minY) {
+				// A malformed/graphic-less library symbol can have no body items;
+				// fall back to the body-and-pins box rather than producing NaNs.
+				const bodyBounds = Number.isFinite(body.minX) && Number.isFinite(body.minY)
+					&& body.maxX > body.minX && body.maxY > body.minY ? body : pins;
+				let marginX = Math.max(bodyBounds.minX - pins.minX, pins.maxX - bodyBounds.maxX);
+				let marginY = Math.max(bodyBounds.minY - pins.minY, pins.maxY - bodyBounds.maxY);
+				// Exact port of SCH_SYMBOL::PlotDNP(): margins are intentionally
+				// asymmetric, then cross-coupled so a pin extension in one axis
+				// still leaves enough clearance in the other.
+				marginX = Math.max(marginX * 0.6, marginY * 0.3);
+				marginY = Math.max(marginY * 0.6, marginX * 0.3);
+				// Inflate the BODY box, not the body-and-pins box.  KiCad deliberately
+				// leaves the marker centered on the body while the pin overhangs only
+				// determine the amount of clearance around it.
+				const markerX = bodyBounds.minX - marginX;
+				const markerY = bodyBounds.minY - marginY;
+				const markerW = bodyBounds.maxX - bodyBounds.minX + marginX * 2;
+				const markerH = bodyBounds.maxY - bodyBounds.minY + marginY * 2;
+				const points = [new Vec2(markerX, markerY), new Vec2(markerX + markerW, markerY + markerH), new Vec2(markerX + markerW, markerY), new Vec2(markerX, markerY + markerH)];
+				const markerShape: PaintedShape = { type: 'polygon', points: points.map(p => ({ x: p.x, y: p.y })) };
+				items.push({
+					id: `dnp-marker:${ instanceId }`, layer: 'Frame', kind: 'symbol-graphic',
+					shape: markerShape, bbox: shapeToBBox(markerShape), hitTestable: false, element: instance,
+					defaultColor: schColors.dnpMarker,
+					draw: (renderer, color) => {
+						// KiCad uses 3 × DEFAULT_LINE_WIDTH_MILS (6 mil), i.e.
+						// 0.4572 mm, for this marker at every zoom level.
+						const strokeWidth = 0.4572;
+						renderer.line([points[0]!, points[1]!], { strokeColor: color, strokeWidth });
+						renderer.line([points[2]!, points[3]!], { strokeColor: color, strokeWidth });
 					},
 				});
 			}
@@ -1420,7 +1523,11 @@ export class SchematicPainter {
 			defaultColor: schColors.note,
 			draw: (renderer, color) => {
 				if (fillColor) renderer.rect(new Vec2(x, y), width, height, { fillColor });
-				if (geometry) drawStrokeTextGeometry(renderer, geometry, color);
+				// Independent from strokeColor/fillColor above (font vs border
+				// vs fill are 3 separate overridable colors in the file format)
+				// — falls through to the same shared `color` the border already
+				// falls back to when no font color is explicitly set.
+				if (geometry) drawStrokeTextGeometry(renderer, geometry, textBox.getFontColorOverride?.() ?? color);
 				drawStrokeOutline(renderer, [
 					new Vec2(x, y), new Vec2(x + width, y), new Vec2(x + width, y + height), new Vec2(x, y + height), new Vec2(x, y),
 				], effectiveStrokeWidth, strokeType, strokeColor || color);
@@ -1754,6 +1861,7 @@ export class SchematicPainter {
 		return {
 			id, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: label,
 			labelName: name, labelKind: 'local',
+			defaultColor: label.getFontColorOverride?.() ?? undefined,
 			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 		};
 	}
@@ -1798,9 +1906,14 @@ export class SchematicPainter {
 		const geometry = computeStrokeTextGeometry(name, worldTextPos, textSize, textAngle, false, undefined, anchor);
 		const id = label.getUuid() ?? `label:${ origin.x },${ origin.y }`;
 		const bbox = { x: worldTextPos.x - textSize * 3, y: worldTextPos.y - textSize, w: textSize * 6, h: textSize * 2 };
+		// Same override color drives BOTH the text and its flag/arrow below —
+		// real KiCad's label properties dialog has one unified color swatch
+		// for a label, not separate text-vs-shape colors (unlike a text box,
+		// where border/fill/text genuinely are 3 independent colors).
+		const labelColor = label.getFontColorOverride?.() ?? schColors.labelGlobal;
 		items.push({
 			id: `${ id }:text`, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: label,
-			defaultColor: schColors.labelGlobal,
+			defaultColor: labelColor,
 			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 		});
 
@@ -1829,7 +1942,7 @@ export class SchematicPainter {
 		const flagShape: PaintedShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
-			hitTestable: true, element: label, defaultColor: schColors.labelGlobal,
+			hitTestable: true, element: label, defaultColor: labelColor,
 			labelName: name, labelKind: 'global',
 			draw: (renderer, color) => renderer.line(worldPts, { strokeColor: color, strokeWidth: thickness || 0.15 }),
 		});
@@ -1888,6 +2001,11 @@ export class SchematicPainter {
 		flagHitTestable = false
 	): SchPaintedItem[] {
 		const items: SchPaintedItem[] = [];
+		// Real, standalone hier labels can carry a font color override;
+		// buildSheet()'s sheet-pin reuse passes a raw KicadElementPin here,
+		// which has no (effects (font …)) child at all, so this safely
+		// no-ops back to the passed-in theme `color` for that caller.
+		const resolvedColor = element.getFontColorOverride?.() ?? color;
 		// KiCad's own formula (text_offset_ratio * size + size, ~0.19mm of
 		// clearance past the arrow's own edge for a 1.27mm label) is what's
 		// ported here, but it renders as a genuinely touching/overlapping
@@ -1916,7 +2034,7 @@ export class SchematicPainter {
 		const bbox = { x: worldTextPos.x - textSize * 3, y: worldTextPos.y - textSize, w: textSize * 6, h: textSize * 2 };
 		items.push({
 			id: `${ id }:text`, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element,
-			defaultColor: color,
+			defaultColor: resolvedColor,
 			draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor),
 		});
 
@@ -1944,7 +2062,7 @@ export class SchematicPainter {
 		const flagShape: PaintedShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
-			hitTestable: flagHitTestable, element, defaultColor: color,
+			hitTestable: flagHitTestable, element, defaultColor: resolvedColor,
 			// flagHitTestable is only ever false for buildSheet()'s sheet-pin
 			// reuse of this shape (buildHierLabel's own call always passes
 			// true) — tagging that case 'sheet-pin' (rather than leaving
@@ -2029,9 +2147,13 @@ export class SchematicPainter {
 			draw = (renderer, color) => renderer.line(worldPts, { strokeColor: color, strokeWidth: width });
 		}
 
+		// Same override color drives the pole/glyph AND its property text
+		// below — same reasoning as buildGlobalLabel's labelColor (one
+		// unified label color in real KiCad's dialog, not per-part colors).
+		const flagColor = flag.getFontColorOverride?.() ?? schColors.labelDirective;
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: hitShape, bbox: shapeToBBox(hitShape),
-			hitTestable: true, element: flag, labelKind: 'directive', defaultColor: schColors.labelDirective, draw,
+			hitTestable: true, element: flag, labelKind: 'directive', defaultColor: flagColor, draw,
 		});
 
 		if (typeof flag.getProperties === 'function') {
@@ -2049,6 +2171,7 @@ export class SchematicPainter {
 				items.push({
 					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: flag,
+					defaultColor: flagColor,
 					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 				});
 			}
@@ -2519,16 +2642,6 @@ function danglingCircle(id: string, x: number, y: number, color: string, element
 			renderer.circle(new Vec2(x, y), DANGLING_CIRCLE_RADIUS, { strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH });
 		},
 	};
-}
-
-/** KiCad 9 permits an explicit `(stroke … (color r g b a))` on wires. */
-function readWireStrokeColor(wire: any): string | null {
-	const stroke = typeof wire?.findFirstChildByName === 'function' ? wire.findFirstChildByName('stroke') : null;
-	const color = typeof stroke?.findFirstChildByName === 'function' ? stroke.findFirstChildByName('color') : null;
-	const values = Array.isArray(color?.attributes) ? color.attributes.map((a: any) => Number(a?.value)) : [];
-	if (values.length < 3 || values.slice(0, 3).some((value: number) => !Number.isFinite(value))) return null;
-	const [r, g, b, alpha = 1] = values;
-	return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
 // KiCad's DefaultValues.label_size_ratio, used by global labels' box
@@ -3120,13 +3233,44 @@ function fieldDrawRotation(propRotationDeg: number, symbolRotationDeg: number): 
  * selection highlighting), reused here rather than a fixed theme constant
  * so a highlighted outline-filled shape highlights consistently on both its
  * fill and its stroke. */
-function symbolFillColor(fillType: string, strokeColor: string): string | undefined {
+/**
+ * `customColor` is only consulted for the 'color' case, and only by
+ * schematic-ROOT shape builders (buildSchRect etc.) which pass
+ * element.getFillColorOverride?.() — symbol-BODY graphics never pass it, so
+ * they keep resolving 'color' to the shared theme body color exactly as
+ * before (a library symbol's body fill is meant to follow the theme
+ * uniformly, not whatever arbitrary color some third-party library author
+ * baked into one specific shape).
+ */
+function symbolFillColor(fillType: string, strokeColor: string, customColor?: string): string | undefined {
 	switch (fillType) {
 		case 'outline': return strokeColor;
-		case 'background':
-		case 'color': return schColors.componentBody;
+		case 'background': return schColors.componentBody;
+		case 'color': return customColor ?? schColors.componentBody;
 		default: return undefined;
 	}
+}
+
+/** KiCad's DNP dimming path: desaturate the item color, then blend it 50%
+ * toward the schematic background.  Schematic theme colors are normally
+ * `rgb(...)`, but accepting hex here keeps custom symbol/field colors from
+ * silently bypassing the DNP treatment. */
+function dnpDimmedColor(value: string): string {
+	let r: number, g: number, b: number;
+	const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(value);
+	if (rgb) {
+		r = Number(rgb[1]); g = Number(rgb[2]); b = Number(rgb[3]);
+	}
+	else {
+		const hex = /^#([\da-f]{6})$/i.exec(value);
+		if (!hex) return value;
+		const n = Number.parseInt(hex[1]!, 16);
+		r = (n >> 16) & 0xff; g = (n >> 8) & 0xff; b = n & 0xff;
+	}
+	const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+	const bg = [40, 44, 52];
+	const mix = (channel: number, background: number) => Math.round((channel + background) / 2);
+	return `rgb(${ mix(gray, bg[0]!) }, ${ mix(gray, bg[1]!) }, ${ mix(gray, bg[2]!) })`;
 }
 
 function colorForKind(kind: SchPaintedItem['kind']): string {

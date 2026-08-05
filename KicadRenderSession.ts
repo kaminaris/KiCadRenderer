@@ -783,6 +783,30 @@ export class KicadRenderSession {
 	}
 
 	/**
+	 * Generic sibling of mutateSymbolByPaintId for every OTHER element kind
+	 * (wires/shapes/text/labels/junctions/…) — same property-inspector entry
+	 * point contract (find by paint id, push undo, mutate, commit; never
+	 * retain the element reference past this call). No KicadElementSymbol-
+	 * style type check here since the caller already knows what shape to
+	 * expect from the paint item's own `kind`/`labelKind` before ever
+	 * calling this — unlike symbols, there's no single common base class
+	 * across wire/shape/text/label worth checking against.
+	 */
+	mutateElementByPaintId(paintId: string, mutate: (element: any) => void): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+			return false;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		if (!item?.element) {
+			return false;
+		}
+		this.pushUndoSnapshot('Property edit');
+		mutate(item.element);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/**
 	 * Move (and optionally rotate) a placed symbol instance by its Reference
 	 * designator, then rebuild just the paint scene from the already-parsed
 	 * document (no text re-parse) and re-render. This is what makes editor
@@ -1245,11 +1269,20 @@ export class KicadRenderSession {
 	addRuleArea(points: { x: number; y: number }[]): string | null {
 		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || points.length < 3) return null;
 		this.pushUndoSnapshot();
+		// Typed setters (not setSimpleChild's generic-KicadElement path) —
+		// using the untyped path here left a rule area's 4 boolean flags as
+		// plain KicadElement instances instead of KicadElementExcludeFromSim/
+		// InBom/OnBoard/Dnp, so a later findOrCreateChildByClass() lookup
+		// (e.g. the property panel's DNP checkbox) couldn't find the
+		// existing one — it created a SECOND, differently-typed child with
+		// the same tag name instead of updating this one, and both got
+		// serialized (a real duplicate-(dnp ...)-tag bug, caught via the
+		// property panel actually trying to toggle one).
 		const area = new KicadElementRuleArea();
-		area.setSimpleChild('exclude_from_sim', false, 'boolean');
-		area.setSimpleChild('in_bom', true, 'boolean');
-		area.setSimpleChild('on_board', true, 'boolean');
-		area.setSimpleChild('dnp', false, 'boolean');
+		area.setExcludedFromSim(false);
+		area.setInBom(true);
+		area.setOnBoard(true);
+		area.setDnp(false);
 		const polyline = new KicadElementPolyline();
 		polyline.setPoints(points.map(point => ({ x: point.x, y: point.y })));
 		polyline.setStroke(0, 'dash');
