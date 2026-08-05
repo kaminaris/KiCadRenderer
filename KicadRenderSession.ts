@@ -16,7 +16,11 @@ import { KicadElementNoConnect }       from '@kicad-io/KicadElementNoConnect';
 import { KicadElementRectangle }       from '@kicad-io/KicadElementStartEnd';
 import { KicadElementCircle }          from '@kicad-io/KicadElementCircle';
 import { KicadElementArc }             from '@kicad-io/KicadElementArc';
-import { KicadElementPolyline }        from '@kicad-io/KicadElementPolyline';
+import { KicadElementPolyline, KicadElementBezier } from '@kicad-io/KicadElementPolyline';
+import { KicadElementAt }         from '@kicad-io/KicadElementAt';
+import { KicadElementSize }       from '@kicad-io/KicadElementSize';
+import { KicadElementTable, KicadElementTableCell } from '@kicad-io/KicadElementTable';
+import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
 import { KicadElementText, KicadElementTextBox, KicadElementLabel } from '@kicad-io/KicadElementText';
 import { KicadElementGlobalLabel, type KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
 import { KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
@@ -83,11 +87,12 @@ export interface SelectionResizeBox {
 }
 
 export type CurveAnchor = 'circle-center' | 'circle-radius' | 'arc-start' | 'arc-mid' | 'arc-end' | 'arc-center'
-	| 'bezier-start' | 'bezier-control-1' | 'bezier-control-2' | 'bezier-end';
+	| 'bezier-start' | 'bezier-control-1' | 'bezier-control-2' | 'bezier-end'
+	| `polygon-vertex-${number}`;
 
 export interface SelectionCurveAnchors {
 	id: string;
-	kind: 'circle' | 'arc' | 'bezier';
+	kind: 'circle' | 'arc' | 'bezier' | 'polygon';
 	anchors: { kind: CurveAnchor; x: number; y: number }[];
 }
 
@@ -106,6 +111,8 @@ export type EditPreviewState =
 	/** points: [] before the start click, [start] before the end click,
 	 *  [start, end] while dragging the mid-bulge (cursor = the mid point). */
 	| { kind: 'arc'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'bezier'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'rule-area'; points: Vec2[]; cursor: Vec2 }
 	| { kind: 'text'; anchor: Vec2; text: string }
 	| { kind: 'text-box'; x: number; y: number; width: number; height: number; text: string }
 	| { kind: 'label'; anchor: Vec2; text: string; rotation: number }
@@ -173,6 +180,8 @@ export class KicadRenderSession {
 	 */
 	protected undoStack: string[] = [];
 	protected redoStack: string[] = [];
+	protected undoLabels: string[] = [];
+	protected redoLabels: string[] = [];
 	protected static readonly maxUndoDepth = 100;
 	protected frameScheduled = false;
 	// See render()'s WebGL branch — only geometry-affecting changes (new
@@ -678,16 +687,18 @@ export class KicadRenderSession {
 	 *  …) — impossible to forget. Continuous drag methods (moveSymbolByRef,
 	 *  translateElementById, …) do NOT call this themselves (would flood the
 	 *  stack every mousemove) — the caller pushes once at gesture start. */
-	pushUndoSnapshot(): void {
+	pushUndoSnapshot(label = 'Edit'): void {
 		const text = this.getSchematicText();
 		if (!text || this.undoStack[this.undoStack.length - 1] === text) {
 			return;
 		}
 		this.undoStack.push(text);
+		this.undoLabels.push(label);
 		if (this.undoStack.length > KicadRenderSession.maxUndoDepth) {
 			this.undoStack.shift();
 		}
 		this.redoStack.length = 0;
+		this.redoLabels.length = 0;
 	}
 
 	/** Clears both stacks — call on file load, never push (undo must not step
@@ -695,6 +706,8 @@ export class KicadRenderSession {
 	resetUndoHistory(): void {
 		this.undoStack.length = 0;
 		this.redoStack.length = 0;
+		this.undoLabels.length = 0;
+		this.redoLabels.length = 0;
 	}
 
 	get canUndo(): boolean {
@@ -705,14 +718,28 @@ export class KicadRenderSession {
 		return this.redoStack.length > 0;
 	}
 
+	/** Compact history data for an editor/debug sidebar. */
+	getUndoStackDebug(): { undoDepth: number; redoDepth: number; undo: { label: string; bytes: number }[] } {
+		return {
+			undoDepth: this.undoStack.length,
+			redoDepth: this.redoStack.length,
+			undo: this.undoStack.map((text, index) => ({
+				label: this.undoLabels[index] ?? 'Edit',
+				bytes: text.length,
+			})),
+		};
+	}
+
 	async undo(): Promise<boolean> {
 		if (!this.undoStack.length) {
 			return false;
 		}
 		const current = this.getSchematicText();
 		const previous = this.undoStack.pop()!;
+		const previousLabel = this.undoLabels.pop() ?? 'Edit';
 		if (current) {
 			this.redoStack.push(current);
+			this.redoLabels.push(previousLabel);
 		}
 		await this.loadSchematicText(previous, { ...this.schematicDocInfo, preserveView: true });
 		return true;
@@ -724,10 +751,34 @@ export class KicadRenderSession {
 		}
 		const current = this.getSchematicText();
 		const next = this.redoStack.pop()!;
+		const nextLabel = this.redoLabels.pop() ?? 'Edit';
 		if (current) {
 			this.undoStack.push(current);
+			this.undoLabels.push(nextLabel);
 		}
 		await this.loadSchematicText(next, { ...this.schematicDocInfo, preserveView: true });
+		return true;
+	}
+
+	/**
+	 * Apply one atomic edit to the currently-live placed symbol represented by
+	 * a paint-item id. This is intentionally the property-inspector entry
+	 * point: callers must not retain a paint item's element reference across a
+	 * scene rebuild and mutate it later, because that makes undo state and the
+	 * rendered scene drift apart.
+	 */
+	mutateSymbolByPaintId(paintId: string, mutate: (symbol: KicadElementSymbol) => void): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+			return false;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		const symbol = item?.element;
+		if (!(symbol instanceof KicadElementSymbol) && symbol?.name !== 'symbol') {
+			return false;
+		}
+		this.pushUndoSnapshot('Property edit');
+		mutate(symbol as KicadElementSymbol);
+		this.commitAstMutation();
 		return true;
 	}
 
@@ -1137,6 +1188,79 @@ export class KicadRenderSession {
 		return this.attachToSchematicRoot(arc);
 	}
 
+	addGraphicBezier(points: { x: number; y: number }[], strokeWidth = 0): string | null {
+		if (points.length !== 4) {
+			return null;
+		}
+		const bezier = new KicadElementBezier();
+		bezier.setPoints(points.map(point => ({ x: point.x, y: point.y })));
+		bezier.setStroke(strokeWidth, 'default');
+		return this.attachToSchematicRoot(bezier);
+	}
+
+	addGraphicTable(x: number, y: number, rows: number, columns: number, values: string[][]): string | null {
+		if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1) return null;
+		const table = new KicadElementTable();
+		const cells = new (class extends KicadElementTableCell { override name = 'cells'; })();
+		// The `cells` container is a named wrapper, not a table_cell itself.
+		(table as any).children.pop();
+		cells.name = 'cells';
+		table.addChild(cells);
+		table.setSimpleChild('column_count', columns, 'numeric');
+		const cellWidth = 25.4;
+		const cellHeight = 12.7;
+		for (let row = 0; row < rows; row++) {
+			for (let column = 0; column < columns; column++) {
+				const cell = new KicadElementTableCell();
+				const value = values[row]?.[column] ?? '';
+				cell.setAttribute({ value, format: 'quoted' }, 0);
+				cell.value = value;
+				cell.addChild(new KicadElementAt(x + column * cellWidth, y + row * cellHeight));
+				cell.addChild(new KicadElementSize(cellWidth, cellHeight));
+				cell.setSimpleChild('margins', 0.9525, 'numeric');
+				const margins = cell.findFirstChildByName('margins')!;
+				margins.setAttribute({ value: 0.9525, format: 'numeric' }, 1);
+				margins.setAttribute({ value: 0.9525, format: 'numeric' }, 2);
+				margins.setAttribute({ value: 0.9525, format: 'numeric' }, 3);
+				cell.setSimpleChild('span', 1, 'numeric');
+				cell.findFirstChildByName('span')!.setAttribute({ value: 1, format: 'numeric' }, 1);
+				cells.addChild(cell);
+			}
+		}
+		const stroke = table.findOrCreateChildByName('border');
+		stroke.setSimpleChild('external', true, 'boolean');
+		stroke.setSimpleChild('header', false, 'boolean');
+		const strokeChild = stroke.findOrCreateChildByName('stroke');
+		strokeChild.setSimpleChild('width', 0.15, 'numeric');
+		strokeChild.setSimpleChild('type', 'solid', 'literal');
+		const separators = table.findOrCreateChildByName('separators');
+		separators.setSimpleChild('rows', true, 'boolean');
+		separators.setSimpleChild('cols', true, 'boolean');
+		const separatorStroke = separators.findOrCreateChildByName('stroke');
+		separatorStroke.setSimpleChild('width', 0.15, 'numeric');
+		separatorStroke.setSimpleChild('type', 'solid', 'literal');
+		return this.attachToSchematicRoot(table);
+	}
+
+	addRuleArea(points: { x: number; y: number }[]): string | null {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || points.length < 3) return null;
+		this.pushUndoSnapshot();
+		const area = new KicadElementRuleArea();
+		area.setSimpleChild('exclude_from_sim', false, 'boolean');
+		area.setSimpleChild('in_bom', true, 'boolean');
+		area.setSimpleChild('on_board', true, 'boolean');
+		area.setSimpleChild('dnp', false, 'boolean');
+		const polyline = new KicadElementPolyline();
+		polyline.setPoints(points.map(point => ({ x: point.x, y: point.y })));
+		polyline.setStroke(0, 'dash');
+		polyline.setFill('none');
+		polyline.setUuid();
+		area.addChild(polyline);
+		this.schematicRoot!.rootElement.addChild(area);
+		this.commitAstMutation();
+		return polyline.getUuid() ?? null;
+	}
+
 	addGraphicText(x: number, y: number, value: string, rotation = 0): string | null {
 		const text = new KicadElementText(value);
 		text.setOrigin(x, y, rotation);
@@ -1150,7 +1274,8 @@ export class KicadRenderSession {
 		}
 		const item = this.schScene.hitTestItems.find(it => it.id === this.selectedId);
 		const el: any = item?.element;
-		if (!item || !el || (el.name !== 'rectangle' && el.name !== 'text_box')) {
+		if (!item || !el || (el.name !== 'rectangle' && el.name !== 'text_box' && el.name !== 'image')
+			|| item.shape.type !== 'rect') {
 			return null;
 		}
 		const { x, y, w, h } = item.bbox;
@@ -1202,6 +1327,15 @@ export class KicadRenderSession {
 				id: item.id, kind: 'bezier',
 				anchors: points.map((point: { x: number; y: number }, index: number) => ({
 					kind: kinds[index]!, x: point.x, y: point.y,
+				})),
+			};
+		}
+		if (item.shape.type === 'polygon' && (el.name === 'polyline' || el.name === 'rule_area')) {
+			const points = item.shape.points;
+			return {
+				id: item.id, kind: 'polygon',
+				anchors: points.map((point, index) => ({
+					kind: `polygon-vertex-${index}` as CurveAnchor, x: point.x, y: point.y,
 				})),
 			};
 		}
@@ -1442,7 +1576,7 @@ export class KicadRenderSession {
 	/** Resize one root-level rectangle or text box to normalized world bounds.
 	 * Like translateElementById(), this is a continuous-drag primitive: callers
 	 * push a single undo snapshot before the gesture, not for every mousemove. */
-	resizeElementBoundsById(id: string, x: number, y: number, width: number, height: number): boolean {
+	resizeElementBoundsById(id: string, x: number, y: number, width: number, height: number, handle?: ResizeHandle): boolean {
 		if (this.documentType !== 'schematic' || !this.schematicRoot || !(width > 0) || !(height > 0)) {
 			return false;
 		}
@@ -1458,6 +1592,31 @@ export class KicadRenderSession {
 			const origin = el.getOrigin();
 			el.setOrigin(x, y, origin.rotation ?? 0);
 			el.setSize(width, height);
+		}
+		else if (el.name === 'image' && typeof el.getOrigin === 'function'
+			&& typeof el.setOrigin === 'function' && typeof el.getScale === 'function'
+			&& typeof el.setScale === 'function') {
+			const current = this.schScene?.hitTestItems.find(it => it.id === id);
+			if (!current || current.shape.type !== 'rect' || !(current.shape.w > 0) || !(current.shape.h > 0)) {
+				return false;
+			}
+			const currentScale = Number(el.getScale?.() ?? 1);
+			const widthRatio = width / current.shape.w;
+			const heightRatio = height / current.shape.h;
+			// Image scale is uniform in KiCad. Select the dimension controlled by
+			// the active handle, then derive the other dimension from that scale;
+			// using the live bounds (rather than alternating width/height errors)
+			// prevents the image from oscillating during a corner drag.
+			const ratio = handle && !handle.includes('e') && !handle.includes('w') ? heightRatio : widthRatio;
+			const nextWidth = current.shape.w * ratio;
+			const nextHeight = current.shape.h * ratio;
+			const fixedRight = x + width;
+			const fixedBottom = y + height;
+			const nextX = handle?.includes('w') ? fixedRight - nextWidth : x;
+			const nextY = handle?.includes('n') ? fixedBottom - nextHeight : y;
+			const origin = el.getOrigin();
+			el.setScale(Math.max(1e-6, currentScale * ratio));
+			el.setOrigin(nextX + nextWidth / 2, nextY + nextHeight / 2, origin.rotation ?? 0);
 		}
 		else {
 			return false;
@@ -1538,6 +1697,23 @@ export class KicadRenderSession {
 			const next = points.map((point: { x: number; y: number }, pointIndex: number) =>
 				pointIndex === index ? { x, y } : { x: point.x, y: point.y });
 			el.setPoints(next);
+		}
+		else if (anchor.startsWith('polygon-vertex-')) {
+			const index = Number(anchor.slice('polygon-vertex-'.length));
+			const polyline = el.name === 'rule_area' && typeof el.getPolyline === 'function' ? el.getPolyline() : el;
+			if (!polyline || typeof polyline.getPoints !== 'function' || typeof polyline.setPoints !== 'function'
+				|| !Number.isInteger(index)) return false;
+			const points = polyline.getPoints();
+			if (!Array.isArray(points) || index < 0 || index >= points.length) return false;
+			const closedDuplicate = points.length > 1
+				&& points[0]!.x === points[points.length - 1]!.x
+				&& points[0]!.y === points[points.length - 1]!.y;
+			polyline.setPoints(points.map((point: { x: number; y: number }, pointIndex: number) =>
+				(pointIndex === index || (closedDuplicate && (
+					(index === 0 && pointIndex === points.length - 1)
+					|| (index === points.length - 1 && pointIndex === 0)
+				)))
+					? { x, y } : { x: point.x, y: point.y }));
 		}
 		else {
 			return false;
@@ -1874,6 +2050,30 @@ export class KicadRenderSession {
 				drawStrokeTextGeometry(renderer, geometry, color);
 				break;
 			}
+			case 'bezier': {
+				const points = [...p.points, p.cursor];
+				if (points.length >= 2) {
+					renderer.line(points, { strokeColor: color, strokeWidth: 0.1 });
+				}
+				if (points.length >= 4) {
+					const curve = cubicBezierToPolyline(points[0]!, points[1]!, points[2]!, points[3]!);
+					renderer.line(curve, { strokeColor: color, strokeWidth: 0.15 });
+				}
+				if (points.length < 2) {
+					drawCrosshair(renderer, p.cursor, color);
+				}
+				break;
+			}
+			case 'rule-area': {
+				const points = [...p.points, p.cursor];
+				if (points.length > 1) {
+					renderer.line([...points, points[0]!], { strokeColor: color, strokeWidth: 0.15 });
+				}
+				else {
+					drawCrosshair(renderer, p.cursor, color);
+				}
+				break;
+			}
 			case 'text-box': {
 				renderer.rect(new Vec2(p.x, p.y), p.width, p.height, { strokeColor: color, strokeWidth: 0.15 });
 				if (p.text) {
@@ -1978,6 +2178,13 @@ export class KicadRenderSession {
 			renderer.line([start, control1], { strokeColor: color, strokeWidth: lineWidth });
 			renderer.line([control2, end], { strokeColor: color, strokeWidth: lineWidth });
 		}
+		else if (curve.kind === 'polygon' && curve.anchors.length > 1) {
+			const points = curve.anchors
+				.slice()
+				.sort((a, b) => Number(a.kind.slice('polygon-vertex-'.length)) - Number(b.kind.slice('polygon-vertex-'.length)))
+				.map(anchor => new Vec2(anchor.x, anchor.y));
+			renderer.line([...points, points[0]!], { strokeColor: color, strokeWidth: lineWidth });
+		}
 		for (const point of byKind.values()) {
 			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
 				fillColor: color,
@@ -2033,6 +2240,19 @@ function pointLiesOnSegmentInterior(px: number, py: number, x1: number, y1: numb
 /** Semi-transparent white reads as a "ghost" preview over any real element
  *  color underneath, without colliding with schColors' saturated palette. */
 const EDIT_PREVIEW_COLOR = 'rgba(255, 255, 255, 0.6)';
+
+function cubicBezierToPolyline(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, steps = 32): Vec2[] {
+	const points: Vec2[] = [];
+	for (let i = 0; i <= steps; i++) {
+		const t = i / steps;
+		const u = 1 - t;
+		points.push(new Vec2(
+			u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+			u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
+		));
+	}
+	return points;
+}
 
 function drawCrosshair(renderer: Renderer, at: Vec2, color: string): void {
 	const s = 0.5;

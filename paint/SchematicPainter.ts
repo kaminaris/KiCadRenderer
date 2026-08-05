@@ -860,7 +860,9 @@ export class SchematicPainter {
 		const x = origin.x - width / 2;
 		const y = origin.y - height / 2;
 		const id = image.getUuid?.() ?? `sch-image:${origin.x},${origin.y}`;
-		const shape: PaintedShape = { type: 'rect', x, y, w: width, h: height };
+		// Images are opaque to the picker even when their decoded pixels contain
+		// transparency: KiCad selects the image by its full rectangular extent.
+		const shape: PaintedShape = { type: 'rect', x, y, w: width, h: height, filled: true };
 		const embedded: EmbeddedImage = { data, mimeType: info.mimeType };
 		return {
 			id, layer: 'Images', kind: 'image', shape, bbox: shapeToBBox(shape), hitTestable: true, element: image,
@@ -2292,7 +2294,7 @@ export class SchematicPainter {
 			addLine(new Vec2(minX, maxY), new Vec2(minX, minY), borderStroke);
 		}
 		items.push({
-			id: `${tableId}:borders`, layer: 'Graphics', kind: 'table', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: table,
+			id: `${tableId}:borders`, layer: 'Graphics', kind: 'table', shape: { type: 'rect', ...bbox, filled: true }, bbox, hitTestable: true, element: table,
 			draw: (renderer, color) => {
 				for (const line of lines) {
 					const lineColor = line.stroke.color || color;
