@@ -946,15 +946,14 @@ export class SchematicPainter {
 		const origin = text.getOrigin();
 		const rotation = origin.rotation ?? 0;
 		const worldPos = new Vec2(origin.x, origin.y);
-		const font = typeof text.getFont === 'function' ? text.getFont() : { width: 0, height: 0 };
-		const textSize = font.height || 1.27;
+		const { size: textSize, thickness, italic } = readElementFontMetrics(text);
 		// text_angle normalizes to 0/90 only, anchor comes straight from
 		// the file's own justify unmodified — same real KiCad convention
 		// already established for labels (see the block comment above
 		// buildLocalLabel()).
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = typeof text.getAnchorPoint === 'function' ? text.getAnchorPoint() : { x: 0.5, y: 0.5 };
-		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, textAngle, false, undefined, anchor);
+		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, textAngle, false, thickness, anchor, italic);
 		const id = text.getUuid() ?? `sch-text:${ origin.x },${ origin.y }`;
 		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
 		return {
@@ -997,11 +996,22 @@ export class SchematicPainter {
 		const instanceMatrix = buildInstanceMatrix(origin.x, origin.y, origin.rotation ?? 0, mirror);
 		const instanceId = instance.getUuid() ?? `sym:${ origin.x },${ origin.y }`;
 		const placedUnit: number = typeof instance.getUnitId === 'function' ? instance.getUnitId() : 0;
+		// Real KiCad's unit count gates the "U1" → "U1A" reference suffix
+		// (SCH_SYMBOL::GetRef, `if (aIncludeUnit && GetUnitCount() > 1) ref +=
+		// subRef`) — resolved through the same one-level `extends` fallback as
+		// relevantSubUnits, since a derived multi-unit part's own libDef has
+		// no sub-units of its own to count.
+		let unitCountSource = libDef;
+		if (typeof libDef.isDerived === 'function' && libDef.isDerived() && typeof libDef.getLayers === 'function' && libDef.getLayers().length === 0) {
+			const base = typeof libSymbols?.findSymbolByName === 'function' ? libSymbols.findSymbolByName(libDef.getExtends()) : null;
+			if (base) unitCountSource = base;
+		}
+		const unitCount: number = typeof unitCountSource.getUnitCount === 'function' ? unitCountSource.getUnitCount() : 1;
 		const isDnp = typeof instance.isDnp === 'function'
 			? !!instance.isDnp()
 			: !!instance.findFirstChildByName?.('dnp')?.value;
 
-		const subUnits = this.relevantSubUnits(libDef, placedUnit);
+		const subUnits = this.relevantSubUnits(libDef, placedUnit, libSymbols);
 		// Two passes across ALL sub-units, not one pass per sub-unit: a
 		// gate symbol's filled outline (e.g. the AND-gate rectangle/D-shape)
 		// and its body markings ("&", ">=1", "1", ...) commonly live in
@@ -1129,18 +1139,25 @@ export class SchematicPainter {
 					continue;
 				}
 				const prop = visibleProps[name];
-				const value: string | undefined = prop.propertyValue;
+				let value: string | undefined = prop.propertyValue;
 				if (!value) {
 					continue;
 				}
+				// "U1" → "U1A": the stored Reference property text is always
+				// the bare designator (matches real KiCad's own file format —
+				// SubReference is display-only, never written to the field
+				// itself); only the ON-SCREEN text gets the per-unit letter.
+				if (name === 'Reference' && unitCount > 1) {
+					value += letterSubReference(placedUnit > 0 ? placedUnit : 1);
+				}
 				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x: 0, y: 0, rotation: 0 };
 				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0.5, y: 0.5 };
-				const { size: textSize } = readElementFontMetrics(prop);
+				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
 				const drawRotationDeg = fieldDrawRotation(propOrigin.rotation ?? 0, origin.rotation ?? 0);
 				const textWorld = symbolFieldWorldCenter(
 					propOrigin, anchor, value, textSize, origin, mirror
 				);
-				const geometry = computeStrokeTextGeometry(value, textWorld, textSize, drawRotationDeg, false, undefined, { x: 0.5, y: 0.5 });
+				const geometry = computeStrokeTextGeometry(value, textWorld, textSize, drawRotationDeg, false, thickness, { x: 0.5, y: 0.5 }, italic);
 				const half = Math.max(textSize, 1.27);
 				const bbox = { x: textWorld.x - half, y: textWorld.y - half, w: half * 2, h: half * 2 };
 				items.push({
@@ -1299,11 +1316,32 @@ export class SchematicPainter {
 
 	/** unit 0 = shared across all units (always included); otherwise only
 	 * the instance's own selected unit. Same filter for deMorgan style,
-	 * defaulting to style 1 (alternate/deMorgan style 2 not selectable yet). */
-	protected relevantSubUnits(libDef: any, placedUnit: number): any[] {
-		const subUnits: any[] = typeof libDef.getLayers === 'function' ? libDef.getLayers() : [];
+	 * defaulting to style 1 (alternate/deMorgan style 2 not selectable yet).
+	 *
+	 * `libDef` itself may be a DERIVED symbol (`(extends "Base")`, e.g.
+	 * 74AHC273 extending 74LS273) — confirmed via the user's local KiCad
+	 * checkout (LIB_SYMBOL::IsDerived()/GetParent(), used pervasively
+	 * throughout lib_symbol.cpp): a derived symbol has no graphics/pins of
+	 * its own at all, only overridden properties, and real KiCad resolves
+	 * every drawing/pin query through to the base transparently. Without
+	 * this, `getLayers()` on a derived symbol is always empty, and the old
+	 * `subUnits.length === 0` fallback (`return [libDef]`) — correct for a
+	 * genuinely single-unit symbol with its OWN top-level graphics — instead
+	 * returned a symbol with NO graphics at all, rendering nothing. Resolved
+	 * one level (matches addLibrarySymbolFromText's own one-level embed —
+	 * real-world libraries don't chain `extends`), by name within the SAME
+	 * lib_symbols block the placed instance's own libId resolved against. */
+	protected relevantSubUnits(libDef: any, placedUnit: number, libSymbols?: any): any[] {
+		let graphicsSource = libDef;
+		if (typeof libDef.isDerived === 'function' && libDef.isDerived() && typeof libDef.getLayers === 'function' && libDef.getLayers().length === 0) {
+			const base = typeof libSymbols?.findSymbolByName === 'function' ? libSymbols.findSymbolByName(libDef.getExtends()) : null;
+			if (base) {
+				graphicsSource = base;
+			}
+		}
+		const subUnits: any[] = typeof graphicsSource.getLayers === 'function' ? graphicsSource.getLayers() : [];
 		if (subUnits.length === 0) {
-			return [libDef];
+			return [graphicsSource];
 		}
 		return subUnits.filter((s: any) => {
 			if (typeof s.deconstructSymbolName !== 'function') {
@@ -1448,14 +1486,26 @@ export class SchematicPainter {
 		const worldPoints = points.map(p => flippedTransform(instanceMatrix, p.x, p.y));
 		const { width, type: lineType } = typeof poly.getStroke === 'function' ? poly.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof poly.getFill === 'function' ? poly.getFill() : 'none';
-        const first = points[0], last = points[points.length - 1];
+		const first = points[0], last = points[points.length - 1];
 		const id = poly.getUuid() ?? `sym-poly:${ instanceId }:${ first?.x },${ first?.y }`;
 		const shape: PaintedShape = { type: 'polygon', points: worldPoints.map(p => ({ x: p.x, y: p.y })) };
-		const closed = points.length > 2 && first && last && first.x === last.x && first.y === last.y;
 		return {
 			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: poly,
 			draw: (renderer, color) => {
-				const fillColor = closed ? symbolFillColor(fillType, color) : undefined;
+				// Fill is gated on fillType alone (matching buildSymArc's own
+				// unconditional pattern), NOT on whether the point list
+				// happens to repeat its first point — confirmed via a real
+				// KiCad symbol (4xxx.kicad_sym's "4073"): the AND-gate body
+				// is an arc + a 4-point polyline that DON'T individually
+				// close (the polyline's first/last points are the arc's own
+				// two endpoints), both `(fill (type background))`, meant to
+				// render as ONE compound filled shape. A polygon fill always
+				// implicitly closes back to its first point regardless — the
+				// old `closed` gate here only ever suppressed fill on data
+				// shaped exactly like this real, common case, producing a
+				// two-tone body (arc's half correctly filled, polyline's
+				// half showing raw canvas background through it).
+				const fillColor = symbolFillColor(fillType, color);
 				if (fillColor) {
 					renderer.polygon(worldPoints, { fillColor });
 				}
@@ -1484,7 +1534,7 @@ export class SchematicPainter {
 		const contentH = Math.max(0, height - top - bottom);
 		const rotation = origin.rotation ?? 0;
 		const vertical = rotation === 90 || rotation === 270;
-		const { size: textSize, thickness } = readElementFontMetrics(textBox);
+		const { size: textSize, thickness, italic } = readElementFontMetrics(textBox);
 		const anchor = readJustifyAnchor(textBox);
 		// SCH_TEXTBOX swaps the alignment axes for vertical text: its ordinary
 		// horizontal alignment chooses Y, and vertical alignment chooses X.
@@ -1493,7 +1543,7 @@ export class SchematicPainter {
 			: new Vec2(x + left + anchor.x * contentW, y + top + anchor.y * contentH);
 		const wrappedValue = wrapTableCellText(value, vertical ? contentH : contentW, textSize);
 		const textAngle = vertical ? 90 : 0;
-		const geometry = value ? computeStrokeTextGeometry(wrappedValue, textPos, textSize, textAngle, false, thickness, anchor) : null;
+		const geometry = value ? computeStrokeTextGeometry(wrappedValue, textPos, textSize, textAngle, false, thickness, anchor, italic) : null;
 		const { width: strokeWidth, type: strokeType } = typeof textBox.getStroke === 'function'
 			? textBox.getStroke()
 			: { width: 0, type: 'solid' as KicadStrokeLineType };
@@ -1578,11 +1628,10 @@ export class SchematicPainter {
 		const dirPoint = flippedTransform(instanceMatrix, origin.x + Math.cos(rad), origin.y + Math.sin(rad));
 		const worldAngleDeg = (Math.atan2(dirPoint.y - worldPos.y, dirPoint.x - worldPos.x) * 180) / Math.PI;
 		const upright = uprightTextAngle(worldAngleDeg);
-		const font = typeof text.getFont === 'function' ? text.getFont() : { width: 0, height: 0 };
-		const textSize = font.height || 1.27;
+		const { size: textSize, thickness, italic } = readElementFontMetrics(text);
 		const rawAnchor = typeof text.getAnchorPoint === 'function' ? text.getAnchorPoint() : { x: 0.5, y: 0.5 };
 		const anchor = { x: upright.flipped ? 1 - rawAnchor.x : rawAnchor.x, y: rawAnchor.y };
-		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, upright.angleDeg, false, undefined, anchor);
+		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, upright.angleDeg, false, thickness, anchor, italic);
 		const id = text.getUuid() ?? `sym-text:${ instanceId }:${ origin.x },${ origin.y }`;
 		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
 		return {
@@ -1833,7 +1882,7 @@ export class SchematicPainter {
 		}
 		const atEl = getAtClass() ? label.findFirstChildByClass(getAtClass()) : null;
 		const x = atEl?.x ?? 0, y = atEl?.y ?? 0, rotation = atEl?.rotation ?? 0;
-		const { size: textSize, thickness } = readElementFontMetrics(label);
+		const { size: textSize, thickness, italic } = readElementFontMetrics(label);
 		// Real KiCad (SCH_LABEL_BASE::GetSchematicTextOffset) lifts a plain
 		// net label clear of the wire it's attached to by text_offset_ratio
 		// * text_size + the text's own stroke thickness — without this, the
@@ -1847,7 +1896,7 @@ export class SchematicPainter {
 		// `justify`, unmodified (see the block comment above).
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = readJustifyAnchor(label);
-		const geometry = computeStrokeTextGeometry(name, worldPos, textSize, textAngle, false, undefined, anchor);
+		const geometry = computeStrokeTextGeometry(name, worldPos, textSize, textAngle, false, thickness, anchor, italic);
 		// getUuid() (not an x/y/name-derived id) — matches every other
 		// builder's convention, and is load-bearing here specifically:
 		// translateElementById's caller (main.ts's drag loop) holds onto the
@@ -1881,7 +1930,7 @@ export class SchematicPainter {
 		const origin = label.getOrigin();
 		const rotation = origin.rotation ?? 0;
 		const shape: string = typeof label.getShape === 'function' ? label.getShape() : 'input';
-		const { size: textSize, thickness } = readElementFontMetrics(label);
+		const { size: textSize, thickness, italic } = readElementFontMetrics(label);
 		const worldOrigin = new Vec2(origin.x, origin.y);
 		const { width: textWidth } = measureStrokeTextSize(name, textSize);
 
@@ -1903,7 +1952,7 @@ export class SchematicPainter {
 		const worldTextPos = new Vec2(worldOrigin.x + textOffset.x, worldOrigin.y + textOffset.y);
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = readJustifyAnchor(label);
-		const geometry = computeStrokeTextGeometry(name, worldTextPos, textSize, textAngle, false, undefined, anchor);
+		const geometry = computeStrokeTextGeometry(name, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
 		const id = label.getUuid() ?? `label:${ origin.x },${ origin.y }`;
 		const bbox = { x: worldTextPos.x - textSize * 3, y: worldTextPos.y - textSize, w: textSize * 6, h: textSize * 2 };
 		// Same override color drives BOTH the text and its flag/arrow below —
@@ -1961,12 +2010,12 @@ export class SchematicPainter {
 		const origin = label.getOrigin();
 		const rotation = origin.rotation ?? 0;
 		const shape: string = typeof label.getShape === 'function' ? label.getShape() : 'input';
-		const { size: textSize, thickness } = readElementFontMetrics(label);
+		const { size: textSize, thickness, italic } = readElementFontMetrics(label);
 		const anchor = readJustifyAnchor(label);
 		const id = label.getUuid() ?? `hlabel:${ origin.x },${ origin.y }`;
 		return this.buildHierLabelShape(
 			id, name, new Vec2(origin.x, origin.y), rotation, shape, textSize, thickness, anchor.x, label, schColors.labelHier,
-			true
+			true, italic
 		);
 	}
 
@@ -1994,11 +2043,19 @@ export class SchematicPainter {
 	protected buildHierLabelShape(
 		id: string, text: string, worldOrigin: Vec2, rotation: number, shape: string,
 		textSize: number, thickness: number, hAlign: number, element: any, color: string,
-		/** True for a real, standalone hierarchical_label (selectable, like a
-		 *  global label's own flag). False for buildSheet()'s sheet-pin reuse
-		 *  of this same shape — a sheet pin isn't independently selectable
-		 *  apart from the sheet itself. */
-		flagHitTestable = false
+		/** Both real, standalone hierarchical_labels AND buildSheet()'s
+		 *  sheet-pin reuse of this shape are independently clickable+
+		 *  draggable now — kept as its own parameter (rather than always
+		 *  true) since flagHitTestable and labelKind used to be conflated
+		 *  via one boolean and that's exactly the coupling that made a
+		 *  sheet pin's dangling-detection tag ('sheet-pin', see
+		 *  buildDanglingFlags) fragile to change independently of its
+		 *  clickability — now they're two explicit parameters instead. */
+		flagHitTestable = false,
+		/** false for buildSheet()'s sheet-pin reuse — a raw KicadElementPin
+		 *  has no (effects (font (italic …))) concept to read one from. */
+		italic = false,
+		labelKind: 'hier' | 'sheet-pin' = 'hier'
 	): SchPaintedItem[] {
 		const items: SchPaintedItem[] = [];
 		// Real, standalone hier labels can carry a font color override;
@@ -2020,17 +2077,32 @@ export class SchematicPainter {
 		// bumping to a flat extra half text-size's worth of clearance.
 		const dist = textSize * (1 + labelTextOffsetRatio + 0.5) + thickness;
 
+		// A sheet pin's stored rotation/shape match a plain hier label's for
+		// the same signal exactly (see moveSheetPinById's doc comment) — but
+		// its stored `justify` is the OPPOSITE of what a hier label uses for
+		// that same rotation (confirmed against issue10926_1.kicad_sch: "IN"
+		// sheet pin has `justify left`, the matching subsheet hier_label has
+		// `justify right`, both at rotation 180). That only makes sense if
+		// the text sits on the OPPOSITE side of the anchor too — a hier
+		// label's text reads away from its wire stub into open canvas; a
+		// sheet pin's text reads INTO the sheet box it's attached to, with
+		// the small flag/chevron merely marking the exact border point. This
+		// rotation is purely a rendering-side, container-relative flip
+		// (which way is "inside"), NOT a file-format concept — it does not
+		// affect what moveSheetPinById stores.
+		const geomRotation = labelKind === 'sheet-pin' ? (rotation + 180) % 360 : rotation;
+
 		let textOffset: Vec2;
-		switch (rotation) {
+		switch (geomRotation) {
 			case 90: textOffset = new Vec2(0, -dist); break;
 			case 180: textOffset = new Vec2(-dist, 0); break;
 			case 270: textOffset = new Vec2(0, dist); break;
 			default: textOffset = new Vec2(dist, 0); break;
 		}
 		const worldTextPos = new Vec2(worldOrigin.x + textOffset.x, worldOrigin.y + textOffset.y);
-		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
+		const textAngle = (geomRotation === 90 || geomRotation === 270) ? 90 : 0;
 		const anchor = { x: hAlign, y: 0.5 };
-		const geometry = computeStrokeTextGeometry(text, worldTextPos, textSize, textAngle, false, undefined, anchor);
+		const geometry = computeStrokeTextGeometry(text, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
 		const bbox = { x: worldTextPos.x - textSize * 3, y: worldTextPos.y - textSize, w: textSize * 6, h: textSize * 2 };
 		items.push({
 			id: `${ id }:text`, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element,
@@ -2056,20 +2128,21 @@ export class SchematicPainter {
 				break;
 		}
 		const worldPts = pts.map((p) => {
-			const rotated = rotateLocalPoint(p, rotation);
+			const rotated = rotateLocalPoint(p, geomRotation);
 			return new Vec2(rotated.x + worldOrigin.x, rotated.y + worldOrigin.y);
 		});
 		const flagShape: PaintedShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
 			hitTestable: flagHitTestable, element, defaultColor: resolvedColor,
-			// flagHitTestable is only ever false for buildSheet()'s sheet-pin
-			// reuse of this shape (buildHierLabel's own call always passes
-			// true) — tagging that case 'sheet-pin' (rather than leaving
-			// labelKind undefined) lets buildDanglingFlags() recognize a
-			// sheet pin as a real connection point without making it
-			// independently clickable, which stays intentionally false.
-			labelName: flagHitTestable ? text : undefined, labelKind: flagHitTestable ? 'hier' : 'sheet-pin',
+			// The explicit labelKind param (not derived from flagHitTestable
+			// anymore) is what lets context-menu/other label-kind-dispatching
+			// code keep treating a sheet pin differently from a real
+			// hierarchical_label even though both are now independently
+			// clickable+draggable — e.g. renameLabel()/setLabelShape() don't
+			// apply to a raw KicadElementPin the way they do a real label,
+			// so the right-click menu must still be able to tell them apart.
+			labelName: labelKind === 'hier' ? text : undefined, labelKind,
 			draw: (renderer, drawColor) => renderer.line(worldPts, { strokeColor: drawColor, strokeWidth: thickness || 0.15 }),
 		});
 		return items;
@@ -2164,9 +2237,9 @@ export class SchematicPainter {
 				}
 				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x: origin.x, y: origin.y, rotation: 0 };
 				const worldPos = new Vec2(propOrigin.x, propOrigin.y);
-				const { size: textSize } = readElementFontMetrics(prop);
+				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
 				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0, y: 1 };
-				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, undefined, anchor);
+				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
 				const bbox = { x: worldPos.x - textSize * 3, y: worldPos.y - textSize, w: textSize * 6, h: textSize * 2 };
 				items.push({
 					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
@@ -2196,7 +2269,7 @@ export class SchematicPainter {
 
 		const shape: PaintedShape = { type: 'rect', x, y, w, h };
 		items.push({
-			id: `${ id }:box`, layer: 'Sheets', kind: 'sheet', shape, bbox: shape, hitTestable: false, element: sheet,
+			id: `${ id }:box`, layer: 'Sheets', kind: 'sheet', shape, bbox: shape, hitTestable: true, element: sheet,
 			draw: (renderer, color) => {
 				// wDark renders hierarchical-sheet interiors as an opaque near-black
 				// panel, distinct from the dark-gray schematic canvas. The color was
@@ -2238,8 +2311,13 @@ export class SchematicPainter {
 					: isFilename
 						? { x: 0, y: 0 }
 						: (typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0, y: 1 });
-				const textSize = 1.27;
-				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, undefined, anchor);
+				// readElementFontMetrics falls back to size:1.27 when the
+				// property has no (effects (font …)) child at all — same
+				// value this previously hardcoded unconditionally — so this
+				// is a strict upgrade: real bold/italic/custom-size now
+				// apply when present, with an identical fallback otherwise.
+				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
+				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
 				const bbox = { x: worldPos.x - 2, y: worldPos.y - 2, w: 4, h: 4 };
 				items.push({
 					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
@@ -2258,14 +2336,14 @@ export class SchematicPainter {
 		// misparse this. Position (WithOrigin) still works fine since that
 		// mixin is generic.
 		//
-		// Real KiCad (SCH_PAINTER's sheet-pin handling, ported from
-		// kicanvas's SchematicSheetPainter) doesn't draw sheet pins as a
-		// circle + plain text at all — it synthesizes a full hierarchical
-		// label from each pin and paints THAT, with the rotation flipped
-		// 180° and input/output swapped: a pin's own orientation/shape
-		// describes the signal as seen from INSIDE the child sheet, but the
-		// flag drawn on the PARENT sheet's box needs to point the opposite
-		// way and read as the opposite direction.
+		// The position and side rotation are stored in the same world
+		// coordinate system as the sheet rectangle.  Sheet pins do have one
+		// important rendering difference from ordinary hierarchical labels,
+		// though: KiCad's SCH_SHEET_PIN::CreateGraphicShape swaps INPUT and
+		// OUTPUT before passing the shape to SCH_HIERLABEL.  The swap makes the
+		// flag body point into the sheet while its text remains outside.  If
+		// the raw electrical shape is used directly, left/top pins visibly
+		// render outside the sheet (and right/bottom pins point the wrong way).
 		if (getPinClass()) {
 			for (const pin of sheet.findChildrenByClass(getPinClass())) {
 				const pinName = pin.attributes?.[0]?.value as string | undefined;
@@ -2274,14 +2352,16 @@ export class SchematicPainter {
 				}
 				const pinOrigin = typeof pin.getOrigin === 'function' ? pin.getOrigin() : { x, y, rotation: 0 };
 				const pinShape = (pin.attributes?.[1]?.value as string) ?? 'passive';
-				const flippedRotation = ((pinOrigin.rotation ?? 0) + 180) % 360;
-				const flippedShape = pinShape === 'input' ? 'output' : pinShape === 'output' ? 'input' : pinShape;
+				const sheetPinShape = pinShape === 'input'
+					? 'output'
+					: pinShape === 'output' ? 'input' : pinShape;
 				const { size: pinTextSize, thickness: pinThickness } = readElementFontMetrics(pin);
 				const anchor = readJustifyAnchor(pin);
 				const markerId = pin.getUuid() ?? `${ id }:pin:${ pinOrigin.x },${ pinOrigin.y }`;
 				for (const item of this.buildHierLabelShape(
-					markerId, pinName, new Vec2(pinOrigin.x, pinOrigin.y), flippedRotation, flippedShape,
-					pinTextSize, pinThickness, anchor.x, pin, schColors.sheetLabel
+					markerId, pinName, new Vec2(pinOrigin.x, pinOrigin.y), pinOrigin.rotation ?? 0, sheetPinShape,
+					pinTextSize, pinThickness, anchor.x, pin, schColors.sheetLabel,
+					true, false, 'sheet-pin'
 				)) {
 					items.push(item);
 				}
@@ -2381,14 +2461,14 @@ export class SchematicPainter {
 				});
 			}
 			if (cell.value) {
-				const { size: textSize, thickness } = readElementFontMetrics(cell.el);
+				const { size: textSize, thickness, italic } = readElementFontMetrics(cell.el);
 				const anchor = readJustifyAnchor(cell.el);
 				const contentW = Math.max(0, cell.w - left - right);
 				const contentH = Math.max(0, cell.h - top - bottom);
 				const position = new Vec2(cell.x + left + anchor.x * contentW, cell.y + top + anchor.y * contentH);
 				const rotation = cell.el.getOrigin?.().rotation ?? 0;
 				const wrappedValue = wrapTableCellText(cell.value, contentW, textSize);
-				const geometry = computeStrokeTextGeometry(wrappedValue, position, textSize, rotation, false, thickness, anchor);
+				const geometry = computeStrokeTextGeometry(wrappedValue, position, textSize, rotation, false, thickness, anchor, italic);
 				items.push({
 					id: `${tableId}:cell:${cell.el.getUuid?.() ?? `${cell.row},${cell.col}`}:text`,
 					layer: 'Graphics', kind: 'text', shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
@@ -2771,11 +2851,26 @@ const labelTextOffsetRatio = 0.15;
  * registered classes (GlobalLabel/HierLabel, which have a typed getFont()
  * via WithEffects) and the plain `label` tag (an untyped generic
  * KicadElement, confirmed gap — read via findFirstChildByName instead). */
-function readElementFontMetrics(el: any): { size: number; thickness: number } {
+// Real KiCad only auto-derives a pen width FROM bold/size when the item has
+// no explicit stroke-width override (common/eda_text.cpp: GetPenSizeForBold
+// = size/5, GetPenSizeForNormal = size/8, confirmed in the user's local
+// checkout). This app's own pinThickness (0.1524mm, a flat DefaultValues.
+// line_width constant) is the pre-existing NORMAL-case fallback here — kept
+// as-is rather than switched to the size-derived size/8 formula, to avoid
+// changing how every already-working non-bold text item currently renders.
+// Only the BOLD case is new: it substitutes the real size/5 formula instead
+// of the flat constant, since bold text needs a visibly thicker stroke than
+// pinThickness already provides to actually read as "bold" at typical zoom.
+function boldPenWidth(sizeMm: number): number {
+	return sizeMm / 5;
+}
+
+function readElementFontMetrics(el: any): { size: number; thickness: number; bold: boolean; italic: boolean } {
 	if (typeof el.getFont === 'function') {
 		const font = el.getFont();
 		if (font.height > 0) {
-			return { size: font.height, thickness: font.thickness || pinThickness };
+			const bold = !!font.bold;
+			return { size: font.height, thickness: font.thickness || (bold ? boldPenWidth(font.height) : pinThickness), bold, italic: !!font.italic };
 		}
 	}
 	const effects = typeof el.findFirstChildByName === 'function' ? el.findFirstChildByName('effects') : null;
@@ -2783,11 +2878,13 @@ function readElementFontMetrics(el: any): { size: number; thickness: number } {
 	if (font) {
 		const size = typeof font.getSize === 'function' ? font.getSize() : null;
 		const thickness = typeof font.getThickness === 'function' ? font.getThickness() : 0;
+		const bold = typeof font.getBold === 'function' ? !!font.getBold() : false;
+		const italic = typeof font.getItalic === 'function' ? !!font.getItalic() : false;
 		if (size && size.height > 0) {
-			return { size: size.height, thickness: thickness || pinThickness };
+			return { size: size.height, thickness: thickness || (bold ? boldPenWidth(size.height) : pinThickness), bold, italic };
 		}
 	}
-	return { size: 1.27, thickness: pinThickness };
+	return { size: 1.27, thickness: pinThickness, bold: false, italic: false };
 }
 
 /**
@@ -2863,12 +2960,38 @@ function wrapTableCellText(value: string, maxWidthMm: number, textSizeMm: number
 	return lines.join('\n');
 }
 
-/** `(mirror x)` / `(mirror y)` has no registered @kicad-io class (confirmed
- * gap) — falls back to a generic KicadElement whose single literal
- * attribute is still readable directly. */
+/** Ports LIB_SYMBOL::LetterSubReference (lib_symbol.cpp) — the per-unit
+ * letter real KiCad appends to a multi-unit symbol's displayed reference
+ * ("U1" unit 1 → "U1A", unit 2 → "U1B", ...). Base-26 "spreadsheet column"
+ * style: 1..26 → A..Z, 27 → AA, 28 → AB, etc. (26-unit parts are rare but
+ * the wraparound is cheap to keep faithful to the source). `unit` must be
+ * >= 1 — real KiCad's own caller-side guard (SCHEMATIC_SETTINGS::
+ * SubReference's `if (aUnit < 1) return`) is the caller's job here too. */
+function letterSubReference(unit: number, initialLetter = 'A'): string {
+	let suffix = '';
+	let u = unit;
+	do {
+		const rem = (u - 1) % 26;
+		suffix = String.fromCharCode(initialLetter.charCodeAt(0) + rem) + suffix;
+		// C++'s `(aUnit - u) / 26` is INTEGER division (aUnit is `int`) —
+		// JS's `/` is floating-point and, for unit=1 (rem=0), never reaches
+		// exactly 0 this way (0.0384..., 0.0015..., asymptotic forever: a
+		// genuine infinite loop, not just a slow one). Math.floor replicates
+		// C++'s truncation for these always-non-negative operands.
+		u = Math.floor((u - rem) / 26);
+	} while (u > 0);
+	return suffix;
+}
+
+/** `(mirror x)` / `(mirror y)` — now a registered KicadElementMirror
+ * (KicadElementLiteral.value), preferred first; the attribute/children
+ * fallback stays for any unregistered/legacy-shaped element that slips
+ * through, same defensive spirit as this file's other readers. */
 function readMirror(instance: any): 'x' | 'y' | null {
 	const mirrorEl = typeof instance.findFirstChildByName === 'function' ? instance.findFirstChildByName('mirror') : null;
 	if (mirrorEl) {
+		const value = String(mirrorEl.value ?? '');
+		if (value === 'x' || value === 'y') return value;
 		for (const attr of mirrorEl.attributes) {
 			const v = String(attr.value);
 			if (v === 'x' || v === 'y') return v as 'x' | 'y';

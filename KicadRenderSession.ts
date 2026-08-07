@@ -21,12 +21,20 @@ import { KicadElementAt }         from '@kicad-io/KicadElementAt';
 import { KicadElementSize }       from '@kicad-io/KicadElementSize';
 import { KicadElementTable, KicadElementTableCell } from '@kicad-io/KicadElementTable';
 import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
+import { KicadElementGroup } from '@kicad-io/KicadElementGroup';
+import { KicadElementData } from '@kicad-io/KicadElementData';
+import { KicadElementImage } from '@kicad-io/KicadElementImage';
 import { KicadElementText, KicadElementTextBox, KicadElementLabel } from '@kicad-io/KicadElementText';
 import { KicadElementGlobalLabel, type KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
 import { KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
 import { KicadElementNetclassFlag, type KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
 import { KicadElementSymbol }          from '@kicad-io/KicadElementSymbol';
+import { KicadElementSheet }           from '@kicad-io/KicadElementSheet';
+import { KicadElementPin }             from '@kicad-io/KicadElementPin';
 import { KicadElementLibSymbols }      from '@kicad-io/KicadElementLibSymbols';
+import { KicadElementLibId }           from '@kicad-io/KicadElementString';
+import { KicadElementUnit }            from '@kicad-io/KicadElementNumeric';
+import { KicadElementDnp }             from '@kicad-io/KicadElementBoolean';
 import { buildPowerFlag, buildPowerGnd, buildPowerRail } from '@kicad-io/Builder/PassiveSymbolBuilder';
 import { buildPowerSymbolInstance }    from '@kicad-io/Builder/PowerSymbolInstance';
 
@@ -44,11 +52,12 @@ import {
 }                                      from './paint/BoardPainter';
 import {
 	SchematicPainter, defaultSchLayerState,
-	SchematicScene, SchLayerVisibilityState, SchematicSheetRef, SchematicDocInfo
+	SchematicScene, SchLayerVisibilityState, SchematicSheetRef, SchematicDocInfo, SchPaintedItem
 }                                      from './paint/SchematicPainter';
 import { boardBackgroundColor }      from './paint/LayerColors';
 import { schematicBackgroundColor }  from './paint/SchematicColors';
 import { hitTest }                     from './paint/HitTest';
+import { distanceToSegment }           from './paint/PaintedShape';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry } from './paint/TextPaint';
 import { registerDefaultKicadClasses } from './RegisterDefaultClasses';
 
@@ -73,6 +82,11 @@ export interface HitResult {
 }
 
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'w' | 'center' | 'e' | 'sw' | 's' | 'se';
+
+/** Real KiCad's eeschema has align (ACTIONS::alignLeft/Right/Top/Bottom/
+ *  CenterX/CenterY, sch_align_tool.cpp) but NOT distribute — that action
+ *  only exists in the PCB editor — so alignSelection() only covers these six. */
+export type AlignAxis = 'left' | 'right' | 'top' | 'bottom' | 'center-x' | 'center-y';
 
 /** The editable, axis-aligned bounds of a selected root-level rectangle or
  * text box. These are deliberately separate from general hit bounds: the
@@ -126,7 +140,14 @@ export type EditPreviewState =
 	}
 	/** Power symbols place in one click (like junction/no-connect) — no
 	 *  glyph preview needed, just a cursor-follow marker. */
-	| { kind: 'power'; cursor: Vec2 };
+	| { kind: 'power'; cursor: Vec2 }
+	/** Select tool's rectangle multi-select drag. `mode` is the contained
+	 *  ('origin'→cursor drawn left-to-right) vs touching (right-to-left)
+	 *  distinction; `selectMode` is what committing the box will do to the
+	 *  existing selection, both driving live color feedback — see
+	 *  SELECTION_BOX_* constants. Deliberately unsnapped (origin/cursor are
+	 *  raw world coordinates), unlike every other preview kind above. */
+	| { kind: 'selection-box'; origin: Vec2; cursor: Vec2; mode: 'contained' | 'touching'; selectMode: 'replace' | 'add' | 'subtract' };
 
 /** Placed schematic symbol pose for edit/drag without a circuit recipe. */
 export interface SymbolPoseInfo {
@@ -165,7 +186,11 @@ export class KicadRenderSession {
 	/** Retained across loadSchematicText so moveSymbolByRef can mutate + rebuild the scene without re-parsing text. */
 	protected schematicRoot: { rootElement: any } | null = null;
 	protected schematicDocInfo: SchematicDocInfo | undefined = undefined;
-	protected selectedId: string | null = null;
+	/** Multi-select-capable — see select()/selectMultiple()/selection/selectionIds. */
+	protected selectedIds: Set<string> = new Set();
+	/** Overrides drawGrid()'s default spacing — see setGridSpacing(). null
+	 *  means "use the built-in default" (1.27mm schematic / 0.5mm board). */
+	protected gridSpacingMm: number | null = null;
 	/** Hand-drawn editor's in-progress tool state — see drawEditPreview(). */
 	protected editPreview: EditPreviewState | null = null;
 	/**
@@ -278,8 +303,19 @@ export class KicadRenderSession {
 		return this.flipped;
 	}
 
+	/** Single-item view: the one selected id, or null when 0 or 2+ are
+	 *  selected. Single-item UI affordances (resize handles, curve anchors,
+	 *  Rotate/Tidy/the property sidebar's per-kind panel) all key off this —
+	 *  degrading to null for a real multi-selection is deliberate, not a
+	 *  gap: none of those have well-defined multi-item behavior yet (see
+	 *  [[kicad-viewer-edit-mode]]'s multi-select scope notes). Callers that
+	 *  need to know "how many, which ones" want selectionIds instead. */
 	get selection(): string | null {
-		return this.selectedId;
+		return this.selectedIds.size === 1 ? [...this.selectedIds][0]! : null;
+	}
+
+	get selectionIds(): ReadonlySet<string> {
+		return this.selectedIds;
 	}
 
 	/**
@@ -451,6 +487,55 @@ export class KicadRenderSession {
 		};
 	}
 
+	/**
+	 * Rectangle multi-select hit-test: bbox-based containment ('contained')
+	 * or intersection ('touching') against every hitTestable schematic item
+	 * — same population point-click selection already considers selectable
+	 * (schScene.hitTestItems is pre-filtered to hitTestable:true at build
+	 * time). `worldOrigin`/`worldCursor` are the drag's two corners in
+	 * either order; normalized here. Deliberately NOT shape-precise (no
+	 * polygon/pin/field-expansion matching real KiCad's per-item HitTest) —
+	 * a bbox approximation is intentional and sufficient at this app's
+	 * scale, matching every other hit-test method in this file.
+	 */
+	hitTestRect(worldOrigin: Vec2, worldCursor: Vec2, mode: 'contained' | 'touching'): string[] {
+		if (this.documentType !== 'schematic' || !this.schScene || !this.schematicRoot) {
+			return [];
+		}
+		const minX = Math.min(worldOrigin.x, worldCursor.x);
+		const maxX = Math.max(worldOrigin.x, worldCursor.x);
+		const minY = Math.min(worldOrigin.y, worldCursor.y);
+		const maxY = Math.max(worldOrigin.y, worldCursor.y);
+		// Only items whose element is a direct, top-level child of the
+		// schematic — a symbol's own pins and body graphics (kind 'pin' /
+		// 'symbol-graphic') are ALSO hitTestable:true (so wire-endpoint
+		// snapping and dangling-indicator checks can see them), but they
+		// live nested inside the shared lib_symbols definition, in LIBRARY-
+		// LOCAL coordinates, not the placed instance's own world position.
+		// Selecting one directly here would be harmless on its own, but a
+		// downstream move (translateSelection) would happily call setOrigin
+		// on it as if the id/coords were world-space — silently corrupting
+		// the shared symbol definition for every instance that uses it, not
+		// just the one clicked. Point-click selection is naturally immune
+		// (the symbol's own encompassing hitbox is built to win over its
+		// nested sub-items), so this only needed fixing here.
+		const rootChildren = new Set(this.schematicRoot.rootElement?.children ?? []);
+		const result: string[] = [];
+		for (const item of this.schScene.hitTestItems) {
+			if (!rootChildren.has(item.element)) {
+				continue;
+			}
+			const { x, y, w, h } = item.bbox;
+			const matches = mode === 'contained'
+				? (x >= minX && y >= minY && x + w <= maxX && y + h <= maxY)
+				: (x <= maxX && x + w >= minX && y <= maxY && y + h >= minY);
+			if (matches) {
+				result.push(item.id);
+			}
+		}
+		return result;
+	}
+
 	/** Which hierarchical sheet (if any) contains a screen position — plain
 	 * point-in-bbox test against currentSheets, since sheet boxes are
 	 * always axis-aligned rectangles and don't need the general hitTest()
@@ -478,12 +563,109 @@ export class KicadRenderSession {
 		return best;
 	}
 
+	/** Single-item select/replace — a thin convenience wrapper over
+	 *  selectMultiple, kept because this exact signature is called directly
+	 *  by consumers outside apps/kicad-viewer (the Angular CircuitDesign/
+	 *  Viewer pages under web/src/app/Features) that only ever need
+	 *  single-item selection and should not need to change. */
 	select(id: string | null): void {
-		this.selectedId = id;
+		this.selectMultiple(id ? [id] : [], 'replace');
+	}
+
+	/** Rectangle multi-select's mutator — also what select() delegates to.
+	 *  'replace' clears and sets the given ids; 'add'/'subtract' merge them
+	 *  into the current selection (a plain click with no modifier is
+	 *  'replace' with 0-or-1 ids, same as select() always was). */
+	selectMultiple(ids: string[], mode: 'replace' | 'add' | 'subtract'): void {
+		if (mode === 'replace') {
+			this.selectedIds = new Set(ids);
+		}
+		else if (mode === 'add') {
+			for (const id of ids) this.selectedIds.add(id);
+		}
+		else {
+			for (const id of ids) this.selectedIds.delete(id);
+		}
 		// Highlight color is baked per-vertex at build time on WebGL — see
 		// setLayerVisible()'s comment.
 		this.geometryDirty = true;
 		this.scheduleRender();
+	}
+
+	/** Every KicadElementGroup currently in the document — cheap early-return
+	 *  when none exist (every schematic that doesn't use groups, i.e. every
+	 *  one today), so expandGroupSelection/selectionHasGroup cost nothing
+	 *  for documents that never touch this feature. */
+	private allGroups(): KicadElementGroup[] {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
+			return [];
+		}
+		return (this.schematicRoot.rootElement.children as any[]).filter(
+			(c): c is KicadElementGroup => c instanceof KicadElementGroup
+		);
+	}
+
+	/**
+	 * Given a set of just-resolved paint ids (a click, a rect-select
+	 * commit), expands any id that's a member of an existing
+	 * KicadElementGroup into that WHOLE group's member set — so grouped
+	 * items behave as one unit at the selection layer. Resolves group
+	 * membership by the underlying ELEMENT's own uuid
+	 * (item.element.getUuid()), never the paint id — paint ids diverge
+	 * from the element uuid for some kinds (a symbol's is
+	 * `symbol:${uuid}`, a global/hier label's is `${uuid}:flag`), while a
+	 * group's (members ...) list always stores real element uuids. Not
+	 * centralized inside selectMultiple() — callers with an explicit
+	 * single-target contract (the double-click properties modal's
+	 * s.select(id)) must NOT be silently upgraded to a whole group.
+	 */
+	expandGroupSelection(ids: string[]): string[] {
+		const groups = this.allGroups();
+		if (groups.length === 0 || !this.schScene) {
+			return ids;
+		}
+		const hitItems = this.schScene.hitTestItems;
+		const uuidToPaintId = new Map<string, string>();
+		for (const item of hitItems) {
+			const uuid = (item.element as any)?.getUuid?.();
+			if (uuid) {
+				uuidToPaintId.set(uuid, item.id);
+			}
+		}
+		const result = new Set(ids);
+		for (const id of ids) {
+			const uuid = (hitItems.find(it => it.id === id)?.element as any)?.getUuid?.();
+			if (!uuid) {
+				continue;
+			}
+			for (const group of groups) {
+				if (!group.getMemberUuids().includes(uuid)) {
+					continue;
+				}
+				for (const memberUuid of group.getMemberUuids()) {
+					const paintId = uuidToPaintId.get(memberUuid);
+					if (paintId) {
+						result.add(paintId);
+					}
+				}
+			}
+		}
+		return [...result];
+	}
+
+	/** Read-only check for the Ungroup menu item's enabled state — true if
+	 *  any of the given ids' underlying elements is a member of an
+	 *  existing group. */
+	selectionHasGroup(ids: string[]): boolean {
+		const groups = this.allGroups();
+		if (groups.length === 0 || !this.schScene) {
+			return false;
+		}
+		const hitItems = this.schScene.hitTestItems;
+		const uuids = new Set(
+			ids.map(id => (hitItems.find(it => it.id === id)?.element as any)?.getUuid?.()).filter(Boolean)
+		);
+		return groups.some(group => group.getMemberUuids().some(u => uuids.has(u)));
 	}
 
 	/** Fits the camera to a set of items' combined bbox — same auto-fit-on-load
@@ -559,6 +741,16 @@ export class KicadRenderSession {
 		this.fitToItems(items.length > 0 ? items : this.schScene.hitTestItems);
 	}
 
+	/** Overrides drawGrid()'s visible dot spacing — null restores the
+	 *  built-in default. Callers that also snap placement to a grid (e.g.
+	 *  apps/kicad-viewer's own snap()) should pass the SAME value here, so
+	 *  what's drawn matches what things actually snap to; this session has
+	 *  no snap logic of its own to keep in sync automatically. */
+	setGridSpacing(mm: number | null): void {
+		this.gridSpacingMm = mm !== null && Number.isFinite(mm) && mm > 0 ? mm : null;
+		this.scheduleRender();
+	}
+
 	// ---- Layers / backend ----
 
 	setLayerVisible(layer: string, visible: boolean): void {
@@ -613,7 +805,7 @@ export class KicadRenderSession {
 		const buildMs = performance.now() - t1;
 		this.layerState = defaultLayerState(this.scene.layersPresent);
 		this.geometryDirty = true;
-		this.selectedId = null;
+		this.selectedIds = new Set();
 
 		this.fitToItems(this.scene.hitTestItems);
 		this.scheduleRender();
@@ -657,7 +849,7 @@ export class KicadRenderSession {
 		const buildMs = performance.now() - t1;
 		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
 		this.geometryDirty = true;
-		this.selectedId = null;
+		this.selectedIds = new Set();
 
 		if (!docInfo?.preserveView) {
 			this.fitSchematicContent();
@@ -672,7 +864,17 @@ export class KicadRenderSession {
 	 * (as opposed to reloading text): rebuild the scene from the current tree,
 	 * reset layer visibility state, and schedule a repaint. No re-parsing.
 	 */
+	/** >0 while a batch of mutations is in progress — see beginBatch(). */
+	private batchDepth = 0;
+
 	private commitAstMutation(): void {
+		if (this.batchDepth > 0) {
+			return;
+		}
+		this.rebuildSchScene();
+	}
+
+	private rebuildSchScene(): void {
 		if (!this.schematicRoot) {
 			return;
 		}
@@ -680,6 +882,25 @@ export class KicadRenderSession {
 		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
 		this.geometryDirty = true;
 		this.scheduleRender();
+	}
+
+	/** Defers commitAstMutation()'s scene rebuild (a full re-paint of every
+	 *  item, confirmed non-trivial for anything but a tiny schematic) until
+	 *  the matching endBatch() — wrap several mutation calls (e.g.
+	 *  translateSelection's one-call-per-selected-item loop) to pay for
+	 *  exactly one rebuild instead of one per call. Nests safely: only the
+	 *  outermost endBatch triggers the rebuild. Every existing single-item
+	 *  mutation method is completely unaffected when called outside a batch
+	 *  (batchDepth stays 0, commitAstMutation behaves exactly as before). */
+	private beginBatch(): void {
+		this.batchDepth++;
+	}
+
+	private endBatch(): void {
+		this.batchDepth = Math.max(0, this.batchDepth - 1);
+		if (this.batchDepth === 0) {
+			this.rebuildSchScene();
+		}
 	}
 
 	/** Push the current schematic text onto the undo stack. Called internally
@@ -783,6 +1004,54 @@ export class KicadRenderSession {
 	}
 
 	/**
+	 * Pin number/name visibility and the pin-name offset are library-symbol-
+	 * ONLY fields in real KiCad's own grammar — confirmed in the user's
+	 * local checkout: `pin_names`/`pin_numbers` are only ever parsed inside
+	 * SCH_IO_KICAD_SEXPR_PARSER::parseLibSymbol, never in the placed-
+	 * instance parser. A placed `(symbol (lib_id …) (at …) …)` has no such
+	 * child in real KiCad, and this app's own SchematicPainter.buildSymbol-
+	 * Instance() already only ever reads these flags off the resolved
+	 * LIBRARY definition (`libDef.arePinNumbersHidden()` etc.), never the
+	 * instance — so writing them onto the instance (mutateSymbolByPaintId's
+	 * usual target) is invisible by construction, not a renderer bug. This
+	 * resolves the SAME paint id to the instance's OWN library definition
+	 * instead, matching where the renderer actually looks and where real
+	 * KiCad actually stores the field. Affects every OTHER placement of the
+	 * same library symbol too — that's real KiCad's own behavior for this
+	 * field, not a limitation of this method.
+	 */
+	mutateLibSymbolForInstance(paintId: string, mutate: (libSymbol: KicadElementSymbol) => void): boolean {
+		const libDef = this.findLibSymbolForInstance(paintId);
+		if (!libDef) {
+			return false;
+		}
+		this.pushUndoSnapshot('Property edit');
+		mutate(libDef);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Read-only counterpart to mutateLibSymbolForInstance — for the
+	 *  property panel's initial checkbox/field state, which must reflect
+	 *  the SAME library definition the renderer and the mutator both read
+	 *  from, not the placed instance (see mutateLibSymbolForInstance's doc
+	 *  comment). Callers must not retain the returned reference past the
+	 *  current render, same rule as every other paint-id lookup here. */
+	findLibSymbolForInstance(paintId: string): KicadElementSymbol | null {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !this.schScene) {
+			return null;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		const instance = item?.element;
+		if (!(instance instanceof KicadElementSymbol)) {
+			return null;
+		}
+		const libId = instance.getLibId?.();
+		const libSymbols = this.schematicRoot.rootElement.findFirstChildByClass(KicadElementLibSymbols);
+		return (libId && libSymbols ? libSymbols.findSymbolByName(libId) : null) ?? null;
+	}
+
+	/**
 	 * Generic sibling of mutateSymbolByPaintId for every OTHER element kind
 	 * (wires/shapes/text/labels/junctions/…) — same property-inspector entry
 	 * point contract (find by paint id, push undo, mutate, commit; never
@@ -807,6 +1076,54 @@ export class KicadRenderSession {
 	}
 
 	/**
+	 * Batch sibling of mutateElementByPaintId for a multi-selection of
+	 * same-kind items — shaped like deleteElements (one undo push, one
+	 * commit), NOT like translateSelection's beginBatch/endBatch wrapper,
+	 * because this never re-enters another self-committing method: it
+	 * mutates each resolved element directly with the SAME callback, so
+	 * there's nothing for a nested commitAstMutation() to short-circuit.
+	 * Looping mutateElementByPaintId itself would push N undo snapshots and
+	 * rebuild the scene N times for one logical edit — this pushes once and
+	 * rebuilds once. Returns the count actually mutated (0 means the caller
+	 * should not treat this as a real edit — e.g. skip the undo-adjacent
+	 * UI refresh).
+	 */
+	mutateElementsByPaintIds(ids: string[], mutate: (element: any) => void): number {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+			return 0;
+		}
+		const elements: any[] = [];
+		for (const id of ids) {
+			const el = this.schScene.hitTestItems.find(it => it.id === id)?.element;
+			if (el) {
+				elements.push(el);
+			}
+		}
+		if (elements.length === 0) {
+			return 0;
+		}
+		this.pushUndoSnapshot('Property edit');
+		for (const el of elements) {
+			mutate(el);
+		}
+		this.commitAstMutation();
+		return elements.length;
+	}
+
+	/** Finds a placed symbol instance by its own paint-item id — unlike a
+	 *  Reference designator, an id is always unique to one instance, even
+	 *  when several units of one multi-unit part share a Reference (e.g.
+	 *  five "U1" instances for a quad-gate-plus-power-unit part). Callers
+	 *  that already have the id (e.g. from a hit-test at mousedown) should
+	 *  prefer it over the Reference-keyed lookup below for exactly this
+	 *  reason — see moveSymbolByRef/getSymbolPose/autoplaceSymbolFields'
+	 *  optional `instanceId` parameter. */
+	private findSymbolInstanceById(id: string): any | null {
+		const item = this.schScene?.hitTestItems.find(it => it.kind === 'symbol' && it.id === id);
+		return item?.element ?? null;
+	}
+
+	/**
 	 * Move (and optionally rotate) a placed symbol instance by its Reference
 	 * designator, then rebuild just the paint scene from the already-parsed
 	 * document (no text re-parse) and re-render. This is what makes editor
@@ -819,11 +1136,13 @@ export class KicadRenderSession {
 	 * rotated around the symbol origin when rotation changes) along with
 	 * the body — matching KiCad's own move behavior.
 	 */
-	moveSymbolByRef(reference: string, x: number, y: number, rotation?: number): boolean {
+	moveSymbolByRef(reference: string, x: number, y: number, rotation?: number, instanceId?: string): boolean {
 		if (this.documentType !== 'schematic' || !this.schematicRoot) {
 			return false;
 		}
-		const instance = this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
+		const instance = instanceId
+			? this.findSymbolInstanceById(instanceId)
+			: this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
 		if (!instance || typeof instance.setOrigin !== 'function') {
 			return false;
 		}
@@ -875,6 +1194,151 @@ export class KicadRenderSession {
 	}
 
 	/**
+	 * Move a hierarchical sheet box by absolute position (mirrors
+	 * moveSymbolByRef's shape, minus the rotation handling real KiCad has no
+	 * equivalent of for sheets — see KicadElementSheet's doc comment).
+	 * Sheet properties (Sheetname/Sheetfile/custom) AND sheet pins are both
+	 * stored at ABSOLUTE coordinates in the file (confirmed via
+	 * SchematicPainter.buildSheet's own read path, which uses each one's own
+	 * `(at …)` directly as world position, never relative to the sheet's own
+	 * `at`) — so both need shifting by the same delta the box itself moves
+	 * by, or a drag would leave the name/file text and every pin arrow
+	 * behind at their old position while just the box outline moved.
+	 */
+	moveSheetById(paintId: string, x: number, y: number): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+			return false;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		const sheet = item?.element;
+		if (!(sheet instanceof KicadElementSheet)) {
+			return false;
+		}
+		const { x: oldX, y: oldY } = sheet.getPosition();
+		const dx = x - oldX, dy = y - oldY;
+		if (dx !== 0 || dy !== 0) {
+			sheet.setPosition(x, y);
+			const props: any[] = typeof sheet.getProperties === 'function' ? sheet.getProperties() : [];
+			for (const prop of props) {
+				if (!prop || typeof prop.getOrigin !== 'function' || typeof prop.setOrigin !== 'function') {
+					continue;
+				}
+				const po = prop.getOrigin();
+				prop.setOrigin(Number(po.x ?? 0) + dx, Number(po.y ?? 0) + dy, po.rotation ?? 0);
+			}
+			for (const pin of sheet.findChildrenByClass(KicadElementPin)) {
+				if (typeof pin.getOrigin !== 'function' || typeof pin.setOrigin !== 'function') {
+					continue;
+				}
+				const po = pin.getOrigin();
+				pin.setOrigin(Number(po.x ?? 0) + dx, Number(po.y ?? 0) + dy, po.rotation ?? 0);
+			}
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
+	/**
+	 * Move a single sheet pin, constrained to slide along whichever of the
+	 * parent sheet's 4 edges is nearest the target point — ports real
+	 * KiCad's SCH_SHEET_PIN::ConstrainOnEdge exactly (eeschema/
+	 * sch_sheet_pin.cpp, confirmed in the user's local checkout, including
+	 * `aAllowEdgeSwitch=true`, always used on its own drag path — a pin can
+	 * jump to a different edge mid-drag, not just slide along its starting
+	 * one).
+	 *
+	 * The stored rotation per edge comes directly from
+	 * `getSheetPinAngle(SHEET_SIDE)` (eeschema/sch_io/kicad_sexpr/
+	 * sch_io_kicad_sexpr_common.cpp — the dedicated sheet-pin serializer,
+	 * confirmed in the user's local checkout): LEFT=180, RIGHT=0, TOP=90,
+	 * BOTTOM=270. An earlier version of this derived the same table
+	 * INDIRECTLY (SCH_SHEET_PIN::SetSide()'s per-edge SPIN_STYLE combined
+	 * with the GENERIC label parser's separate rotation<->SPIN_STYLE map)
+	 * and landed on every edge's opposite value (LEFT/RIGHT swapped,
+	 * TOP/BOTTOM swapped) — sheet pins turn out to have their own dedicated
+	 * write path entirely separate from SCH_IO_KICAD_SEXPR::saveText's
+	 * generic label SPIN_STYLE handling, so reasoning by analogy from that
+	 * path was the wrong source to begin with, not just a transcription
+	 * slip.
+	 *
+	 * Fixing this table alone still rendered text on the wrong side (inside
+	 * the sheet instead of outside), because buildSheet's render path
+	 * ALSO applied a `(rotation+180)` flip plus an input/output shape swap
+	 * before drawing — justified by a comment claiming a pin's stored
+	 * orientation describes the signal as seen from inside the child sheet
+	 * and needs flipping for the parent-box arrow. That claim traced back
+	 * to kicanvas (a third-party reimplementation), not real KiCad. Real
+	 * KiCad's own QA fixture (qa/data/eeschema/issue10926_1.kicad_sch) and
+	 * its referenced subsheet (issue10926_1_subsheet_1.kicad_sch) disprove
+	 * it directly: a sheet pin and the plain `hierarchical_label` for the
+	 * SAME signal on the child side store the identical rotation and shape,
+	 * no flip either way — consistent with SCH_SHEET_PIN extending
+	 * SCH_HIERLABEL and sch_painter.cpp drawing both through one generic
+	 * path with no special-casing. The flip/swap has been removed from
+	 * buildSheet; both bugs (this file's table, and that file's flip) are
+	 * now fixed together and verified against the same real fixture.
+	 *
+	 * `justify`, unlike rotation/shape, is NOT the same between a sheet pin
+	 * and its matching hier label — it's the opposite (that same fixture:
+	 * sheet pin "IN" has `justify left`, the subsheet's matching
+	 * `hierarchical_label "IN"` has `justify right`, same rotation 180 —
+	 * necessary because buildSheet's flip means the text sits on the
+	 * opposite side, so it needs the opposite justify to still read
+	 * correctly). `SCH_SHEET_PIN::SetSide()` (same file) sets rotation AND
+	 * justify TOGETHER via `SetSpinStyle()` (sch_label.cpp) — confirmed
+	 * exact mapping: LEFT->H_ALIGN_LEFT, RIGHT->H_ALIGN_RIGHT,
+	 * TOP->H_ALIGN_RIGHT, BOTTOM->H_ALIGN_LEFT. `ConstrainOnEdge` calls
+	 * `SetSide()` UNCONDITIONALLY on every drag (even via its
+	 * `aAllowEdgeSwitch=false` branch, which re-asserts the CURRENT edge)
+	 * — so justify is set fresh every drag, never left stale from a
+	 * previous edge. This method does the same below: setJustify runs
+	 * every call, not just when the edge actually changes, otherwise a
+	 * pin dragged e.g. RIGHT-\>LEFT would keep its stale RIGHT-edge
+	 * justify paired with its new LEFT-edge rotation, rendering text
+	 * starting from outside the box again — the exact regression this
+	 * paragraph exists to prevent a repeat of.
+	 */
+	moveSheetPinById(paintId: string, x: number, y: number): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+			return false;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		const pin = item?.element;
+		if (!(pin instanceof KicadElementPin) || !(pin.parent instanceof KicadElementSheet) || typeof pin.setOrigin !== 'function') {
+			return false;
+		}
+		const sheet = pin.parent;
+		const { x: sx, y: sy } = sheet.getPosition();
+		const { width: sw, height: sh } = sheet.getSize();
+		const left = sx, right = sx + sw, top = sy, bottom = sy + sh;
+
+		const edgeRotation = { left: 180, right: 0, top: 90, bottom: 270 } as const;
+		const edgeJustify = { left: 'left', right: 'right', top: 'right', bottom: 'left' } as const;
+		const edges: { side: keyof typeof edgeRotation; dist: number }[] = [
+			{ side: 'top', dist: distanceToSegment(x, y, left, top, right, top) },
+			{ side: 'right', dist: distanceToSegment(x, y, right, top, right, bottom) },
+			{ side: 'bottom', dist: distanceToSegment(x, y, right, bottom, left, bottom) },
+			{ side: 'left', dist: distanceToSegment(x, y, left, bottom, left, top) },
+		];
+		const nearest = edges.reduce((a, b) => (b.dist < a.dist ? b : a));
+
+		let px: number, py: number;
+		if (nearest.side === 'left' || nearest.side === 'right') {
+			px = nearest.side === 'left' ? left : right;
+			py = Math.max(top, Math.min(bottom, y));
+		}
+		else {
+			py = nearest.side === 'top' ? top : bottom;
+			px = Math.max(left, Math.min(right, x));
+		}
+
+		pin.setOrigin(px, py, edgeRotation[nearest.side]);
+		pin.setJustify(edgeJustify[nearest.side], 'middle');
+		this.commitAstMutation();
+		return true;
+	}
+
+	/**
 	 * Re-place a symbol's visible Reference/Value fields to computed anchors
 	 * (from the layout lib's `symbolFieldLayout`), so a rotated/moved part's
 	 * labels sit cleanly beside the body, upright, and clear of the wires.
@@ -886,11 +1350,13 @@ export class KicadRenderSession {
 		valY: number;
 		fieldRot: number;
 		justify: 'left' | 'middle';
-	}): boolean {
+	}, instanceId?: string): boolean {
 		if (this.documentType !== 'schematic' || !this.schematicRoot) {
 			return false;
 		}
-		const instance: any = this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
+		const instance: any = instanceId
+			? this.findSymbolInstanceById(instanceId)
+			: this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
 		if (!instance || typeof instance.getPropertyByName !== 'function') {
 			return false;
 		}
@@ -987,11 +1453,13 @@ export class KicadRenderSession {
 		return out;
 	}
 
-	getSymbolPose(reference: string): SymbolPoseInfo | null {
+	getSymbolPose(reference: string, instanceId?: string): SymbolPoseInfo | null {
 		if (this.documentType !== 'schematic' || !this.schematicRoot) {
 			return null;
 		}
-		const instance = this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
+		const instance = instanceId
+			? this.findSymbolInstanceById(instanceId)
+			: this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
 		if (!instance || typeof instance.getOrigin !== 'function') {
 			return null;
 		}
@@ -1024,10 +1492,37 @@ export class KicadRenderSession {
 
 	/** setUuid + addChild only — no undo push, no commit. Shared by
 	 *  attachToSchematicRoot (one element, one undo step) and addWireLike
-	 *  (wire + 0-2 auto-junctions, still one undo step). */
+	 *  (wire + 0-2 auto-junctions, still one undo step). Just assigns
+	 *  identity and delegates the actual splice to insertRootChild — split
+	 *  out so a clone with no setUuid() of its own (a rule-area, whose uuid
+	 *  lives on its nested polyline instead) can assign identity its own
+	 *  way and still reuse the insertion step unchanged. */
 	private attachElement(el: { setUuid(u?: string): void }): void {
 		el.setUuid();
-		this.schematicRoot!.rootElement.addChild(el);
+		this.insertRootChild(el);
+	}
+
+	/** Inserts just before the first trailing `sheet_instances`/
+	 *  `embedded_files` element instead of unconditionally appending —
+	 *  real KiCad always writes those last, and a naive append (this
+	 *  method's original behavior) lands any newly-added element AFTER
+	 *  them, producing a file real KiCad's own writer would never emit.
+	 *  Confirmed via a live loaded-and-round-tripped file: children ended
+	 *  up `[...,'wire','sheet_instances','symbol']` after a plain append.
+	 *  Every element type reads its children via `findChildrenByClass`/
+	 *  `findFirstChildByClass` (order-independent full scans), so this is
+	 *  safe for every caller, not just symbols. */
+	private insertRootChild(el: any): void {
+		const root: any = this.schematicRoot!.rootElement;
+		el.parent = root;
+		el.rootLevel = (root.rootLevel ?? 0) + 1;
+		const trailingIndex = root.children.findIndex((c: any) => c.name === 'sheet_instances' || c.name === 'embedded_files');
+		if (trailingIndex === -1) {
+			root.children.push(el);
+		}
+		else {
+			root.children.splice(trailingIndex, 0, el);
+		}
 	}
 
 	private attachToSchematicRoot(el: { setUuid(u?: string): void }): string | null {
@@ -1301,11 +1796,37 @@ export class KicadRenderSession {
 		return this.attachToSchematicRoot(text);
 	}
 
-	getSelectionResizeBox(): SelectionResizeBox | null {
-		if (this.documentType !== 'schematic' || !this.selectedId || !this.schScene) {
+	/**
+	 * Embed a raster image in the schematic at its center point. The image
+	 * payload is the binary string expected by KicadElementData (not base64):
+	 * its writer performs the KiCad-specific base64 wrapping and 76-character
+	 * line splitting when the schematic is serialized. Keeping that conversion
+	 * here means file and clipboard insertion share exactly one AST path and
+	 * one undo snapshot.
+	 */
+	addGraphicImage(x: number, y: number, data: string, mimeType: string, scale = 1): string | null {
+		if (!data || !mimeType.startsWith('image/')) {
 			return null;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === this.selectedId);
+		const image = new KicadElementImage();
+		image.setOrigin(x, y, 0);
+		image.setScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
+		// Keep the canonical KiCad child order: at, scale, uuid, data.
+		// attachToSchematicRoot() calls setUuid() again, which reuses this
+		// existing UUID child rather than adding a duplicate.
+		image.setUuid();
+		const imageData = new KicadElementData();
+		imageData.data = data;
+		image.addChild(imageData);
+		return this.attachToSchematicRoot(image);
+	}
+
+	getSelectionResizeBox(): SelectionResizeBox | null {
+		const selectedId = this.selection;
+		if (this.documentType !== 'schematic' || !selectedId || !this.schScene) {
+			return null;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === selectedId);
 		const el: any = item?.element;
 		if (!item || !el || (el.name !== 'rectangle' && el.name !== 'text_box' && el.name !== 'image')
 			|| item.shape.type !== 'rect') {
@@ -1316,10 +1837,11 @@ export class KicadRenderSession {
 	}
 
 	getSelectionCurveAnchors(): SelectionCurveAnchors | null {
-		if (this.documentType !== 'schematic' || !this.selectedId || !this.schScene) {
+		const selectedId = this.selection;
+		if (this.documentType !== 'schematic' || !selectedId || !this.schScene) {
 			return null;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === this.selectedId);
+		const item = this.schScene.hitTestItems.find(it => it.id === selectedId);
 		const el: any = item?.element;
 		if (!item || !el) {
 			return null;
@@ -1474,6 +1996,137 @@ export class KicadRenderSession {
 		}
 	}
 
+	/** How many placeable units `symbolName` has (1 for an ordinary
+	 *  single-unit part). Resolves one level of `extends` first — a derived
+	 *  symbol has no sub-units of its own, matching addLibrarySymbolFromText's
+	 *  own base-resolution — so a derived part reports its base's count. */
+	getLibrarySymbolUnitCount(sourceText: string, symbolName: string): number {
+		const parsed = new KicadParser().parse(sourceText);
+		const candidates = parsed.name === 'symbol'
+			? [parsed as KicadElementSymbol]
+			: parsed.children.filter(child => child instanceof KicadElementSymbol) as KicadElementSymbol[];
+		const source = candidates.find(symbol => symbol.symbolName === symbolName)
+			?? candidates.find(symbol => symbol.symbolName?.endsWith(`:${ symbolName }`));
+		if (!source) {
+			return 1;
+		}
+		let graphicsSource = source;
+		if (source.isDerived() && source.getLayers().length === 0) {
+			const base = candidates.find(symbol => symbol.symbolName === source.getExtends());
+			if (base) graphicsSource = base;
+		}
+		return graphicsSource.getUnitCount();
+	}
+
+	/** Add a normal schematic symbol from a standalone .kicad_sym source.
+	 * The library definition is copied into the document's lib_symbols block,
+	 * while the placed instance contains only the lightweight sheet-level
+	 * fields KiCad expects. Parsing the definition again is intentional: it
+	 * detaches the object from the temporary library-file AST and gives every
+	 * child the correct parent/root level when attached to this document.
+	 *
+	 * `unit` selects which sub-unit this instance represents (plain single-
+	 * unit parts are always unit 1); `reuseReference` places this unit under
+	 * an EXISTING reference designator instead of allocating a fresh one —
+	 * multi-unit placement calls this once per unit, reusing unit 1's
+	 * returned reference for units 2..N so every unit of one physical part
+	 * shares the same designator, matching real KiCad's own model. */
+	addLibrarySymbolFromText(sourceText: string, symbolName: string, x: number, y: number, libIdOverride?: string, unit = 1, reuseReference?: string): string | null {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !sourceText.trim()) {
+			return null;
+		}
+		const parsed = new KicadParser().parse(sourceText);
+		const candidates = parsed.name === 'symbol'
+			? [parsed as KicadElementSymbol]
+			: parsed.children.filter(child => child instanceof KicadElementSymbol) as KicadElementSymbol[];
+		const source = candidates.find(symbol => symbol.symbolName === symbolName)
+			?? candidates.find(symbol => symbol.symbolName?.endsWith(`:${ symbolName }`));
+		if (!source) {
+			return null;
+		}
+
+		const libId = libIdOverride ?? source.symbolName ?? symbolName;
+		const sourceForClone = new KicadParser().parse(source.write()) as KicadElementSymbol;
+		sourceForClone.symbolName = libId;
+		const detached = new KicadParser().parse(sourceForClone.write()) as KicadElementSymbol;
+
+		// A derived symbol (`(extends "Base")`) has no graphics/pins of its
+		// own — real KiCad resolves them from the base transparently
+		// everywhere. This app's renderer does the same (see
+		// SchematicPainter.relevantSubUnits), but only within the SAME
+		// lib_symbols block: the base must be embedded here too, not just
+		// referenced. `source.getExtends()` is the base's bare name (no
+		// library prefix — that's how it's written in the source file); the
+		// detached copy's own extends value still says that bare name after
+		// cloning, which would only resolve if a lib_symbols entry happened
+		// to be keyed by the bare name too — instead, embed the base under
+		// the SAME namespace prefix as this symbol's own libId, and rewrite
+		// the detached copy's extends to match, so both entries resolve
+		// consistently by look-up within this document's own lib_symbols.
+		let detachedBase: KicadElementSymbol | null = null;
+		let baseLibId: string | null = null;
+		if (source.isDerived()) {
+			const baseName = source.getExtends()!;
+			const base = candidates.find(symbol => symbol.symbolName === baseName);
+			if (base) {
+				const prefix = libId.includes(':') ? libId.slice(0, libId.indexOf(':') + 1) : '';
+				baseLibId = `${ prefix }${ baseName }`;
+				const baseForClone = new KicadParser().parse(base.write()) as KicadElementSymbol;
+				baseForClone.symbolName = baseLibId;
+				detachedBase = new KicadParser().parse(baseForClone.write()) as KicadElementSymbol;
+				detached.setExtends(baseLibId);
+			}
+		}
+
+		this.pushUndoSnapshot('Place symbol');
+		if (detachedBase && baseLibId) {
+			this.ensureLibSymbol(baseLibId, () => detachedBase!);
+		}
+		this.ensureLibSymbol(libId, () => detached);
+
+		const referenceBase = String(source.getAllProperties().Reference ?? 'U').replace(/^~|\?.*$/g, '').trim() || 'U';
+		const reference = reuseReference ?? this.nextSymbolRef(referenceBase);
+		const value = String(source.getAllProperties().Value ?? libId);
+		const instance = new KicadElementSymbol();
+		instance.addChild(new KicadElementLibId(libId));
+		instance.setOrigin(x, y, 0);
+		instance.setUuid();
+		instance.findOrCreateChildByClass(KicadElementUnit).value = unit;
+		instance.setExcludeFromSim(false).setInBom(true).setOnBoard(true);
+		instance.findOrCreateChildByClass(KicadElementDnp).value = false;
+
+		const propertyAt = (name: string, fallbackY: number) => {
+			const property = source.getPropertyByName(name);
+			const origin = property?.getOrigin?.();
+			return {
+				x: x + Number(origin?.x ?? 0),
+				y: y + Number(origin?.y ?? fallbackY),
+				rot: Number(origin?.rotation ?? 0),
+				hide: property?.isHidden?.() ?? (name !== 'Reference' && name !== 'Value'),
+			};
+		};
+		instance.addChild(KicadElementSymbol.buildLibraryProperty('Reference', reference, propertyAt('Reference', -2.54)));
+		instance.addChild(KicadElementSymbol.buildLibraryProperty('Value', value, propertyAt('Value', 2.54)));
+		instance.addChild(KicadElementSymbol.buildLibraryProperty('Footprint', '', propertyAt('Footprint', 0)));
+		instance.addChild(KicadElementSymbol.buildLibraryProperty('Datasheet', '', propertyAt('Datasheet', 0)));
+		this.attachElement(instance);
+		this.commitAstMutation();
+		return reference;
+	}
+
+	private nextSymbolRef(base: string): string {
+		const prefix = base.replace(/[0-9?]+$/g, '') || 'U';
+		let max = 0;
+		for (const kid of this.schematicRoot?.rootElement?.children ?? []) {
+			if (kid?.name !== 'symbol' || typeof (kid as any).getReference !== 'function') continue;
+			const value = String((kid as any).getReference() ?? '');
+			const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const match = new RegExp(`^${ escapedPrefix }(\\d+)$`).exec(value);
+			if (match) max = Math.max(max, Number(match[1]));
+		}
+		return `${ prefix }${ max + 1 }`;
+	}
+
 	/**
 	 * Next free `#PWR`/`#FLG` reference for a fresh power symbol placement —
 	 * scans the live document (unlike shared/kicad-layout/Place.ts's recipe
@@ -1528,6 +2181,410 @@ export class KicadRenderSession {
 	}
 
 	/**
+	 * Serializes each resolved element to standalone KiCad text (element.
+	 * write(), no undo push, no mutation) — the source format Duplicate/
+	 * Paste's clone-and-reparse step (cloneAndPlace) consumes. Callers must
+	 * not retain any LIVE element reference from this call past the current
+	 * render (same rule every other paint-id lookup in this file follows) —
+	 * only the returned text is safe to hold onto.
+	 */
+	copySelectionText(ids: string[]): { id: string; sourceText: string }[] {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			return [];
+		}
+		const result: { id: string; sourceText: string }[] = [];
+		for (const id of ids) {
+			const el: any = this.schScene.hitTestItems.find(it => it.id === id)?.element;
+			if (el && typeof el.write === 'function') {
+				result.push({ id, sourceText: el.write() });
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * Clone-and-reparse (new KicadParser().parse(source.write()) — the same
+	 * idiom addLibrarySymbolFromText already uses, generic across every
+	 * registered element kind), fresh identity, offset by (dx, dy), inserted
+	 * at the root — the shared tail for both duplicateSelection and
+	 * pasteElements. Repositions the clone DIRECTLY via
+	 * translateElementGeometry rather than translateElementById/
+	 * moveSymbolByRef, because neither can find a just-created, not-yet-
+	 * attached element — both resolve their target through a paint-id
+	 * lookup against schScene, which isn't rebuilt until the caller's batch
+	 * closes.
+	 *
+	 * Symbols get their own branch (matching moveItemBy's own symbol/
+	 * generic split): a fresh Reference via nextSymbolRef (never keep the
+	 * original's — two live instances sharing one Reference is invalid),
+	 * and every property's own origin offset along with the body, so
+	 * Reference/Value text moves with it instead of being left behind at
+	 * the old field position. Everything else (including rule areas, via
+	 * translateElementGeometry's own polyline delegation) is fully generic.
+	 */
+	private cloneAndPlace(sourceText: string, dx: number, dy: number): any | null {
+		let clone: any;
+		try {
+			clone = new KicadParser().parse(sourceText);
+		}
+		catch {
+			return null;
+		}
+		if (!clone || typeof clone.write !== 'function') {
+			return null;
+		}
+		return this.placeClonedElement(clone, dx, dy);
+	}
+
+	/**
+	 * The actual identity-reassignment + reposition + insert logic
+	 * cloneAndPlace() delegates to once it has a parsed clone — split out so
+	 * pasteSystemClipboardText() (whose elements are already parsed, as
+	 * children of a synthetic wrapper — see its own doc comment) can place
+	 * them directly without a redundant write()-then-reparse round trip.
+	 * `el` must not already be attached to a document (no `.parent`).
+	 */
+	private placeClonedElement(el: any, dx: number, dy: number): any {
+		if (el instanceof KicadElementSymbol) {
+			const origin = el.getOrigin();
+			el.setUuid();
+			const oldRef = String(el.getReference() ?? 'U');
+			// #PWR/#FLG references use their own zero-padded numbering
+			// convention (nextPowerRef, already used for every OTHER power-
+			// symbol placement path) — falling through to the generic
+			// nextSymbolRef here would still produce a valid, unique
+			// reference, just an inconsistently-formatted one (e.g. "#PWR3"
+			// beside existing "#PWR01"/"#PWR02").
+			const powerPrefix = oldRef.startsWith('#PWR') ? '#PWR' : oldRef.startsWith('#FLG') ? '#FLG' : null;
+			el.setProperty('Reference', powerPrefix ? this.nextPowerRef(powerPrefix) : this.nextSymbolRef(oldRef));
+			el.setOrigin(origin.x + dx, origin.y + dy, origin.rotation);
+			for (const prop of el.getProperties()) {
+				const propOrigin = prop.getOrigin();
+				prop.setOrigin(propOrigin.x + dx, propOrigin.y + dy, propOrigin.rotation);
+			}
+		}
+		else {
+			if (typeof el.getPolyline === 'function') {
+				el.getPolyline()?.setUuid();
+			}
+			else if (typeof el.setUuid === 'function') {
+				el.setUuid();
+			}
+			this.translateElementGeometry(el, dx, dy);
+		}
+		this.insertRootChild(el);
+		return el;
+	}
+
+	/** Reads a representative anchor point off an element without mutating
+	 *  it — same capability order translateElementGeometry writes through,
+	 *  used by pasteSystemClipboardText to compute a combined top-left for
+	 *  content that isn't attached to any document yet (so its real bbox,
+	 *  which for a symbol requires resolving the library transform, isn't
+	 *  available the way it is for an already-painted item). An accepted
+	 *  approximation for multi-item layout, not pixel-exact — same spirit
+	 *  as hitTestRect's own bbox tradeoffs elsewhere in this file. */
+	private originOf(el: any): { x: number; y: number } | null {
+		if (typeof el?.getOrigin === 'function') {
+			return el.getOrigin();
+		}
+		if (typeof el?.getPoints === 'function') {
+			return el.getPoints()?.[0] ?? null;
+		}
+		if (typeof el?.getStartMidEnd === 'function') {
+			return el.getStartMidEnd()?.start ?? null;
+		}
+		if (typeof el?.getStartEnd === 'function') {
+			return el.getStartEnd()?.start ?? null;
+		}
+		if (typeof el?.getCenter === 'function') {
+			return el.getCenter();
+		}
+		if (typeof el?.getPolyline === 'function') {
+			return this.originOf(el.getPolyline());
+		}
+		return null;
+	}
+
+	/** element.name values this app's parser/painter can place as a
+	 *  top-level schematic item — the allowlist pasteSystemClipboardText
+	 *  filters incoming clipboard content against. Deliberately excludes
+	 *  'sheet' (matches copyableIds' existing exclusion — out of this
+	 *  app's single-file scope) and 'group' (grouping info from an
+	 *  unrelated document's own uuid space is meaningless here). Anything
+	 *  NOT in this set — including a generic/unrecognized fallback element
+	 *  produced by pasting non-KiCad text — is silently dropped rather
+	 *  than inserted, since this is the one paste path whose source isn't
+	 *  guaranteed to be this app's own prior copy. */
+	private static readonly PASTEABLE_ELEMENT_NAMES = new Set([
+		'wire', 'bus', 'bus_entry', 'junction', 'no_connect',
+		'symbol', 'rectangle', 'circle', 'arc', 'polyline', 'bezier', 'rule_area',
+		'text', 'text_box', 'label', 'global_label', 'hierarchical_label', 'netclass_flag',
+		'image', 'table',
+	]);
+
+	/**
+	 * Builds a real-KiCad-compatible clipboard TEXT blob for the given
+	 * selection — confirmed against real KiCad's own clipboard writer
+	 * (eeschema/tools/sch_editor_control.cpp's SCH_EDITOR_CONTROL::doCopy,
+	 * which calls SCH_IO_KICAD_SEXPR::Format() on the selection): an
+	 * optional `(lib_symbols ...)` block first, containing only the
+	 * definitions actually used by any copied symbol, followed by each
+	 * copied element's own bare top-level s-expression, newline-joined.
+	 * Deliberately no `(kicad_sch ...)` wrapper — real KiCad's own
+	 * clipboard format doesn't have one either; SCH_EDITOR_CONTROL::Paste
+	 * feeds the raw content straight into its file-content loader.
+	 */
+	copySelectionForSystemClipboard(ids: string[]): string {
+		if (this.documentType !== 'schematic' || !this.schScene || !this.schematicRoot?.rootElement) {
+			return '';
+		}
+		const elements: any[] = [];
+		for (const id of ids) {
+			const el = this.schScene.hitTestItems.find(it => it.id === id)?.element;
+			if (el && typeof el.write === 'function') {
+				elements.push(el);
+			}
+		}
+		if (elements.length === 0) {
+			return '';
+		}
+		const libIds = new Set<string>();
+		for (const el of elements) {
+			if (el instanceof KicadElementSymbol) {
+				const libId = el.getLibId?.();
+				if (libId) {
+					libIds.add(libId);
+				}
+			}
+		}
+		const parts: string[] = [];
+		if (libIds.size > 0) {
+			const libSymbols = this.schematicRoot.rootElement.findFirstChildByClass(KicadElementLibSymbols);
+			const defs: string[] = [];
+			for (const libId of libIds) {
+				const def = libSymbols?.findSymbolByName(libId);
+				if (def) {
+					defs.push(def.write());
+				}
+			}
+			if (defs.length > 0) {
+				parts.push(`(lib_symbols\n${defs.join('\n')}\n)`);
+			}
+		}
+		for (const el of elements) {
+			parts.push(el.write());
+		}
+		return parts.join('\n');
+	}
+
+	/**
+	 * Cross-application counterpart to pasteElements — parses raw
+	 * clipboard TEXT that may have come from real KiCad's own Copy (or
+	 * this app's own copySelectionForSystemClipboard) and places it into
+	 * the live document. Real KiCad's clipboard content is a BARE sequence
+	 * of top-level s-expressions with no enclosing wrapper (see
+	 * copySelectionForSystemClipboard's doc comment), so this wraps it in
+	 * a synthetic `(kicad_sch ...)` and reuses the exact same parser
+	 * loadSchematicText() itself uses for a whole file, reading just
+	 * `.children` back out — no new parsing logic needed, and it's the
+	 * same trick that makes the wrap-then-parse succeed even though
+	 * 'kicad_sch' behaves as an ordinary container here, never treated as
+	 * a real document (never assigned to schematicRoot, write() never
+	 * called on it).
+	 *
+	 * Unlike every OTHER paste/duplicate path in this app (whose source is
+	 * always this app's own prior copy, guaranteed well-formed), this is
+	 * the one place genuinely external, unvalidated content reaches the
+	 * live AST — filters the parsed top-level children against
+	 * PASTEABLE_ELEMENT_NAMES before touching the document, so pasting
+	 * unrelated non-KiCad text (or a parse that produces nothing
+	 * recognizable) is a clean no-op, not a document full of orphaned
+	 * generic elements. A `(lib_symbols ...)` block, if present, is merged
+	 * into this document's OWN lib_symbols (via the same ensureLibSymbol
+	 * used everywhere else a symbol gets placed) rather than treated as a
+	 * placeable item itself.
+	 */
+	pasteSystemClipboardText(text: string, targetX: number, targetY: number): string[] {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !text.trim()) {
+			return [];
+		}
+		let wrapper: any;
+		try {
+			wrapper = new KicadParser().parse(`(kicad_sch\n${text}\n)`);
+		}
+		catch {
+			return [];
+		}
+		const children: any[] = wrapper?.children ?? [];
+		const libSymbolsBlock = children.find(c => c?.name === 'lib_symbols');
+		const items = children.filter(c => KicadRenderSession.PASTEABLE_ELEMENT_NAMES.has(c?.name));
+		if (items.length === 0) {
+			return [];
+		}
+		if (libSymbolsBlock) {
+			for (const def of libSymbolsBlock.children ?? []) {
+				if (def instanceof KicadElementSymbol && def.symbolName) {
+					this.ensureLibSymbol(def.symbolName, () => def);
+				}
+			}
+		}
+		let minX = Infinity, minY = Infinity;
+		for (const el of items) {
+			const origin = this.originOf(el);
+			if (origin && Number.isFinite(origin.x) && Number.isFinite(origin.y)) {
+				minX = Math.min(minX, origin.x);
+				minY = Math.min(minY, origin.y);
+			}
+		}
+		const dx = Number.isFinite(minX) ? targetX - minX : 0;
+		const dy = Number.isFinite(minY) ? targetY - minY : 0;
+
+		this.pushUndoSnapshot('Paste');
+		this.beginBatch();
+		const placed: any[] = [];
+		for (const el of items) {
+			placed.push(this.placeClonedElement(el, dx, dy));
+		}
+		this.endBatch();
+		if (!this.schScene) {
+			return [];
+		}
+		return this.schScene.hitTestItems.filter(it => placed.includes(it.element)).map(it => it.id);
+	}
+
+	/**
+	 * Batch-duplicates a selection in place, offset by a small fixed default
+	 * (2.54mm/100mil both axes — a common "paste offset" convention) so the
+	 * copies don't land exactly on top of the originals. One undo push, one
+	 * scene rebuild for however many items are duplicated — same
+	 * beginBatch/endBatch shape translateSelection uses. Returns the NEW
+	 * items' paint ids, resolved post-rebuild by object identity (no paint
+	 * id exists for a clone until the rebuild produces one) — valid because
+	 * after endBatch()'s rebuild the painter reads the live AST (now
+	 * including the clones) and its output items' `.element` is reference-
+	 * equal to the exact clone objects already held here.
+	 */
+	duplicateSelection(ids: string[], dx = 2.54, dy = 2.54): string[] {
+		if (this.documentType !== 'schematic' || !this.schScene || ids.length === 0) {
+			return [];
+		}
+		const sources: string[] = [];
+		for (const id of ids) {
+			const el: any = this.schScene.hitTestItems.find(it => it.id === id)?.element;
+			if (el && typeof el.write === 'function') {
+				sources.push(el.write());
+			}
+		}
+		if (sources.length === 0) {
+			return [];
+		}
+		this.pushUndoSnapshot('Duplicate');
+		this.beginBatch();
+		const clones: any[] = [];
+		for (const sourceText of sources) {
+			const clone = this.cloneAndPlace(sourceText, dx, dy);
+			if (clone) {
+				clones.push(clone);
+			}
+		}
+		this.endBatch();
+		if (clones.length === 0) {
+			return [];
+		}
+		return this.schScene!.hitTestItems.filter(it => clones.includes(it.element)).map(it => it.id);
+	}
+
+	/**
+	 * Batch counterpart for Paste — each entry carries its own (dx, dy) so
+	 * the caller (main.ts's in-memory clipboard) can position every pasted
+	 * item relative to the current cursor while preserving the copied set's
+	 * original relative layout. Same one-undo/one-batch/resolve-by-object-
+	 * identity shape as duplicateSelection.
+	 */
+	pasteElements(items: { sourceText: string; dx: number; dy: number }[]): string[] {
+		if (this.documentType !== 'schematic' || !this.schScene || items.length === 0) {
+			return [];
+		}
+		this.pushUndoSnapshot('Paste');
+		this.beginBatch();
+		const clones: any[] = [];
+		for (const { sourceText, dx, dy } of items) {
+			const clone = this.cloneAndPlace(sourceText, dx, dy);
+			if (clone) {
+				clones.push(clone);
+			}
+		}
+		this.endBatch();
+		if (clones.length === 0) {
+			return [];
+		}
+		return this.schScene!.hitTestItems.filter(it => clones.includes(it.element)).map(it => it.id);
+	}
+
+	/**
+	 * Wraps the given selection into a new KicadElementGroup — no kind
+	 * restriction (moveItemBy already knows how to move every kind, so
+	 * there's no technical reason to exclude symbols/sheets/wires from
+	 * being grouped together). Stores each member by its own ELEMENT uuid,
+	 * never the paint id (see expandGroupSelection's doc comment). Returns
+	 * the new group's own uuid, or null if fewer than 2 ids resolved to
+	 * real elements.
+	 */
+	groupSelection(ids: string[]): string | null {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			return null;
+		}
+		const uuids: string[] = [];
+		for (const id of ids) {
+			const uuid = (this.schScene.hitTestItems.find(it => it.id === id)?.element as any)?.getUuid?.();
+			if (uuid) {
+				uuids.push(uuid);
+			}
+		}
+		if (uuids.length < 2) {
+			return null;
+		}
+		this.pushUndoSnapshot('Group');
+		const group = new KicadElementGroup();
+		this.attachElement(group);
+		group.setMemberUuids(uuids);
+		this.commitAstMutation();
+		return group.getUuid() ?? null;
+	}
+
+	/**
+	 * Removes every KicadElementGroup whose member set intersects the given
+	 * selection — members themselves are untouched, only the wrapper
+	 * element disappears. Returns how many group elements were removed.
+	 */
+	ungroupSelection(ids: string[]): number {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !this.schScene) {
+			return 0;
+		}
+		const uuids = new Set(
+			ids.map(id => (this.schScene!.hitTestItems.find(it => it.id === id)?.element as any)?.getUuid?.()).filter(Boolean)
+		);
+		if (uuids.size === 0) {
+			return 0;
+		}
+		const groups = this.allGroups().filter(g => g.getMemberUuids().some(u => uuids.has(u)));
+		if (groups.length === 0) {
+			return 0;
+		}
+		this.pushUndoSnapshot('Ungroup');
+		const children: any[] = this.schematicRoot.rootElement.children;
+		for (const group of groups) {
+			const idx = children.indexOf(group);
+			if (idx >= 0) {
+				children.splice(idx, 1);
+			}
+		}
+		this.commitAstMutation();
+		return groups.length;
+	}
+
+	/**
 	 * Delete paint items by id (from hitTestAtScreen/hitTestItems) — wires,
 	 * junctions, no-connects, graphics, text. NOT symbols (those stay owned by
 	 * the circuit-layout flow) — callers should route kind:'symbol' hits
@@ -1553,9 +2610,7 @@ export class KicadRenderSession {
 			}
 			children.splice(idx, 1);
 			removed++;
-			if (this.selectedId === id) {
-				this.selectedId = null;
-			}
+			this.selectedIds.delete(id);
 		}
 		if (removed > 0) {
 			this.commitAstMutation();
@@ -1577,8 +2632,31 @@ export class KicadRenderSession {
 			return false;
 		}
 		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
-		if (!el) {
+		if (!el || !this.translateElementGeometry(el, dx, dy)) {
 			return false;
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** The per-shape geometry dispatch translateElementById() resolves an id
+	 *  to before calling this — split out so callers that already hold a
+	 *  live element reference can reposition it directly. Needed by
+	 *  alignSelection (already has the item from its own bbox scan) and by
+	 *  Duplicate/Paste's cloneAndPlace (the clone has no paint id yet — it
+	 *  isn't in schScene until the batch's rebuild, so a by-id lookup
+	 *  couldn't find it anyway). The five cases are mutually exclusive
+	 *  across every non-symbol element kind this app supports. */
+	private translateElementGeometry(el: any, dx: number, dy: number): boolean {
+		// Rule areas store their geometry on a nested polyline, not on the
+		// wrapper itself (see KicadElementRuleArea's doc comment) — none of
+		// the five cases below match the wrapper directly, so without this
+		// a rule area caught up in a group-drag/align/duplicate would
+		// silently keep its old position while everything else in the same
+		// gesture moved.
+		if (typeof el.getPolyline === 'function') {
+			const polyline = el.getPolyline();
+			return polyline ? this.translateElementGeometry(polyline, dx, dy) : false;
 		}
 		if (typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
 			el.setPoints(el.getPoints().map((p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy })));
@@ -1602,8 +2680,133 @@ export class KicadRenderSession {
 		else {
 			return false;
 		}
-		this.commitAstMutation();
 		return true;
+	}
+
+	/**
+	 * Group-drag primitive: moves every one of the given (already-selected)
+	 * items by the same world-space delta, regardless of how many different
+	 * element kinds are mixed into the selection — multi-select's analogue
+	 * to deleteElements(ids) for movement. Dispatches per item exactly the
+	 * way each kind's own single-item drag already does (moveSymbolByRef
+	 * for symbols, moveSheetById for sheets, moveSheetPinById for sheet
+	 * pins, translateElementById for everything else — labels included,
+	 * since edit mode's labels are already delta-movable through their own
+	 * getOrigin/setOrigin, unlike circuit mode's absolute-position label
+	 * drag), calling the EXISTING public methods unchanged rather than
+	 * duplicating their mutation logic. Only wrapped in beginBatch/endBatch
+	 * so an N-item drag costs one scene rebuild per call instead of N.
+	 */
+	translateSelection(ids: string[], dx: number, dy: number): boolean {
+		if (this.documentType !== 'schematic' || !this.schScene || (dx === 0 && dy === 0)) {
+			return false;
+		}
+		this.beginBatch();
+		let mutated = false;
+		for (const id of ids) {
+			const item = this.schScene.hitTestItems.find(it => it.id === id);
+			if (item && this.moveItemBy(item, dx, dy)) {
+				mutated = true;
+			}
+		}
+		this.endBatch();
+		return mutated;
+	}
+
+	/** Per-item move dispatch shared by translateSelection (one shared delta
+	 *  for the whole selection) and alignSelection (a different delta per
+	 *  item). Symbols/sheets/sheet-pins need their own absolute-position
+	 *  setters — same as each kind's own single-item drag already uses —
+	 *  everything else goes through translateElementById's generic
+	 *  geometry dispatch. */
+	private moveItemBy(item: SchPaintedItem, dx: number, dy: number): boolean {
+		const el: any = item.element;
+		const origin = typeof el?.getOrigin === 'function' ? el.getOrigin() : null;
+		if (item.kind === 'symbol' && origin) {
+			return this.moveSymbolByRef(item.refDesignator ?? '', origin.x + dx, origin.y + dy, origin.rotation, item.id);
+		}
+		if (item.kind === 'sheet' && origin) {
+			return this.moveSheetById(item.id, origin.x + dx, origin.y + dy);
+		}
+		if (item.kind === 'label' && item.labelKind === 'sheet-pin' && origin) {
+			return this.moveSheetPinById(item.id, origin.x + dx, origin.y + dy);
+		}
+		return this.translateElementById(item.id, dx, dy);
+	}
+
+	/**
+	 * Aligns every item in a multi-selection along one shared edge/center —
+	 * unlike translateSelection (one shared delta for the whole selection),
+	 * every item here moves by a DIFFERENT delta, computed from each item's
+	 * own bbox against the selection's combined bbox (same min/max union
+	 * fitToItems() computes, done locally here since fitToItems also moves
+	 * the camera as a side effect, which align must not do). Still reuses
+	 * moveItemBy per item — same per-kind symbol/sheet/sheet-pin/generic
+	 * dispatch translateSelection uses — under one beginBatch/endBatch pair.
+	 * Items whose computed delta is already ~0 are filtered out before
+	 * pushing undo, so "Align Left" on an already-aligned selection doesn't
+	 * add a no-op entry to the undo stack.
+	 *
+	 * Two accepted bbox fidelity limits, inherited unchanged from
+	 * hitTestRect's own bbox-approximation precedent — not bugs to fix here:
+	 * wire/bus bboxes are padded by strokeWidth/2 per side (PaintedShape.ts),
+	 * so aligning differently-stroked wires by edge is off by the width
+	 * delta; plain text bboxes are a fixed ±textSize heuristic
+	 * (SchematicPainter.ts's buildSchText), not real glyph width, so right-
+	 * edge alignment across differently-sized text isn't meaningful (left-
+	 * edge/center-x is fine; text_box has a real stored size and doesn't
+	 * have this caveat).
+	 */
+	alignSelection(ids: string[], axis: AlignAxis): boolean {
+		if (this.documentType !== 'schematic' || !this.schScene || ids.length < 2) {
+			return false;
+		}
+		const items: { item: SchPaintedItem; bbox: { x: number; y: number; w: number; h: number } }[] = [];
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const id of ids) {
+			const item = this.schScene.hitTestItems.find(it => it.id === id);
+			if (!item) continue;
+			const { x, y, w, h } = item.bbox;
+			if (![x, y, w, h].every(Number.isFinite) || w < 0 || h < 0) continue;
+			items.push({ item, bbox: { x, y, w, h } });
+			minX = Math.min(minX, x);
+			minY = Math.min(minY, y);
+			maxX = Math.max(maxX, x + w);
+			maxY = Math.max(maxY, y + h);
+		}
+		if (items.length < 2) {
+			return false;
+		}
+		const centerX = (minX + maxX) / 2;
+		const centerY = (minY + maxY) / 2;
+		const moves: { item: SchPaintedItem; dx: number; dy: number }[] = [];
+		for (const { item, bbox } of items) {
+			let dx = 0, dy = 0;
+			switch (axis) {
+				case 'left': dx = minX - bbox.x; break;
+				case 'right': dx = maxX - (bbox.x + bbox.w); break;
+				case 'top': dy = minY - bbox.y; break;
+				case 'bottom': dy = maxY - (bbox.y + bbox.h); break;
+				case 'center-x': dx = centerX - (bbox.x + bbox.w / 2); break;
+				case 'center-y': dy = centerY - (bbox.y + bbox.h / 2); break;
+			}
+			if (Math.abs(dx) > 1e-6 || Math.abs(dy) > 1e-6) {
+				moves.push({ item, dx, dy });
+			}
+		}
+		if (moves.length === 0) {
+			return false;
+		}
+		this.pushUndoSnapshot('Align');
+		this.beginBatch();
+		let mutated = false;
+		for (const { item, dx, dy } of moves) {
+			if (this.moveItemBy(item, dx, dy)) {
+				mutated = true;
+			}
+		}
+		this.endBatch();
+		return mutated;
 	}
 
 	/** Resize one root-level rectangle or text box to normalized world bounds.
@@ -1863,13 +3066,13 @@ export class KicadRenderSession {
 			renderer.setViewMatrix?.(viewMatrix);
 
 			const highlighted = new Set<string>();
-			if (this.selectedId) {
-				highlighted.add(this.selectedId);
+			for (const selId of this.selectedIds) {
+				highlighted.add(selId);
 				// Symbol hit boxes use id `symbol:<instanceUuid>` with an empty
 				// normal draw — also highlight that instance's body/pin/field
 				// paint items so selection is obvious on passives and ICs.
-				if (this.documentType === 'schematic' && this.schScene && this.selectedId.startsWith('symbol:')) {
-					const instanceId = this.selectedId.slice('symbol:'.length);
+				if (this.documentType === 'schematic' && this.schScene && selId.startsWith('symbol:')) {
+					const instanceId = selId.slice('symbol:'.length);
 					for (const bucket of this.schScene.layerBuckets.values()) {
 						for (const item of bucket) {
 							if (
@@ -1952,8 +3155,12 @@ export class KicadRenderSession {
 		// KiCad schematic's default grid is 50 mil / 1.27 mm. Pcbnew's
 		// default visible grid is 0.5 mm. Keep this active grid at all useful
 		// zoom levels; only the *visible representation* becomes coarser.
+		// gridSpacingMm (set via setGridSpacing) overrides the default so the
+		// dots drawn here always match whatever the caller's own snap-to-grid
+		// actually snaps to — the two were previously independent values
+		// that only ever agreed by coincidence.
 		const schematic = this.documentType === 'schematic';
-		let spacing = schematic ? 1.27 : 0.5;
+		let spacing = this.gridSpacingMm ?? (schematic ? 1.27 : 0.5);
 		const gridTick = 10;
 		const minGridScreenSpacingPx = 10;
 		while (spacing * zoom <= minGridScreenSpacingPx) {
@@ -2149,6 +3356,18 @@ export class KicadRenderSession {
 				renderer.circle(p.cursor, 0.6, { strokeColor: color, strokeWidth: 0.2 });
 				drawCrosshair(renderer, p.cursor, color);
 				break;
+			case 'selection-box': {
+				const x0 = Math.min(p.origin.x, p.cursor.x);
+				const y0 = Math.min(p.origin.y, p.cursor.y);
+				const w = Math.abs(p.cursor.x - p.origin.x);
+				const h = Math.abs(p.cursor.y - p.origin.y);
+				const fillColor = p.selectMode === 'add' ? SELECTION_BOX_FILL_ADD
+					: p.selectMode === 'subtract' ? SELECTION_BOX_FILL_SUBTRACT
+						: SELECTION_BOX_FILL_REPLACE;
+				const strokeColor = p.mode === 'contained' ? SELECTION_BOX_OUTLINE_CONTAINED : SELECTION_BOX_OUTLINE_TOUCHING;
+				renderer.rect(new Vec2(x0, y0), w, h, { fillColor, strokeColor, strokeWidth: 0.15 });
+				break;
+			}
 		}
 	}
 
@@ -2273,6 +3492,20 @@ function pointLiesOnSegmentInterior(px: number, py: number, x1: number, y1: numb
 /** Semi-transparent white reads as a "ghost" preview over any real element
  *  color underneath, without colliding with schColors' saturated palette. */
 const EDIT_PREVIEW_COLOR = 'rgba(255, 255, 255, 0.6)';
+
+/** Real KiCad's own drag-select box colors (dark color scheme), ported from
+ *  common/preview_items/selection_area.cpp's 0-1 float RGB — confirmed
+ *  against the user's local KiCad checkout, not guessed. Hardcoded UI-
+ *  overlay colors like EDIT_PREVIEW_COLOR above, not a theme-file value, so
+ *  these belong here rather than in SchematicColors.ts's schColors. Fills
+ *  need rgba() rather than hex: the WebGL renderer's color parser gives hex
+ *  strings no alpha channel (see WebGLRenderer's parseColorUncached), and
+ *  these carry real KiCad's own 0.3 fill alpha. */
+const SELECTION_BOX_FILL_REPLACE = 'rgba(77, 77, 179, 0.3)';   // rgb(0.3,0.3,0.7) - no modifier
+const SELECTION_BOX_FILL_ADD = 'rgba(77, 179, 77, 0.3)';       // rgb(0.3,0.7,0.3) - shift and/or ctrl
+const SELECTION_BOX_FILL_SUBTRACT = 'rgba(179, 77, 77, 0.3)';  // rgb(0.7,0.3,0.3) - ctrl+shift
+const SELECTION_BOX_OUTLINE_CONTAINED = '#ffff66';             // rgb(1.0,1.0,0.4) - drag left-to-right
+const SELECTION_BOX_OUTLINE_TOUCHING = '#6666ff';              // rgb(0.4,0.4,1.0) - drag right-to-left
 
 function cubicBezierToPolyline(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, steps = 32): Vec2[] {
 	const points: Vec2[] = [];

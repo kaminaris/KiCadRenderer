@@ -111,13 +111,14 @@ function parseOverbarRuns(text: string): TextRun[] {
  * exactly as if it had been laid out in one call.
  */
 function layoutRuns(
-	font: StrokeFont, runs: TextRun[], size: Vec2, position: Vec2, angle: Angle, mirror: boolean, origin: Vec2
+	font: StrokeFont, runs: TextRun[], size: Vec2, position: Vec2, angle: Angle, mirror: boolean, origin: Vec2,
+	italic = false
 ): { glyphs: import('../text/StrokeGlyph').StrokeGlyph[]; bboxEnd: Vec2 } {
 	const glyphs: import('../text/StrokeGlyph').StrokeGlyph[] = [];
 	let cursor = position;
 	let bboxEnd = position;
 	for (const run of runs) {
-		const laid = font.getTextAsGlyphs(run.text, size, cursor, angle, mirror, origin, { overbar: run.overbar });
+		const laid = font.getTextAsGlyphs(run.text, size, cursor, angle, mirror, origin, { overbar: run.overbar, italic });
 		glyphs.push(...(laid.glyphs as import('../text/StrokeGlyph').StrokeGlyph[]));
 		cursor = laid.cursor;
 		bboxEnd = laid.bbox.end;
@@ -186,7 +187,8 @@ export function computeStrokeTextGeometry(
 	angleDeg: number,
 	mirror: boolean,
 	strokeWidthMm = 0.15,
-	anchor: { x: number; y: number } = { x: 0, y: 0 }
+	anchor: { x: number; y: number } = { x: 0, y: 0 },
+	italic = false
 ): StrokeTextGeometry {
 	if (!text) {
 		return { strokes: [], dots: [] };
@@ -206,7 +208,7 @@ export function computeStrokeTextGeometry(
 	// true bbox is computed from strokes, same as the old single-line pass.
 	const lines: MeasuredLine[] = rawLines.map((line, i) => {
 		const runs = parseOverbarRuns(line);
-		const measured = layoutRuns(font, runs, size, new Vec2(0, i * interline), new Angle(0), mirror, new Vec2(0, i * interline));
+		const measured = layoutRuns(font, runs, size, new Vec2(0, i * interline), new Angle(0), mirror, new Vec2(0, i * interline), italic);
 		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 		for (const glyph of measured.glyphs) {
 			for (const points of glyph.strokes) {
@@ -268,7 +270,7 @@ export function computeStrokeTextGeometry(
 			position.x + (localY * sin + localShiftX * cos),
 			position.y + (localY * cos - localShiftX * sin)
 		);
-		const { glyphs } = layoutRuns(font, line.runs, size, layoutPosition, Angle.fromDegrees(angleDeg), mirror, layoutPosition);
+		const { glyphs } = layoutRuns(font, line.runs, size, layoutPosition, Angle.fromDegrees(angleDeg), mirror, layoutPosition, italic);
 		allGlyphs.push(...(glyphs as import('../text/StrokeGlyph').StrokeGlyph[]));
 	}
 
