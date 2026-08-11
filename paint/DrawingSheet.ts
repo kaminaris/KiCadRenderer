@@ -185,19 +185,64 @@ export const wksPaperSizes: Record<string, [number, number]> = {
 	USLedger: [431.8, 279.4],
 };
 
-/** Expands `${VAR}` references against a flat lookup table — simpler than
- * KiCad's own cross-reference-capable resolver (which can chase
- * `${uuid:FIELD}` symbol references and detects cycles) since drawing-sheet
- * text only ever references the fixed set of vars built by the caller.
- * An unresolved `${VAR}` is left as-is, matching KiCad's own behavior of
- * not silently blanking a var it doesn't recognize. Note: computeStrokeTextGeometry()
- * ALSO unescapes `{name}` chars (see KicadStringEscapes.ts) as its own single
- * choke point for every text value this renderer draws — doing it again here
- * first just makes `${VAR}` matching itself robust to an escaped `$`/`{`/`}`
- * appearing before variable substitution runs. */
-export function expandWksTextVars(str: string, vars: Record<string, string>): string {
-	const unescaped = unescapeKicadString(str);
-	return unescaped.replace(/\$\{(.+?)\}/g, (whole, name: string) => {
-		return Object.prototype.hasOwnProperty.call(vars, name) ? vars[name]! : whole;
+/** Expands `${VAR}` references against a flat lookup table (title-block/
+ * page vars) plus, optionally, `${REFDES:FIELD}` cross-references into
+ * another placed symbol's own properties (e.g. `${R3:VALUE}`) — real KiCad's
+ * "Symbol Pin Functions" (`${R3:NET_NAME(1)}` etc.) and the full `@{...}`
+ * expression/conditional language are NOT implemented (they need net/
+ * connectivity resolution and a real expression evaluator respectively —
+ * out of scope here); an unresolved reference of either kind is left as-is,
+ * matching KiCad's own behavior of not silently blanking a var it doesn't
+ * recognize (rather than KiCad's `<UNRESOLVED: ...>` marker, a deliberate
+ * simplification). computeStrokeTextGeometry() ALSO unescapes `{name}` chars
+ * (see KicadStringEscapes.ts) as its own single choke point for every text
+ * value this renderer draws — doing it again here first just makes `${VAR}`
+ * matching itself robust to an escaped `$`/`{`/`}` appearing before variable
+ * substitution runs.
+ *
+ * `\${VAR}` and a bare `\$` (real KiCad's escape for "don't expand this")
+ * render as literal text with the backslash stripped.
+ *
+ * Variables can reference other variables (e.g. a COMMENT field containing
+ * another `${VAR}`) — re-expanded up to 6 levels deep, matching real KiCad's
+ * own documented nesting-depth cap, stopping early once a pass changes
+ * nothing.
+ */
+export function expandTextVars(
+	str: string,
+	vars: Record<string, string>,
+	symbolFields?: Map<string, Record<string, string>>
+): string {
+	let result = unescapeKicadString(str);
+	for (let depth = 0; depth < 6; depth++) {
+		const next = expandTextVarsOnce(result, vars, symbolFields);
+		if (next === result) {
+			break;
+		}
+		result = next;
+	}
+	return result;
+}
+
+function expandTextVarsOnce(
+	str: string,
+	vars: Record<string, string>,
+	symbolFields?: Map<string, Record<string, string>>
+): string {
+	return str.replace(/\\\$\{([^}]*)\}|\$\{([^}]*)\}|\\\$/g, (whole, escapedName: string | undefined, name: string | undefined) => {
+		if (whole === '\\$') {
+			return '$';
+		}
+		if (escapedName !== undefined) {
+			return `\${${ escapedName }}`;
+		}
+		const refIdx = name!.indexOf(':');
+		if (refIdx !== -1 && symbolFields) {
+			const ref = name!.slice(0, refIdx).trim();
+			const field = name!.slice(refIdx + 1).trim().toUpperCase();
+			const fields = symbolFields.get(ref);
+			return fields && Object.prototype.hasOwnProperty.call(fields, field) ? fields[field]! : whole;
+		}
+		return Object.prototype.hasOwnProperty.call(vars, name!) ? vars[name!]! : whole;
 	});
 }

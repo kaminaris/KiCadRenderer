@@ -19,7 +19,7 @@ import { KicadElementPad }       from '@kicad-io/KicadElementPad';
 import { KicadElementZone }      from '@kicad-io/KicadElementZone';
 import { KicadElementLayers }    from '@kicad-io/KicadElementLayers';
 import { KicadElementGrLine, KicadElementGrRect, KicadElementFpLine, KicadElementFpRect } from '@kicad-io/KicadElementStartEnd';
-import { KicadElementGrArc, KicadElementFpArc }     from '@kicad-io/KicadElementArc';
+import { KicadElementGrArc, KicadElementFpArc, KicadElementTrackArc } from '@kicad-io/KicadElementArc';
 import { KicadElementGrCircle, KicadElementFpCircle }  from '@kicad-io/KicadElementCircle';
 import { KicadElementDimension } from '@kicad-io/KicadElementDimension';
 import { KicadElementGrText, KicadElementFpText, KicadElementText, KicadElementTextBox } from '@kicad-io/KicadElementText';
@@ -74,6 +74,7 @@ export function registerDefaultKicadClasses(): void {
 		Dimension: KicadElementDimension,
 		GrText: KicadElementGrText,
 		FpText: KicadElementFpText,
+		TrackArc: KicadElementTrackArc,
 	});
 
 	registerSchematicIoClasses({

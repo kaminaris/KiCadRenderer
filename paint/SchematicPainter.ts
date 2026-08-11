@@ -3,11 +3,11 @@ import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
 import { EmbeddedImage, Renderer } from '../render/Renderer';
 import { schColors, schematicBackgroundColor, schematicLayerOrder } from './SchematicColors';
-import { computeStrokeTextGeometry, drawStrokeTextGeometry, measureStrokeTextSize } from './TextPaint';
-import { PaintedShape, shapeToBBox, distanceToSegment, polygonEdgeDistance } from './PaintedShape';
+import { computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, measureStrokeTextSize } from './TextPaint';
+import { PaintedShape, shapeToBBox, distanceToSegment, polygonEdgeDistance, bboxesIntersect } from './PaintedShape';
 import { arcToPolyline, circleToRing, KicadStrokeLineType, strokeDashedPolyline } from './StrokeDash';
 import {
-	defaultWksItems, defaultWksSetup, expandWksTextVars, resolveWksAnchor, withinWksMargin, wksPaperSizes,
+	defaultWksItems, defaultWksSetup, expandTextVars, resolveWksAnchor, withinWksMargin, wksPaperSizes,
 } from './DrawingSheet';
 
 // Real KiCad pin-label constants (eeschema's DefaultValues, confirmed via
@@ -52,6 +52,10 @@ export interface SchPaintedItem {
 	labelName?: string;
 	/** kind:'label' — 'global' | 'local' | 'hierarchical'. */
 	labelKind?: string;
+	/** kind:'label' for symbol instance fields (Reference/Value/…) — the field's own stored name. */
+	fieldName?: string;
+	/** kind:'label' for symbol instance fields — the field's own origin to use for drag-start calculations. */
+	fieldOrigin?: { x: number; y: number; rotation?: number };
 }
 
 /** A hierarchical sheet reference — surfaced separately from the painted
@@ -126,6 +130,18 @@ export function defaultSchLayerState(layersPresent: string[]): Map<string, SchLa
  * style-less single-representation symbols) is ever shown.
  */
 export class SchematicPainter {
+	/** Title-block/page vars (`${REVISION}`, `${TITLE}`, ...) for the CURRENT
+	 *  build() call — populated by prepareTextVars() before any builder runs,
+	 *  consumed via expandText(). Re-set (not merged) on every build() call,
+	 *  so stale state from a previous document never leaks into the next. */
+	protected textVars: Record<string, string> = {};
+	/** Reference designator → {FIELDNAME: value} for every symbol instance
+	 *  placed on the CURRENT sheet, keyed uppercase-field like the file's own
+	 *  property names — powers `${REFDES:FIELD}` (e.g. `${R3:VALUE}`). Only
+	 *  the current sheet is indexed (not the whole hierarchy) since build()
+	 *  only ever sees one schematic's worth of AST at a time. */
+	protected symbolFieldsByRef: Map<string, Record<string, string>> = new Map();
+
 	/**
 	 * Lightweight sheet-only extraction — parses just enough to list a
 	 * schematic's direct child sheets, without building any paint items for
@@ -182,6 +198,7 @@ export class SchematicPainter {
 		const root = schematic.rootElement;
 		const schematicVersion = Number(root.findFirstChildByName?.('version')?.value) || 0;
 		const libSymbols = getLibSymbolsClass() ? root.findFirstChildByClass(getLibSymbolsClass()) : null;
+		this.prepareTextVars(root, docInfo);
 
 		if (getRuleAreaClass()) {
 			for (const ruleArea of root.findChildrenByClass(getRuleAreaClass())) {
@@ -404,24 +421,19 @@ export class SchematicPainter {
 	}
 
 	/**
-	 * The page frame / title block ("drawing sheet") — ports kicanvas's
-	 * DrawingSheetPainter (viewers/drawing-sheet/painter.ts) against KiCad's
-	 * BUILT-IN default layout (DEFAULT_WKS_ITEMS — see DrawingSheet.ts for
-	 * why this doesn't parse a real .kicad_wks file). Confirmed gap: this
-	 * renderer drew schematic content on an otherwise bare canvas — no page
-	 * border, corner ruler ticks, or title block (Sheet/File/Title/Size/
-	 * Date/Rev/KiCad-version) the way real KiCad and kicanvas both do.
+	 * Populates `this.textVars`/`this.symbolFieldsByRef` for the document
+	 * currently being built() — MUST run before any text-building method
+	 * that calls expandText(), including buildDrawingSheet() itself (which
+	 * used to compute its own local copy of the title-block vars; this is
+	 * that same logic, just hoisted so plain text/text-box/symbol-field text
+	 * elsewhere on the sheet can resolve `${TITLE}`/`${REVISION}`/etc too,
+	 * not only the title-block template).
 	 */
-	protected buildDrawingSheet(root: any, docInfo?: SchematicDocInfo): SchPaintedItem[] {
-		const items: SchPaintedItem[] = [];
-
+	protected prepareTextVars(root: any, docInfo?: SchematicDocInfo): void {
 		const paperEl = typeof root.findFirstChildByName === 'function' ? root.findFirstChildByName('paper') : null;
 		const paperName = (paperEl?.attributes?.[0]?.value as string) ?? 'A4';
-		const paperSize = wksPaperSizes[paperName] ?? wksPaperSizes['A4']!;
-		const sheetSize = new Vec2(paperSize[0], paperSize[1]);
-
 		const titleBlockEl = typeof root.findFirstChildByName === 'function' ? root.findFirstChildByName('title_block') : null;
-		const vars: Record<string, string> = {
+		this.textVars = {
 			PAPER: paperName,
 			KICAD_VERSION: 'BOMManager2',
 			'#': String(docInfo?.sheetNumber ?? 1),
@@ -437,6 +449,54 @@ export class SchematicPainter {
 			COMMENT3: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(3) : '',
 			COMMENT4: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(4) : '',
 		};
+
+		this.symbolFieldsByRef = new Map();
+		if (getSymbolClass() && typeof root.findChildrenByClass === 'function') {
+			for (const instance of root.findChildrenByClass(getSymbolClass())) {
+				const ref = typeof instance.getReference === 'function' ? String(instance.getReference() ?? '').trim() : '';
+				if (!ref || typeof instance.getProperties !== 'function') {
+					continue;
+				}
+				const fields: Record<string, string> = {};
+				for (const prop of instance.getProperties()) {
+					if (prop.propertyName && prop.propertyValue != null) {
+						fields[String(prop.propertyName).toUpperCase()] = String(prop.propertyValue);
+					}
+				}
+				this.symbolFieldsByRef.set(ref, fields);
+			}
+		}
+	}
+
+	/** `${VAR}`/`${REFDES:FIELD}` expansion against the vars prepareTextVars()
+	 *  just built for this document — the one shared entry point every
+	 *  builder that wants variable expansion should call, so the resolver
+	 *  context (and its scope decisions — see expandText's call sites) stays
+	 *  in one place. Deliberately NOT applied to label names, pin names, or
+	 *  symbol body graphic text (library-fixed/identity text, not free-form
+	 *  annotation) — see buildSchText/buildSchTextBox/the symbol field-text
+	 *  loop for where it IS applied. */
+	protected expandText(raw: string, extraVars?: Record<string, string>): string {
+		const vars = extraVars ? { ...this.textVars, ...extraVars } : this.textVars;
+		return expandTextVars(raw, vars, this.symbolFieldsByRef);
+	}
+
+	/**
+	 * The page frame / title block ("drawing sheet") — ports kicanvas's
+	 * DrawingSheetPainter (viewers/drawing-sheet/painter.ts) against KiCad's
+	 * BUILT-IN default layout (DEFAULT_WKS_ITEMS — see DrawingSheet.ts for
+	 * why this doesn't parse a real .kicad_wks file). Confirmed gap: this
+	 * renderer drew schematic content on an otherwise bare canvas — no page
+	 * border, corner ruler ticks, or title block (Sheet/File/Title/Size/
+	 * Date/Rev/KiCad-version) the way real KiCad and kicanvas both do.
+	 */
+	protected buildDrawingSheet(root: any, docInfo?: SchematicDocInfo): SchPaintedItem[] {
+		const items: SchPaintedItem[] = [];
+
+		const paperEl = typeof root.findFirstChildByName === 'function' ? root.findFirstChildByName('paper') : null;
+		const paperName = (paperEl?.attributes?.[0]?.value as string) ?? 'A4';
+		const paperSize = wksPaperSizes[paperName] ?? wksPaperSizes['A4']!;
+		const sheetSize = new Vec2(paperSize[0], paperSize[1]);
 
 		const setup = defaultWksSetup;
 		let uid = 0;
@@ -504,7 +564,7 @@ export class SchematicPainter {
 							? String(incr + code - 48)
 							: String.fromCharCode(code + incr);
 					}
-					const resolved = expandWksTextVars(raw, vars);
+					const resolved = this.expandText(raw);
 					if (!resolved) {
 						continue;
 					}
@@ -537,7 +597,12 @@ export class SchematicPainter {
 		scene: SchematicScene,
 		renderer: Renderer,
 		layerState: Map<string, SchLayerVisibilityState>,
-		highlightedIds: Set<string> = new Set()
+		highlightedIds: Set<string> = new Set(),
+		netHighlightedIds: Set<string> = new Set(),
+		/** World-space visible rect — when given, items whose bbox falls
+		 *  entirely outside it are skipped. Omit to draw everything (e.g. the
+		 *  WebGL tessellation pass — see BoardPainter.paint's identical param). */
+		viewBBox?: { x: number; y: number; w: number; h: number }
 	): void {
 		for (const layer of scene.layersPresent) {
 			const state = layerState.get(layer);
@@ -547,7 +612,19 @@ export class SchematicPainter {
 			renderer.setOpacity?.(state.opacity);
 			renderer.beginBatch?.();
 			for (const item of scene.layerBuckets.get(layer)!) {
-				const color = highlightedIds.has(item.id) ? '#ffcc00' : (item.defaultColor ?? colorForKind(item.kind));
+				if (viewBBox && !bboxesIntersect(item.bbox, viewBBox)) {
+					continue;
+				}
+				let color: string;
+				if (highlightedIds.has(item.id)) {
+					color = '#ffcc00';
+				}
+				else if (netHighlightedIds.has(item.id)) {
+					color = '#ff44ff';
+				}
+				else {
+					color = item.defaultColor ?? colorForKind(item.kind);
+				}
 				item.draw(renderer, color);
 			}
 			renderer.endBatch?.();
@@ -939,10 +1016,11 @@ export class SchematicPainter {
 	}
 
 	protected buildSchText(text: any): SchPaintedItem | null {
-		const value: string = text.value ?? '';
-		if (!value) {
+		const raw: string = text.value ?? '';
+		if (!raw) {
 			return null;
 		}
+		const value = this.expandText(raw);
 		const origin = text.getOrigin();
 		const rotation = origin.rotation ?? 0;
 		const worldPos = new Vec2(origin.x, origin.y);
@@ -955,7 +1033,7 @@ export class SchematicPainter {
 		const anchor = typeof text.getAnchorPoint === 'function' ? text.getAnchorPoint() : { x: 0.5, y: 0.5 };
 		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, textAngle, false, thickness, anchor, italic);
 		const id = text.getUuid() ?? `sch-text:${ origin.x },${ origin.y }`;
-		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
+		const bbox = getStrokeTextBounds(geometry);
 		return {
 			id, layer: 'Text', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: text,
 			defaultColor: text.getFontColorOverride?.() ?? schColors.note,
@@ -996,6 +1074,7 @@ export class SchematicPainter {
 		const instanceMatrix = buildInstanceMatrix(origin.x, origin.y, origin.rotation ?? 0, mirror);
 		const instanceId = instance.getUuid() ?? `sym:${ origin.x },${ origin.y }`;
 		const placedUnit: number = typeof instance.getUnitId === 'function' ? instance.getUnitId() : 0;
+		const instanceRef: string = typeof instance.getReference === 'function' ? (String(instance.getReference() ?? '').trim()) : '';
 		// Real KiCad's unit count gates the "U1" → "U1A" reference suffix
 		// (SCH_SYMBOL::GetRef, `if (aIncludeUnit && GetUnitCount() > 1) ref +=
 		// subRef`) — resolved through the same one-level `extends` fallback as
@@ -1102,7 +1181,7 @@ export class SchematicPainter {
 				const pinNameOffset = readNumericValue(offsetEl, 0.508);
 
 				for (const pin of subUnit.findChildrenByClass(getPinClass())) {
-					for (const item of this.buildPin(pin, instanceMatrix, instanceId, pinNumbersHidden, pinNamesHidden, pinNameOffset)) {
+						for (const item of this.buildPin(pin, instanceMatrix, instanceId, pinNumbersHidden, pinNamesHidden, pinNameOffset, instanceRef || undefined)) {
 						items.push(item);
 					}
 				}
@@ -1112,9 +1191,10 @@ export class SchematicPainter {
 		// Reference/Value/Footprint/etc — real per-instance values and
 		// positions live on the PLACED instance's own properties, not the
 		// library def (same WithProperties + getVisibleProperties pattern
-		// already used for footprints). These are drawn as (non-hitTestable)
-		// text items; they are deliberately EXCLUDED from the symbol hit box
-		// below, so clicking a part's "R1"/"10k" text never selects the part.
+		// already used for footprints). Each field now gets a dedicated
+		// hit-testable label item so edit-mode selection/drag can target the
+		// field itself while the visible text remains separate and excluded from
+		// the symbol-body hit box below.
 		if (typeof instance.getVisibleProperties === 'function') {
 			const visibleProps = instance.getVisibleProperties();
 			for (const name of Object.keys(visibleProps)) {
@@ -1150,6 +1230,7 @@ export class SchematicPainter {
 				if (name === 'Reference' && unitCount > 1) {
 					value += letterSubReference(placedUnit > 0 ? placedUnit : 1);
 				}
+				value = this.expandText(value);
 				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x: 0, y: 0, rotation: 0 };
 				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0.5, y: 0.5 };
 				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
@@ -1158,10 +1239,16 @@ export class SchematicPainter {
 					propOrigin, anchor, value, textSize, origin, mirror
 				);
 				const geometry = computeStrokeTextGeometry(value, textWorld, textSize, drawRotationDeg, false, thickness, { x: 0.5, y: 0.5 }, italic);
-				const half = Math.max(textSize, 1.27);
-				const bbox = { x: textWorld.x - half, y: textWorld.y - half, w: half * 2, h: half * 2 };
+				const bbox = getStrokeTextBounds(geometry);
 				items.push({
-					id: `${ instanceId }:prop:${ name }`, layer: 'Text', kind: 'text',
+					id: `${ instanceId }:prop:${ name }`, layer: 'Text', kind: 'label',
+					shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: instance,
+					labelName: name, labelKind: 'symbol-field', fieldName: name,
+					fieldOrigin: { x: propOrigin.x, y: propOrigin.y, rotation: propOrigin.rotation ?? 0 },
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+				});
+				items.push({
+					id: `${ instanceId }:prop:${ name }:text`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: instance,
 					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
 				});
@@ -1518,7 +1605,7 @@ export class SchematicPainter {
 	 * rotation affects text layout, while `(at ...) + (size ...)` remain the
 	 * axis-aligned rectangle corners (matching SCH_TEXTBOX::GetDrawPos()). */
 	protected buildSchTextBox(textBox: any): SchPaintedItem | null {
-		const value: string = textBox.value ?? '';
+		const value = this.expandText(textBox.value ?? '');
 		const origin = typeof textBox.getOrigin === 'function' ? textBox.getOrigin() : { x: 0, y: 0, rotation: 0 };
 		const size = textBox.findFirstChildByName?.('size');
 		const width = Number(size?.width ?? size?.attributes?.[0]?.value) || 0;
@@ -1633,7 +1720,7 @@ export class SchematicPainter {
 		const anchor = { x: upright.flipped ? 1 - rawAnchor.x : rawAnchor.x, y: rawAnchor.y };
 		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, upright.angleDeg, false, thickness, anchor, italic);
 		const id = text.getUuid() ?? `sym-text:${ instanceId }:${ origin.x },${ origin.y }`;
-		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
+		const bbox = getStrokeTextBounds(geometry);
 		return {
 			id, layer: 'Symbols', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: text,
 			defaultColor: schColors.componentOutline,
@@ -1653,7 +1740,7 @@ export class SchematicPainter {
 	 * Pin name/number text position/size isn't modeled by @kicad-io
 	 * (confirmed gap) — using KiCad's own fixed conventional offsets.
 	 */
-	protected buildPin(pin: any, instanceMatrix: Matrix3, instanceId: string, pinNumbersHidden = false, pinNamesHidden = false, pinNameOffset = 0.508): SchPaintedItem[] {
+	protected buildPin(pin: any, instanceMatrix: Matrix3, instanceId: string, pinNumbersHidden = false, pinNamesHidden = false, pinNameOffset = 0.508, refDesignator?: string): SchPaintedItem[] {
 		const items: SchPaintedItem[] = [];
 		const origin = pin.getOrigin();
 		const length = typeof pin.getLength === 'function' ? pin.getLength() : 2.54;
@@ -1662,19 +1749,10 @@ export class SchematicPainter {
 		const id = pin.getUuid() ?? `pin:${ instanceId }:${ origin.x },${ origin.y }`;
 
 		if (isHidden) {
-			// Hidden is a DRAWING preference (KiCad's own "show hidden pins"
-			// toggle) — the pin is still electrically real, most commonly on
-			// power symbols (GND/VCC/...), where a wire landing exactly on
-			// this point is the single most common non-dangling connection
-			// in a typical schematic. Without this, buildDanglingFlags()
-			// would never see this point as occupied (it only reads back
-			// already-built paint items, not the AST) and would wrongly flag
-			// every wire touching a power symbol as dangling. A zero-length,
-			// invisible, non-hit-testable segment is enough to carry the
-			// position through — nothing else consumes the 'Pins' bucket.
 			const shape: PaintedShape = { type: 'segment', x1: worldOuter.x, y1: worldOuter.y, x2: worldOuter.x, y2: worldOuter.y, width: 0 };
 			items.push({
 				id, layer: 'Pins', kind: 'pin', shape, bbox: shapeToBBox(shape), hitTestable: false, element: pin,
+				refDesignator,
 				draw: () => {},
 			});
 			return items;
@@ -1763,6 +1841,7 @@ export class SchematicPainter {
 		const shape: PaintedShape = { type: 'segment', x1: worldOuter.x, y1: worldOuter.y, x2: lineEnd.x, y2: lineEnd.y, width };
 		items.push({
 			id, layer: 'Pins', kind: 'pin', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pin,
+			refDesignator,
 			draw: (renderer, color) => {
 				renderer.line([worldOuter, lineEnd], { strokeColor: color, strokeWidth: width });
 				if (bubble) {
@@ -1906,7 +1985,7 @@ export class SchematicPainter {
 		const id = typeof label.getUuid === 'function' && label.getUuid()
 			? label.getUuid()
 			: `local-label:${ x },${ y }:${ name }`;
-		const bbox = { x: worldPos.x - textSize * 3, y: worldPos.y - textSize, w: textSize * 6, h: textSize * 2 };
+		const bbox = getStrokeTextBounds(geometry);
 		return {
 			id, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: label,
 			labelName: name, labelKind: 'local',
@@ -1954,7 +2033,7 @@ export class SchematicPainter {
 		const anchor = readJustifyAnchor(label);
 		const geometry = computeStrokeTextGeometry(name, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
 		const id = label.getUuid() ?? `label:${ origin.x },${ origin.y }`;
-		const bbox = { x: worldTextPos.x - textSize * 3, y: worldTextPos.y - textSize, w: textSize * 6, h: textSize * 2 };
+		const bbox = getStrokeTextBounds(geometry);
 		// Same override color drives BOTH the text and its flag/arrow below —
 		// real KiCad's label properties dialog has one unified color swatch
 		// for a label, not separate text-vs-shape colors (unlike a text box,
@@ -2103,7 +2182,7 @@ export class SchematicPainter {
 		const textAngle = (geomRotation === 90 || geomRotation === 270) ? 90 : 0;
 		const anchor = { x: hAlign, y: 0.5 };
 		const geometry = computeStrokeTextGeometry(text, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
-		const bbox = { x: worldTextPos.x - textSize * 3, y: worldTextPos.y - textSize, w: textSize * 6, h: textSize * 2 };
+		const bbox = getStrokeTextBounds(geometry);
 		items.push({
 			id: `${ id }:text`, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element,
 			defaultColor: resolvedColor,
@@ -2240,7 +2319,7 @@ export class SchematicPainter {
 				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
 				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0, y: 1 };
 				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
-				const bbox = { x: worldPos.x - textSize * 3, y: worldPos.y - textSize, w: textSize * 6, h: textSize * 2 };
+				const bbox = getStrokeTextBounds(geometry);
 				items.push({
 					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: flag,
@@ -2467,7 +2546,14 @@ export class SchematicPainter {
 				const contentH = Math.max(0, cell.h - top - bottom);
 				const position = new Vec2(cell.x + left + anchor.x * contentW, cell.y + top + anchor.y * contentH);
 				const rotation = cell.el.getOrigin?.().rotation ?? 0;
-				const wrappedValue = wrapTableCellText(cell.value, contentW, textSize);
+				// ${ROW}/${COL}/${ADDR} are only meaningful inside a table
+				// cell's own text — real KiCad's help text documents them as
+				// 0-based, ADDR = spreadsheet-style column letter + row number
+				// (e.g. col 1, row 5 → "B5").
+				const cellValue = this.expandText(cell.value, {
+					ROW: String(cell.row), COL: String(cell.col), ADDR: `${ columnLetter(cell.col) }${ cell.row }`,
+				});
+				const wrappedValue = wrapTableCellText(cellValue, contentW, textSize);
 				const geometry = computeStrokeTextGeometry(wrappedValue, position, textSize, rotation, false, thickness, anchor, italic);
 				items.push({
 					id: `${tableId}:cell:${cell.el.getUuid?.() ?? `${cell.row},${cell.col}`}:text`,
@@ -2630,6 +2716,21 @@ export class SchematicPainter {
 			.filter((s): s is Extract<PaintedShape, { type: 'polygon' }> => s.type === 'polygon');
 		const liesOnAnyRuleAreaBorder = (x: number, y: number): boolean =>
 			ruleAreaPolygons.some(shape => polygonEdgeDistance(shape.points, shape.closed, x, y) < JUNCTION_POINT_EPS);
+		// A label (local/global/hier/directive — anything SCH_LABEL_BASE-
+		// derived in real KiCad) connects to a wire/bus it merely touches
+		// anywhere along its span, no junction dot required — unlike
+		// wire-to-wire T-connections. Confirmed in the user's local checkout:
+		// SCH_LABEL_BASE::UpdateDanglingState (sch_label.cpp) falls through
+		// exact-point coincidence to a TestSegmentHit() against every BUS_END
+		// then WIRE_END pair after point-coincidence fails. Same shape as the
+		// bus-entry-on-bus-span exception above, just against wires too and
+		// scoped to labels only (wires keep needing an exact endpoint/
+		// junction against each other).
+		const wireAndBusSegments = wireLike.filter(it =>
+			(it.kind === 'wire' || it.kind === 'bus') && it.shape.type === 'segment');
+		const liesOnAnyWireOrBusSpan = (x: number, y: number): boolean =>
+			wireAndBusSegments.some(seg => seg.shape.type === 'segment'
+				&& distanceToSegment(x, y, seg.shape.x1, seg.shape.y1, seg.shape.x2, seg.shape.y2) < JUNCTION_POINT_EPS);
 		const flags: SchPaintedItem[] = [];
 
 		for (const item of wireLike) {
@@ -2657,6 +2758,9 @@ export class SchematicPainter {
 			if (!origin || !isDangling(origin.x, origin.y)) {
 				continue;
 			}
+			if (liesOnAnyWireOrBusSpan(origin.x, origin.y)) {
+				continue;
+			}
 			if (item.labelKind === 'directive' && liesOnAnyRuleAreaBorder(origin.x, origin.y)) {
 				continue;
 			}
@@ -2679,6 +2783,18 @@ const DANGLING_CIRCLE_RADIUS = 0.381; // mm — 15 mils
 const DANGLING_STROKE_WIDTH = pinThickness;
 // 0.001mm — matches the precision real schematic coordinates actually carry.
 const JUNCTION_POINT_EPS = 1e-3;
+
+/** Spreadsheet-style 0-based column → letter(s): 0→A, 25→Z, 26→AA, ... —
+ *  used by ${ADDR} in table-cell text expansion. */
+function columnLetter(col: number): string {
+	let n = col;
+	let letters = '';
+	do {
+		letters = String.fromCharCode(65 + (n % 26)) + letters;
+		n = Math.floor(n / 26) - 1;
+	} while (n >= 0);
+	return letters;
+}
 
 function pointKey(x: number, y: number): string {
 	// Quantized to 0.0001mm — absorbs float noise from rotation/mirror
@@ -2904,7 +3020,7 @@ function labelClearanceOffset(textSize: number, thickness: number, rotationDeg: 
 }
 
 function textItem(id: string, layer: string, worldPos: Vec2, textSize: number, element: any, geometry: ReturnType<typeof computeStrokeTextGeometry>, defaultColor: string): SchPaintedItem {
-	const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
+	const bbox = getStrokeTextBounds(geometry);
 	return {
 		id, layer, kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element, defaultColor,
 		draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor),
@@ -3191,24 +3307,34 @@ function uprightTextAngle(angleDeg: number): { angleDeg: number; flipped: boolea
 }
 
 /** Placed-instance transform: local point -> rotate -> mirror -> translate
- * to world position. Mirror is applied innermost (before rotation) since it
- * flips the symbol's own body orientation, independent of where the whole
- * assembly then gets rotated/placed — matches real KiCad's placement model. */
+ * to world position. Rotation is applied innermost (before mirror) — matches
+ * real KiCad's placement model, where the file format's `(at x y rot)` sets
+ * the base transform first and a following `(mirror x/y)` composes on top of
+ * it (see sch_io_kicad_sexpr_parser.cpp's SetTransform-then-SetOrientation
+ * sequence, and SCH_SYMBOL::SetOrientation's `new = mirror * old` combine).
+ * Confirmed against real KiCad's TRANSFORM::TransformCoordinate for several
+ * rotation values — mirror-then-rotate (the old order here) silently matches
+ * KiCad only at rotation 0 and disagrees at 90/270, which is why plain
+ * rectangles/rotationless symbols never showed the bug but rotated pin
+ * layouts (e.g. a vertical switch) rendered mirrored across the wrong axis. */
 function buildInstanceMatrix(x: number, y: number, rotationDeg: number, mirror: 'x' | 'y' | null): Matrix3 {
 	// multiply_self does LEFT-multiplication (this = b * this), so building
-	// from bottom up: start with translation T, rotate_self gives R*T, then
-	// multiply by scaling gives S*R*T (scale innermost → rotate → translate).
-	// For row-vector transform(v) = v * M, this gives: ((v * S) * R) + t.
+	// from bottom up: start with translation T, multiply by scaling gives
+	// S*T, then multiply by rotation gives R*S*T (scale innermost → rotate →
+	// translate). For row-vector transform(v) = v * M, this gives:
+	// ((v * S) * R) + t — i.e. mirror is applied to the local point first,
+	// then rotation, then translation.
 	//
 	// KiCad naming: (mirror x) = mirror about X-axis = negate Y in schematic
 	// (Y-down) coordinates; (mirror y) = mirror about Y-axis = negate X.
-	let matrix = Matrix3.translation(x, y).rotateSelf(Angle.fromDegrees(rotationDeg));
+	let matrix = Matrix3.translation(x, y);
 	if (mirror === 'x') {
 		matrix = matrix.multiply(Matrix3.scaling(1, -1));
 	}
 	else if (mirror === 'y') {
 		matrix = matrix.multiply(Matrix3.scaling(-1, 1));
 	}
+	matrix = matrix.multiply(Matrix3.rotation(Angle.fromDegrees(rotationDeg)));
 	return matrix;
 }
 

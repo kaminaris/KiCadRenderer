@@ -348,12 +348,15 @@ export class WebGLRenderer implements Renderer {
 		if (points.length < 3) {
 			return;
 		}
-		if (style.fillColor) {
-			this.pushConvexFan(points, style.fillColor);
-		}
-		if (this.wantsStroke(style)) {
-			this.pushStrokePolyline(points, style.strokeColor!, style.strokeWidth!, true);
-		}
+		// Delegate to multiPolygon's stencil-based even-odd fill rather than
+		// pushConvexFan — a schematic/symbol polygon is frequently CONCAVE
+		// (e.g. a gear-shaped logo, an arrow, a star), and fanning a concave
+		// ring from one arbitrary vertex produces triangles that stick
+		// outside the true outline, visibly corrupting the fill. Text
+		// glyphs already rely on this exact path for the same reason (a "G"
+		// or "0" glyph is its own non-convex ring) — nothing convexity-
+		// specific about it that would make it wrong for a single ring.
+		this.multiPolygon([points], style);
 	}
 
 	circle(center: Vec2, radius: number, style: RenderStyle): void {
@@ -607,14 +610,6 @@ export class WebGLRenderer implements Renderer {
 		this.pushVertex(a.x, a.y, color);
 		this.pushVertex(b.x, b.y, color);
 		this.pushVertex(c.x, c.y, color);
-	}
-
-	protected pushConvexFan(points: Vec2[], colorStr: string): void {
-		const color = parseColor(colorStr);
-		const origin = points[0]!;
-		for (let i = 1; i < points.length - 1; i++) {
-			this.pushTriangle(origin, points[i]!, points[i + 1]!, color);
-		}
 	}
 
 	// Main filled circles (pad bodies, via rings, drilled holes) — these are

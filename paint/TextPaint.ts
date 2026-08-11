@@ -68,36 +68,85 @@ const dotRadiusFactor = 0.09;
 interface TextRun {
 	text: string;
 	overbar: boolean;
+	subscript: boolean;
+	superscript: boolean;
+}
+
+const emptyRunStyle: Omit<TextRun, 'text'> = { overbar: false, subscript: false, superscript: false };
+
+/**
+ * Finds the `}` matching the `{` at `openIdx` (text[openIdx] === '{'),
+ * counting nested braces of ANY kind so a nested `^{}`/`_{}`/`~{}` run
+ * inside this one doesn't prematurely close it. Real KiCad's grammar
+ * (include/markup_parser.h) also allows a bare `{identifier}` escape
+ * sequence inside markup content (used for embedding a literal brace pair
+ * without it being read as more markup) — generic depth-counting handles
+ * that case's braces correctly for matching purposes too, it just doesn't
+ * unwrap/strip it the way real KiCad's parser would (an obscure, rarely-used
+ * feature, left as a known gap: the braces render literally instead of
+ * being consumed).
+ */
+function findMatchingBrace(text: string, openIdx: number): number {
+	let depth = 1;
+	for (let i = openIdx + 1; i < text.length; i++) {
+		if (text[i] === '{') {
+			depth++;
+		}
+		else if (text[i] === '}') {
+			depth--;
+			if (depth === 0) {
+				return i;
+			}
+		}
+	}
+	return -1;
 }
 
 /**
- * Parses KiCad's `~{...}` inline overbar markup (e.g. `~{RESET}`, used for
- * active-low signal names) into plain-text runs each flagged whether they
- * should render with a bar drawn above them. This is a real KiCad text
- * convention read straight from schematic/symbol text, not custom syntax —
- * StrokeFont.get_text_as_glyphs() already supports drawing an overbar over
- * a whole call's output (`style.overbar`), it just needed the markup split
- * into runs first since a single call only draws one bar over everything.
+ * Parses KiCad's inline text markup — `^{superscript}`, `_{subscript}`,
+ * `~{overbar}` (include/markup_parser.h's `sor<subscript, superscript,
+ * overbar>` grammar, applied to ALL text via common/font/font.cpp's
+ * drawMarkup(), stroke font included, not just outline/TTF fonts) — into
+ * flat plain-text runs each flagged with which styles apply. Markup nests
+ * (e.g. `~{A^{B}}` overbars "A" and superscripts+overbars "B") — child style
+ * flags accumulate with the parent's, matching drawMarkup's own `textStyle |=
+ * ...` accumulation down the parse tree. StrokeFont.getTextAsGlyphs() already
+ * draws all three independently (and in combination) per run — this is just
+ * the markup-to-runs split, one call only draws one style combo at a time.
+ *
+ * Known gap vs. the real grammar: the `{identifier}` brace-escape sequence
+ * (see findMatchingBrace's doc comment) isn't unwrapped — an obscure feature
+ * with unclear real-world usage, not implemented.
  */
-function parseOverbarRuns(text: string): TextRun[] {
+function parseMarkupRuns(text: string, style: Omit<TextRun, 'text'> = emptyRunStyle): TextRun[] {
 	const runs: TextRun[] = [];
 	let i = 0;
+	let plainStart = 0;
+	const flushPlain = (to: number) => {
+		if (to > plainStart) {
+			runs.push({ text: text.slice(plainStart, to), ...style });
+		}
+	};
 	while (i < text.length) {
-		if (text[i] === '~' && text[i + 1] === '{') {
-			const end = text.indexOf('}', i + 2);
-			if (end !== -1) {
-				runs.push({ text: text.slice(i + 2, end), overbar: true });
-				i = end + 1;
+		const c = text[i];
+		if ((c === '^' || c === '_' || c === '~') && text[i + 1] === '{') {
+			const close = findMatchingBrace(text, i + 1);
+			if (close !== -1) {
+				flushPlain(i);
+				const childStyle: Omit<TextRun, 'text'> = {
+					overbar: style.overbar || c === '~',
+					subscript: style.subscript || c === '_',
+					superscript: style.superscript || c === '^',
+				};
+				runs.push(...parseMarkupRuns(text.slice(i + 2, close), childStyle));
+				i = close + 1;
+				plainStart = i;
 				continue;
 			}
 		}
-		let j = i;
-		while (j < text.length && !(text[j] === '~' && text[j + 1] === '{')) {
-			j++;
-		}
-		runs.push({ text: text.slice(i, j), overbar: false });
-		i = j;
+		i++;
 	}
+	flushPlain(text.length);
 	return runs;
 }
 
@@ -118,7 +167,9 @@ function layoutRuns(
 	let cursor = position;
 	let bboxEnd = position;
 	for (const run of runs) {
-		const laid = font.getTextAsGlyphs(run.text, size, cursor, angle, mirror, origin, { overbar: run.overbar, italic });
+		const laid = font.getTextAsGlyphs(run.text, size, cursor, angle, mirror, origin, {
+			overbar: run.overbar, subscript: run.subscript, superscript: run.superscript, italic,
+		});
 		glyphs.push(...(laid.glyphs as import('../text/StrokeGlyph').StrokeGlyph[]));
 		cursor = laid.cursor;
 		bboxEnd = laid.bbox.end;
@@ -145,7 +196,7 @@ export function measureStrokeTextSize(text: string, sizeMm: number): { width: nu
 	// RX") would otherwise measure the width of the raw ESCAPED string
 	// (7 chars for "{slash}" vs. the 1 displayed char "/"), sizing the
 	// flag/arrow shape around text far wider than what's actually drawn.
-	const runs = parseOverbarRuns(unescapeKicadString(text));
+	const runs = parseMarkupRuns(unescapeKicadString(text));
 	const measured = layoutRuns(font, runs, size, new Vec2(0, 0), new Angle(0), false, new Vec2(0, 0));
 	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 	for (const glyph of measured.glyphs) {
@@ -159,6 +210,28 @@ export function measureStrokeTextSize(text: string, sizeMm: number): { width: nu
 	const width = maxX > minX ? maxX - minX : measured.bboxEnd.x;
 	const height = maxY > minY ? maxY - minY : measured.bboxEnd.y;
 	return { width: width || sizeMm, height: height || sizeMm };
+}
+
+export function getStrokeTextBounds(geometry: StrokeTextGeometry): { x: number; y: number; w: number; h: number } {
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+	for (const stroke of geometry.strokes) {
+		for (const point of stroke.points) {
+			minX = Math.min(minX, point.x);
+			minY = Math.min(minY, point.y);
+			maxX = Math.max(maxX, point.x);
+			maxY = Math.max(maxY, point.y);
+		}
+	}
+	for (const dot of geometry.dots) {
+		minX = Math.min(minX, dot.center.x - dot.radius);
+		minY = Math.min(minY, dot.center.y - dot.radius);
+		maxX = Math.max(maxX, dot.center.x + dot.radius);
+		maxY = Math.max(maxY, dot.center.y + dot.radius);
+	}
+	if (!Number.isFinite(minX)) {
+		return { x: 0, y: 0, w: 0, h: 0 };
+	}
+	return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
 // KiCad's Font::interline_pitch_ratio — vertical spacing between stacked
@@ -207,7 +280,7 @@ export function computeStrokeTextGeometry(
 	// capture descenders (glyph points below the layout baseline), so the
 	// true bbox is computed from strokes, same as the old single-line pass.
 	const lines: MeasuredLine[] = rawLines.map((line, i) => {
-		const runs = parseOverbarRuns(line);
+		const runs = parseMarkupRuns(line);
 		const measured = layoutRuns(font, runs, size, new Vec2(0, i * interline), new Angle(0), mirror, new Vec2(0, i * interline), italic);
 		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 		for (const glyph of measured.glyphs) {

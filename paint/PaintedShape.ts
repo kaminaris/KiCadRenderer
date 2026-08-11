@@ -8,6 +8,21 @@ export type PaintedShape =
 	| { type: 'segment'; x1: number; y1: number; x2: number; y2: number; width: number }
 	| { type: 'polygon'; points: { x: number; y: number }[]; filled?: boolean; closed?: boolean; strokeWidth?: number };
 
+/** Plain-AABB overlap test — duck-typed against {x,y,w,h} so it takes either
+ *  a PaintedItem's plain bbox or a real BBox instance (Camera2.bbox) without
+ *  needing PaintedItem.bbox to be upgraded to the BBox class. Used for
+ *  per-frame viewport culling: a board with thousands of tracks/pads/vias
+ *  redraws its ENTIRE scene every frame on the Canvas2D path (see
+ *  KicadRenderSession.render's doc comment), so skipping items outside the
+ *  current view is the difference between panning a big board at ~10fps and
+ *  at 60. */
+export function bboxesIntersect(
+	a: { x: number; y: number; w: number; h: number },
+	b: { x: number; y: number; w: number; h: number }
+): boolean {
+	return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
+}
+
 export function shapeToBBox(shape: PaintedShape): { x: number; y: number; w: number; h: number } {
 	switch (shape.type) {
 		case 'rect':

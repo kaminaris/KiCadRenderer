@@ -26,6 +26,16 @@ export interface StrokeBatch { path: Path2D; width: number; color: string }
  * thousand. Outside a batch, behavior is unchanged (immediate draw) — used
  * by callers like the grid, which redraw fresh dot-by-dot every frame and
  * don't share a style worth batching.
+ *
+ * @deprecated Kept only as KicadRenderSession's automatic fallback for
+ * environments where WebGL context creation genuinely fails (disabled GPU,
+ * headless CI, locked-down browser policy) — see the constructor's try/catch
+ * around `new WebGLRenderer(canvasGl)`. Even with the batching above, this
+ * still re-rasterizes the ENTIRE visible scene on the CPU every single pan/
+ * zoom frame (no persisted GPU buffers), which is the documented ceiling
+ * that motivated WebGLRenderer in the first place — see its own class
+ * comment. Don't build new features against this renderer or start a
+ * session with `canvasGl: null`; use WebGLRenderer via a real WebGL canvas.
  */
 export class Canvas2dRenderer implements Renderer {
 	protected batching = false;

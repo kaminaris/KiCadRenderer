@@ -99,7 +99,7 @@ export {
 	wksPaperSizes,
 	resolveWksAnchor,
 	withinWksMargin,
-	expandWksTextVars,
+	expandTextVars,
 } from './paint/DrawingSheet';
 export type {
 	WksAnchor,

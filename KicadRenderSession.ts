@@ -33,6 +33,7 @@ import { KicadElementSheet }           from '@kicad-io/KicadElementSheet';
 import { KicadElementPin }             from '@kicad-io/KicadElementPin';
 import { KicadElementLibSymbols }      from '@kicad-io/KicadElementLibSymbols';
 import { KicadElementLibId }           from '@kicad-io/KicadElementString';
+import { SchematicConnectivityService, type SchematicConnectivitySummary } from '@kicad-layout/Connectivity';
 import { KicadElementUnit }            from '@kicad-io/KicadElementNumeric';
 import { KicadElementDnp }             from '@kicad-io/KicadElementBoolean';
 import { buildPowerFlag, buildPowerGnd, buildPowerRail } from '@kicad-io/Builder/PassiveSymbolBuilder';
@@ -188,6 +189,12 @@ export class KicadRenderSession {
 	protected schematicDocInfo: SchematicDocInfo | undefined = undefined;
 	/** Multi-select-capable — see select()/selectMultiple()/selection/selectionIds. */
 	protected selectedIds: Set<string> = new Set();
+	/** Hover-driven net highlight IDs — painted in the same highlight color as selection. */
+	protected highlightedNetIds: Set<string> = new Set();
+	protected highlightedNetName: string | null = null;
+	protected connectivityService = new SchematicConnectivityService();
+	protected connectivityCacheText: string | null = null;
+	protected connectivityCache: SchematicConnectivitySummary | null = null;
 	/** Overrides drawGrid()'s default spacing — see setGridSpacing(). null
 	 *  means "use the built-in default" (1.27mm schematic / 0.5mm board). */
 	protected gridSpacingMm: number | null = null;
@@ -240,6 +247,14 @@ export class KicadRenderSession {
 	 * stop future rAF-scheduled frames from ever running again. */
 	onError: ((err: unknown) => void) | null = null;
 
+	/**
+	 * @param canvas2d Required either way — also the automatic fallback
+	 * target if `canvasGl` is null/omitted or WebGL context creation fails.
+	 * @param canvasGl Pass a real, currently-unused canvas here for any
+	 * production use — see Canvas2dRenderer's `@deprecated` note for why
+	 * `null` should be reserved for cases that specifically need to force
+	 * Canvas2D (a unit test, a tiny one-off preview render).
+	 */
 	constructor(canvas2d: HTMLCanvasElement, canvasGl: HTMLCanvasElement | null) {
 		registerDefaultKicadClasses();
 
@@ -592,6 +607,232 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	clearNetHighlight(): void {
+		if (!this.highlightedNetIds.size && this.highlightedNetName === null) {
+			return;
+		}
+		this.highlightedNetName = null;
+		this.highlightedNetIds.clear();
+		this.scheduleRender();
+	}
+
+	highlightNetAtScreen(screenPos: Vec2): boolean {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			this.clearNetHighlight();
+			return false;
+		}
+		const hit = this.hitTestAtScreen(screenPos);
+		const item = hit ? this.schScene.hitTestItems.find(candidate => candidate.id === hit.id) : null;
+		const netName = this.netNameForPaintItem(item);
+		if (!netName) {
+			this.clearNetHighlight();
+			return false;
+		}
+		const ids = this.paintIdsForNet(netName);
+		if (!ids.size) {
+			this.clearNetHighlight();
+			return false;
+		}
+		if (this.highlightedNetName === netName) {
+			return true;
+		}
+		this.highlightedNetName = netName;
+		this.highlightedNetIds = ids;
+		this.scheduleRender();
+		return true;
+	}
+
+	private getConnectivitySummary(): SchematicConnectivitySummary | null {
+		const text = this.getSchematicText();
+		if (!text) {
+			this.connectivityCache = null;
+			this.connectivityCacheText = null;
+			return null;
+		}
+		if (this.connectivityCacheText === text && this.connectivityCache) {
+			return this.connectivityCache;
+		}
+		try {
+			const summary = this.connectivityService.buildFromSchematicText(text);
+			this.connectivityCache = summary;
+			this.connectivityCacheText = text;
+			return summary;
+		}
+		catch {
+			this.connectivityCache = null;
+			this.connectivityCacheText = null;
+			return null;
+		}
+	}
+
+	private netNameForPaintItem(item: SchPaintedItem | null | undefined): string | null {
+		if (!item) {
+			return null;
+		}
+		if (item.kind === 'label' && item.labelKind !== 'symbol-field' && item.labelName) {
+			return item.labelName;
+		}
+		if (item.kind === 'pin' && item.element instanceof KicadElementPin) {
+			const ref = item.refDesignator;
+			if (!ref) {
+				return null;
+			}
+			const { number } = typeof item.element.getPin === 'function' ? item.element.getPin() : { number: '' };
+			if (!number) {
+				return null;
+			}
+			const summary = this.getConnectivitySummary();
+			const component = summary?.components.find(c => c.ref === ref);
+			const matchingPin = component?.pins.find(p => p.number === number);
+			return matchingPin?.net ?? null;
+		}
+		if (item.kind === 'symbol' && item.refDesignator) {
+			const summary = this.getConnectivitySummary();
+			const component = summary?.components.find(c => c.ref === item.refDesignator);
+			if (component) {
+				const nets = [...new Set(component.pins.map(p => p.net).filter(Boolean) as string[])];
+				// Power symbols (GND, VCC, …) have exactly one net — auto-resolve.
+				if (nets.length === 1) {
+					return nets[0]!;
+				}
+			}
+		}
+		return null;
+	}
+
+	private paintIdsForNet(netName: string): Set<string> {
+		const ids = new Set<string>();
+		if (!this.schScene) {
+			return ids;
+		}
+
+		const seedPoints: { x: number; y: number }[] = [];
+		const WIRE_SNAP = 0.12;
+		const summary = this.getConnectivitySummary();
+
+		// Helper: add all painted items belonging to a symbol instance with the given ref.
+		// Used for power symbols (GND/VCC/…) so their body graphic also turns highlighted.
+		const addSymbolBodyItems = (ref: string) => {
+			const symbolHit = this.schScene!.hitTestItems.find(it => it.kind === 'symbol' && it.refDesignator === ref);
+			if (!symbolHit) {
+				return;
+			}
+			const instanceId = symbolHit.id.startsWith('symbol:') ? symbolHit.id.slice('symbol:'.length) : null;
+			if (!instanceId) {
+				return;
+			}
+			for (const bucket of this.schScene!.layerBuckets.values()) {
+				for (const item of bucket) {
+					if (item.id === `symbol:${ instanceId }` || item.id.startsWith(`${ instanceId }:`)) {
+						ids.add(item.id);
+					}
+				}
+			}
+		};
+
+		// Helper: when a label is found, add all its companion items (:text, :flag, etc.).
+		// Global/hierarchical labels create multiple SchPaintedItems with the same base UUID.
+		// Note: :text items have hitTestable: false, so they're not in hitTestItems — search layerBuckets.
+		const addLabelAndCompanions = (labelItem: SchPaintedItem) => {
+			ids.add(labelItem.id);
+			const baseId = labelItem.id.replace(/:text$|:flag$/, '');
+			if (baseId !== labelItem.id) {
+				// This label has a suffix, so find and add companion items from all layers.
+				for (const bucket of this.schScene!.layerBuckets.values()) {
+					for (const item of bucket) {
+						if ((item.id === `${ baseId }:text` || item.id === `${ baseId }:flag`) && !ids.has(item.id)) {
+							ids.add(item.id);
+						}
+					}
+				}
+			}
+		};
+
+		// 1. Labels matching the net name.
+		for (const item of this.schScene.hitTestItems) {
+			if (item.kind === 'label' && item.labelKind !== 'symbol-field' && item.labelName === netName) {
+				addLabelAndCompanions(item);
+				const shape = item.shape as any;
+				if (shape?.type === 'rect') {
+					seedPoints.push({ x: shape.x, y: shape.y + shape.h / 2 });
+					seedPoints.push({ x: shape.x + shape.w, y: shape.y + shape.h / 2 });
+					seedPoints.push({ x: shape.x + shape.w / 2, y: shape.y });
+					seedPoints.push({ x: shape.x + shape.w / 2, y: shape.y + shape.h });
+				}
+			}
+		}
+
+		// 2. Labels from the connectivity net's label list.
+		const net = summary?.nets.find(n => n.name === netName);
+		if (net?.labels) {
+			for (const labelName of net.labels) {
+				for (const item of this.schScene.hitTestItems) {
+					if (item.kind === 'label' && item.labelKind !== 'symbol-field' && item.labelName === labelName) {
+						addLabelAndCompanions(item);
+						const shape = item.shape as any;
+						if (shape?.type === 'rect') {
+							seedPoints.push({ x: shape.x, y: shape.y + shape.h / 2 });
+							seedPoints.push({ x: shape.x + shape.w, y: shape.y + shape.h / 2 });
+						}
+					}
+				}
+			}
+		}
+
+		// 3. Pins from the Pins layer (includes hidden pins such as GND/VCC power symbols).
+		for (const pinItem of (this.schScene.layerBuckets.get('Pins') ?? [])) {
+			if (pinItem.kind !== 'pin' || !(pinItem.element instanceof KicadElementPin)) {
+				continue;
+			}
+			const pinNet = this.netNameForPaintItem(pinItem);
+			if (pinNet !== netName) {
+				continue;
+			}
+			if (pinItem.hitTestable) {
+				ids.add(pinItem.id);
+			}
+			// x1/y1 is worldOuter — the wire connection endpoint.
+			const shape = pinItem.shape as any;
+			if (shape?.type === 'segment') {
+				seedPoints.push({ x: shape.x1, y: shape.y1 });
+			}
+			// Power symbols (GND, VCC, …) — highlight the whole symbol body.
+			if (pinItem.refDesignator) {
+				const component = summary?.components.find(c => c.ref === pinItem.refDesignator);
+				if (component?.isPower) {
+					addSymbolBodyItems(pinItem.refDesignator);
+				}
+			}
+		}
+
+		// 4. Wire flood-fill BFS from seed points.
+		const allWires = this.schScene.layerBuckets.get('Wires') ?? [];
+		const visited = new Set<string>();
+		const queue = [...seedPoints];
+
+		while (queue.length > 0) {
+			const current = queue.shift()!;
+			for (const wire of allWires) {
+				if (visited.has(wire.id)) {
+					continue;
+				}
+				const wshape = wire.shape as any;
+				if (wshape?.type !== 'segment') {
+					continue;
+				}
+				const nearStart = Math.hypot(current.x - wshape.x1, current.y - wshape.y1) <= WIRE_SNAP;
+				const nearEnd   = Math.hypot(current.x - wshape.x2, current.y - wshape.y2) <= WIRE_SNAP;
+				if (nearStart || nearEnd) {
+					visited.add(wire.id);
+					ids.add(wire.id);
+					queue.push(nearStart ? { x: wshape.x2, y: wshape.y2 } : { x: wshape.x1, y: wshape.y1 });
+				}
+			}
+		}
+
+		return ids;
+	}
+
 	/** Every KicadElementGroup currently in the document — cheap early-return
 	 *  when none exist (every schematic that doesn't use groups, i.e. every
 	 *  one today), so expandGroupSelection/selectionHasGroup cost nothing
@@ -843,6 +1084,10 @@ export class KicadRenderSession {
 		const schematicRoot = { rootElement };
 		this.schematicRoot = schematicRoot;
 		this.schematicDocInfo = docInfo;
+		this.connectivityCache = null;
+		this.connectivityCacheText = null;
+		this.highlightedNetName = null;
+		this.highlightedNetIds.clear();
 
 		const t1 = performance.now();
 		this.schScene = this.schematicPainter.build(schematicRoot, docInfo);
@@ -1378,8 +1623,9 @@ export class KicadRenderSession {
 	}
 
 	/**
-	 * Move a global/local/hierarchical label by paint-item id (e.g. `"uuid:flag"` or
-	 * `"uuid"`). Label net name is unchanged — only the attach point moves.
+	 * Move a global/local/hierarchical label or a symbol instance field by paint-item id
+	 * (e.g. `"uuid:flag"`, `"uuid"`, or `"sym:uuid:prop:Reference"`). Label net text is
+	 * unchanged — only the attach point/field anchor moves.
 	 */
 	moveLabelById(paintId: string, x: number, y: number, rotation?: number): boolean {
 		if (this.documentType !== 'schematic' || !this.schematicRoot) {
@@ -1387,6 +1633,19 @@ export class KicadRenderSession {
 		}
 		const items = this.schScene?.hitTestItems ?? [];
 		const item = items.find(it => it.id === paintId || it.id.startsWith(`${paintId}:`));
+		const fieldName = item?.fieldName ?? paintId.match(/:prop:(.+)$/)?.[1] ?? null;
+		if (fieldName) {
+			const instance = item?.element;
+			if (instance && typeof instance.getPropertyByName === 'function') {
+				const prop = instance.getPropertyByName(fieldName);
+				if (prop && typeof prop.getOrigin === 'function' && typeof prop.setOrigin === 'function') {
+					const cur = prop.getOrigin?.() ?? { rotation: 0 };
+					prop.setOrigin(x, y, rotation ?? cur.rotation ?? 0);
+					this.commitAstMutation();
+					return true;
+				}
+			}
+		}
 		const el = item?.element;
 		if (!el || typeof el.setOrigin !== 'function') {
 			// Fall back: search root children by uuid prefix in paint id.
@@ -2701,11 +2960,30 @@ export class KicadRenderSession {
 		if (this.documentType !== 'schematic' || !this.schScene || (dx === 0 && dy === 0)) {
 			return false;
 		}
+		const selectedSymbolOwners = new Set<string>();
+		for (const id of ids) {
+			const item = this.schScene.hitTestItems.find(it => it.id === id);
+			if (!item) {
+				continue;
+			}
+			if (item.kind === 'symbol') {
+				selectedSymbolOwners.add(item.id.replace(/^symbol:/, ''));
+			}
+		}
 		this.beginBatch();
 		let mutated = false;
 		for (const id of ids) {
 			const item = this.schScene.hitTestItems.find(it => it.id === id);
-			if (item && this.moveItemBy(item, dx, dy)) {
+			if (!item) {
+				continue;
+			}
+			if (item.kind === 'label' && item.labelKind === 'symbol-field') {
+				const owner = item.id.match(/^(.+):prop:/)?.[1];
+				if (owner && selectedSymbolOwners.has(owner)) {
+					continue;
+				}
+			}
+			if (this.moveItemBy(item, dx, dy)) {
 				mutated = true;
 			}
 		}
@@ -2730,6 +3008,17 @@ export class KicadRenderSession {
 		}
 		if (item.kind === 'label' && item.labelKind === 'sheet-pin' && origin) {
 			return this.moveSheetPinById(item.id, origin.x + dx, origin.y + dy);
+		}
+		if (item.kind === 'label' && item.labelKind === 'symbol-field') {
+			const fieldName = item.fieldName ?? null;
+			const instance = item.element;
+			const prop = fieldName && typeof instance?.getPropertyByName === 'function'
+				? instance.getPropertyByName(fieldName)
+				: null;
+			const current = prop && typeof prop.getOrigin === 'function'
+				? prop.getOrigin()
+				: (item.fieldOrigin ?? { x: 0, y: 0, rotation: 0 });
+			return this.moveLabelById(item.id, Number(current.x ?? 0) + dx, Number(current.y ?? 0) + dy, current.rotation ?? 0);
 		}
 		return this.translateElementById(item.id, dx, dy);
 	}
@@ -3087,18 +3376,22 @@ export class KicadRenderSession {
 					}
 				}
 			}
-			const paintActive = () => {
+			const paintActive = (viewBBox?: { x: number; y: number; w: number; h: number }) => {
 				if (this.documentType === 'schematic') {
-					this.schematicPainter.paint(this.schScene!, renderer, this.schLayerState, highlighted);
+					this.schematicPainter.paint(
+						this.schScene!, renderer, this.schLayerState, highlighted, this.highlightedNetIds, viewBBox);
 				}
 				else {
-					this.painter.paint(this.scene!, renderer, this.layerState, highlighted);
+					this.painter.paint(this.scene!, renderer, this.layerState, highlighted, viewBBox);
 				}
 			};
 
 			if (renderer.beginStaticBuild) {
 				if (this.geometryDirty) {
 					renderer.beginStaticBuild();
+					// No viewBBox — this pass tessellates once into GPU buffers
+					// that then persist across pans/zooms, so it must capture
+					// everything, not just what's on-screen right now.
 					paintActive();
 					renderer.endStaticBuild!();
 					this.geometryDirty = false;
@@ -3108,7 +3401,11 @@ export class KicadRenderSession {
 			}
 			else {
 				this.drawGrid(renderer);
-				paintActive();
+				// Canvas2D redraws the whole scene every frame (see this
+				// method's doc comment) — cull to the current viewport, grown
+				// 20% so items just outside the edge don't pop in/out on pan.
+				const viewBBox = this.camera.bbox.grow(this.camera.bbox.w * 0.2, this.camera.bbox.h * 0.2);
+				paintActive(viewBBox);
 			}
 			// Always last — the hand-drawn editor's in-progress tool state draws
 			// on top of everything else, for both backends.

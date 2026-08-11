@@ -5,7 +5,7 @@ import { Renderer } from '../render/Renderer';
 import { styleForLayer, boardBackgroundColor, zoneFillAlpha, withAlpha } from './LayerColors';
 import { layerPaintOrder } from './LayerOrder';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry } from './TextPaint';
-import { PaintedShape, shapeToBBox } from './PaintedShape';
+import { PaintedShape, shapeToBBox, bboxesIntersect } from './PaintedShape';
 
 // KicadBoard/KicadElementFootprint/etc. are only available once the
 // @kicad-io submodule is resolved via the @kicad-io/* path alias in the
@@ -97,6 +97,16 @@ export class BoardPainter {
 		const segments = board.rootElement.findChildrenByClass(getSegmentClass());
 		for (const segment of segments) {
 			pushItem(this.buildTrack(segment));
+		}
+
+		if (getTrackArcClass()) {
+			const trackArcs = board.rootElement.findChildrenByClass(getTrackArcClass());
+			for (const arc of trackArcs) {
+				const item = this.buildTrackArc(arc);
+				if (item) {
+					pushItem(item);
+				}
+			}
 		}
 
 		const zones = board.rootElement.findChildrenByClass(getZoneClass());
@@ -197,7 +207,12 @@ export class BoardPainter {
 		scene: LayeredBoardScene,
 		renderer: Renderer,
 		layerState: Map<string, LayerVisibilityState>,
-		highlightedIds: Set<string> = new Set()
+		highlightedIds: Set<string> = new Set(),
+		/** World-space visible rect — when given, items whose bbox falls
+		 *  entirely outside it are skipped. Omit to draw everything (e.g. the
+		 *  WebGL tessellation pass, which must stay complete since it isn't
+		 *  redone on every pan/zoom — see KicadRenderSession.render). */
+		viewBBox?: { x: number; y: number; w: number; h: number }
 	): void {
 		for (const layer of scene.layersPresent) {
 			const state = layerState.get(layer);
@@ -218,6 +233,9 @@ export class BoardPainter {
 			// every layer is done — see demo/main.ts's render().
 			renderer.beginBatch?.();
 			for (const item of items) {
+				if (viewBBox && !bboxesIntersect(item.bbox, viewBBox)) {
+					continue;
+				}
 				const color = highlightedIds.has(item.id) ? '#ffcc00' : baseColor;
 				item.draw(renderer, color);
 			}
@@ -244,6 +262,29 @@ export class BoardPainter {
 			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: true, element: segment,
 			draw: (renderer, color) => {
 				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: color, strokeWidth: width });
+			},
+		};
+	}
+
+	/** A curved copper track — segment's arc counterpart (e.g. rounded
+	 *  corners on a length-tuning/meander pattern). Not hit-testable yet:
+	 *  same limitation buildGrArc already has — PaintedShape has no
+	 *  sweep-aware arc variant, so a 'circle' hit-shape would wrongly accept
+	 *  clicks anywhere on the full ring, not just the drawn arc. */
+	protected buildTrackArc(arc: any): PaintedItem | null {
+		if (typeof arc.getArcCenterRadiusAngles !== 'function') {
+			return null;
+		}
+		const { centerX, centerY, radius, startAngle, endAngle } = arc.getArcCenterRadiusAngles();
+		const layer = arc.getLayer();
+		const width = typeof arc.getWidth === 'function' ? arc.getWidth() : 0.25;
+		const id = arc.getUuid() ?? `track-arc:${ layer }:${ centerX },${ centerY }`;
+		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius };
+
+		return {
+			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			draw: (renderer, color) => {
+				renderer.arc(new Vec2(centerX, centerY), radius, startAngle, endAngle, { strokeColor: color, strokeWidth: width });
 			},
 		};
 	}
@@ -1158,11 +1199,12 @@ function boundsOfPoints(points: { x: number; y: number }[]): { x: number; y: num
 // in; these helpers only need the *classes* for findChildrenByClass()
 // lookups, resolved from the same module the caller already imported.
 let _Footprint: any, _Segment: any, _Via: any, _Pad: any, _Zone: any, _Layers: any, _GrLine: any, _GrArc: any, _GrRect: any, _GrCircle: any;
-let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _Dimension: any, _GrText: any, _FpText: any;
+let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _Dimension: any, _GrText: any, _FpText: any, _TrackArc: any;
 export function registerKicadIoClasses(classes: {
 	Footprint: any; Segment: any; Via: any; Pad: any; Zone: any;
 	Layers: any; GrLine: any; GrArc: any; GrRect: any; GrCircle: any;
 	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; Dimension?: any; GrText?: any; FpText?: any;
+	TrackArc?: any;
 }): void {
 	_Footprint = classes.Footprint;
 	_Segment = classes.Segment;
@@ -1181,6 +1223,7 @@ export function registerKicadIoClasses(classes: {
 	_Dimension = classes.Dimension;
 	_GrText = classes.GrText;
 	_FpText = classes.FpText;
+	_TrackArc = classes.TrackArc;
 }
 function getFootprintClass() { return _Footprint; }
 function getSegmentClass() { return _Segment; }
@@ -1199,6 +1242,7 @@ function getFpArcClass() { return _FpArc; }
 function getDimensionClass() { return _Dimension; }
 function getGrTextClass() { return _GrText; }
 function getFpTextClass() { return _FpText; }
+function getTrackArcClass() { return _TrackArc; }
 
 /**
  * KiCad custom pads store copper outline(s) under
