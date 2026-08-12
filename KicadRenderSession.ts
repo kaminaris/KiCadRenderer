@@ -1293,7 +1293,10 @@ export class KicadRenderSession {
 		}
 		const libId = instance.getLibId?.();
 		const libSymbols = this.schematicRoot.rootElement.findFirstChildByClass(KicadElementLibSymbols);
-		return (libId && libSymbols ? libSymbols.findSymbolByName(libId) : null) ?? null;
+		// (lib_name "X") overrides the lib_symbols lookup key when present —
+		// see SchematicPainter.buildSymbolInstance's identical fix for why.
+		const libLookupName = instance.getLibName?.() ?? libId;
+		return (libLookupName && libSymbols ? libSymbols.findSymbolByName(libLookupName) : null) ?? null;
 	}
 
 	/**
@@ -2611,9 +2614,16 @@ export class KicadRenderSession {
 		const libIds = new Set<string>();
 		for (const el of elements) {
 			if (el instanceof KicadElementSymbol) {
-				const libId = el.getLibId?.();
-				if (libId) {
-					libIds.add(libId);
+				// (lib_name "X") overrides the lib_symbols lookup key when
+				// present — see SchematicPainter.buildSymbolInstance's
+				// identical fix for why. The copied instance's own `el.write()`
+				// output (below) still carries its lib_name child verbatim,
+				// so looking the definition up under the right name here is
+				// what keeps a pasted symbol like this pointing at a real
+				// (included) lib_symbols entry instead of a missing one.
+				const libLookupName = el.getLibName?.() ?? el.getLibId?.();
+				if (libLookupName) {
+					libIds.add(libLookupName);
 				}
 			}
 		}

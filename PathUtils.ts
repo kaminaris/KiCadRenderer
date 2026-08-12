@@ -32,3 +32,58 @@ export function joinPathGeneric(dir: string, relativeFile: string): string {
 	const normalizedFile = relativeFile.replace(/[\\/]/g, sep);
 	return dir.replace(/[\\/]+$/, '') + sep + normalizedFile;
 }
+
+/** File extension including the dot (e.g. ".kicad_sch"), or '' if there
+ * isn't one — mirrors Node's path.extname, separator-tolerant like the rest
+ * of this file. */
+export function extnameGeneric(path: string): string {
+	const base = basenameGeneric(path);
+	const idx = base.lastIndexOf('.');
+	// A leading dot with nothing before it (".gitignore"-style) has no
+	// extension, matching Node's path.extname behavior.
+	return idx > 0 ? base.slice(idx) : '';
+}
+
+/** True for a Windows drive-letter path ("C:\...", "C:/...") or a leading
+ * '/'/'\' root — the only "absolute" shapes a KiCad sheet reference could
+ * realistically use. Note: an adapter backed by a browser directory handle
+ * (no real OS filesystem access) cannot actually RESOLVE such a path even
+ * when this returns true — that's an inherent sandbox limitation, not a bug
+ * in this function. */
+export function isAbsoluteGeneric(path: string): boolean {
+	return /^([a-zA-Z]:[\\/]|[\\/])/.test(path);
+}
+
+/** Collapses '.'/'..' segments generically (no real filesystem, so this is
+ * pure string math, tolerant of both separators like the rest of this
+ * file) — used where kicad-io's PathUtils.resolve() is asked to normalize a
+ * single already-joined path rather than combine several roots. */
+export function resolvePathGeneric(...paths: string[]): string {
+	const joined = paths.reduce((acc, p) => (acc ? joinPathGeneric(acc, p) : p), '');
+	const sep = joined.includes('\\') && !joined.includes('/') ? '\\' : '/';
+	const leadingSlash = /^[\\/]/.test(joined);
+	const segments = joined.split(/[\\/]+/).filter(Boolean);
+	const resolved: string[] = [];
+	for (const segment of segments) {
+		if (segment === '.') {
+			continue;
+		}
+		if (segment === '..') {
+			// A drive-letter root ("C:") or an already-empty stack has
+			// nothing to pop — keep the '..' literally rather than losing it,
+			// same as Node's path.resolve would for an under-rooted path.
+			if (resolved.length && resolved[resolved.length - 1] !== '..' && !/^[a-zA-Z]:$/.test(resolved[0]!)) {
+				resolved.pop();
+			}
+			else if (resolved.length > 1) {
+				resolved.pop();
+			}
+			else {
+				resolved.push(segment);
+			}
+			continue;
+		}
+		resolved.push(segment);
+	}
+	return (leadingSlash ? sep : '') + resolved.join(sep);
+}

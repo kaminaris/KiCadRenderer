@@ -1,14 +1,28 @@
 import { Vec2 } from '../math/Vec2';
-import { Angle } from '../math/Angle';
-import { Matrix3 } from '../math/Matrix3';
-import { EmbeddedImage, Renderer } from '../render/Renderer';
-import { schColors, schematicBackgroundColor, schematicLayerOrder } from './SchematicColors';
-import { computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, measureStrokeTextSize } from './TextPaint';
-import { PaintedShape, shapeToBBox, distanceToSegment, polygonEdgeDistance, bboxesIntersect } from './PaintedShape';
-import { arcToPolyline, circleToRing, KicadStrokeLineType, strokeDashedPolyline } from './StrokeDash';
 import {
-	defaultWksItems, defaultWksSetup, expandTextVars, resolveWksAnchor, withinWksMargin, wksPaperSizes,
-} from './DrawingSheet';
+	Angle
+}               from '../math/Angle';
+import {
+	Matrix3
+}               from '../math/Matrix3';
+import {
+	EmbeddedImage, Renderer
+}               from '../render/Renderer';
+import {
+	schColors, schematicBackgroundColor, schematicLayerOrder
+}               from './SchematicColors';
+import {
+	computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, measureStrokeTextSize
+}               from './TextPaint';
+import {
+	PaintedShape, shapeToBBox, distanceToSegment, polygonEdgeDistance, bboxesIntersect
+}               from './PaintedShape';
+import {
+	arcToPolyline, circleToRing, KicadStrokeLineType, strokeDashedPolyline
+}               from './StrokeDash';
+import {
+	defaultWksItems, defaultWksSetup, expandTextVars, resolveWksAnchor, withinWksMargin, wksPaperSizes
+}               from './DrawingSheet';
 
 // Real KiCad pin-label constants (eeschema's DefaultValues, confirmed via
 // kicanvas's SCH_PAINTER::draw(LIB_PIN*, ...) port — kicanvas is an
@@ -432,7 +446,8 @@ export class SchematicPainter {
 	protected prepareTextVars(root: any, docInfo?: SchematicDocInfo): void {
 		const paperEl = typeof root.findFirstChildByName === 'function' ? root.findFirstChildByName('paper') : null;
 		const paperName = (paperEl?.attributes?.[0]?.value as string) ?? 'A4';
-		const titleBlockEl = typeof root.findFirstChildByName === 'function' ? root.findFirstChildByName('title_block') : null;
+		const titleBlockEl = typeof root.findFirstChildByName === 'function' ?
+			root.findFirstChildByName('title_block') : null;
 		this.textVars = {
 			PAPER: paperName,
 			KICAD_VERSION: 'BOMManager2',
@@ -447,13 +462,14 @@ export class SchematicPainter {
 			COMMENT1: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(1) : '',
 			COMMENT2: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(2) : '',
 			COMMENT3: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(3) : '',
-			COMMENT4: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(4) : '',
+			COMMENT4: typeof titleBlockEl?.getComment === 'function' ? titleBlockEl.getComment(4) : ''
 		};
 
 		this.symbolFieldsByRef = new Map();
 		if (getSymbolClass() && typeof root.findChildrenByClass === 'function') {
 			for (const instance of root.findChildrenByClass(getSymbolClass())) {
-				const ref = typeof instance.getReference === 'function' ? String(instance.getReference() ?? '').trim() : '';
+				const ref = typeof instance.getReference === 'function' ? String(instance.getReference() ?? '').trim() :
+					'';
 				if (!ref || typeof instance.getProperties !== 'function') {
 					continue;
 				}
@@ -514,11 +530,21 @@ export class SchematicPainter {
 						break;
 					}
 					const id = `wks-line:${ uid++ }`;
-					const shape: PaintedShape = { type: 'polygon', points: [{ x: start.x, y: start.y }, { x: end.x, y: end.y }] };
+					const shape: PaintedShape = {
+						type: 'polygon',
+						points: [{ x: start.x, y: start.y }, { x: end.x, y: end.y }]
+					};
 					items.push({
-						id, layer: 'Frame', kind: 'frame', shape, bbox: shapeToBBox(shape), hitTestable: false, element: null,
+						id,
+						layer: 'Frame',
+						kind: 'frame',
+						shape,
+						bbox: shapeToBBox(shape),
+						hitTestable: false,
+						element: null,
 						defaultColor: schColors.frame,
-						draw: (renderer, color) => renderer.line([start, end], { strokeColor: color, strokeWidth: setup.lineWidthMm }),
+						draw: (renderer, color) => renderer.line(
+							[start, end], { strokeColor: color, strokeWidth: setup.lineWidthMm })
 					});
 				}
 			}
@@ -530,19 +556,27 @@ export class SchematicPainter {
 					// Rects only constrain REPEATS (i>0) — the first rect always
 					// draws even if its corners sit outside the margin box (the
 					// page-outline and title-block rects both legitimately do).
-					if (i > 0 && (!withinWksMargin(sheetSize, setup, start) || !withinWksMargin(sheetSize, setup, end))) {
+					if (i > 0 && (!withinWksMargin(sheetSize, setup, start) || !withinWksMargin(
+						sheetSize, setup, end))) {
 						break;
 					}
 					const corners = [
 						new Vec2(start.x, start.y), new Vec2(end.x, start.y),
-						new Vec2(end.x, end.y), new Vec2(start.x, end.y),
+						new Vec2(end.x, end.y), new Vec2(start.x, end.y)
 					];
 					const id = `wks-rect:${ uid++ }`;
 					const shape: PaintedShape = { type: 'polygon', points: corners.map(p => ({ x: p.x, y: p.y })) };
 					items.push({
-						id, layer: 'Frame', kind: 'frame', shape, bbox: shapeToBBox(shape), hitTestable: false, element: null,
+						id,
+						layer: 'Frame',
+						kind: 'frame',
+						shape,
+						bbox: shapeToBBox(shape),
+						hitTestable: false,
+						element: null,
 						defaultColor: schColors.frame,
-						draw: (renderer, color) => drawStrokeOutline(renderer, [...corners, corners[0]!], setup.lineWidthMm, 'solid', color),
+						draw: (renderer, color) => drawStrokeOutline(
+							renderer, [...corners, corners[0]!], setup.lineWidthMm, 'solid', color)
 					});
 				}
 			}
@@ -570,21 +604,28 @@ export class SchematicPainter {
 					}
 					const anchor = {
 						x: wksItem.hAlign === 'left' ? 0 : wksItem.hAlign === 'right' ? 1 : 0.5,
-						y: wksItem.vAlign === 'top' ? 0 : wksItem.vAlign === 'bottom' ? 1 : 0.5,
+						y: wksItem.vAlign === 'top' ? 0 : wksItem.vAlign === 'bottom' ? 1 : 0.5
 					};
 					// Real KiCad's stroke font has no separate bold glyph set —
-				// "bold" is purely a thicker stroke (ports EDAText's
-				// get_bold_thickness/get_normal_thickness: size/5 for bold,
-				// size/8 for normal, both against the nominal font size, not
-				// the rendered string width).
-				const strokeWidthMm = wksItem.bold ? wksItem.sizeMm / 5 : wksItem.sizeMm / 8;
-				const geometry = computeStrokeTextGeometry(resolved, pos, wksItem.sizeMm, 0, false, strokeWidthMm, anchor);
+					// "bold" is purely a thicker stroke (ports EDAText's
+					// get_bold_thickness/get_normal_thickness: size/5 for bold,
+					// size/8 for normal, both against the nominal font size, not
+					// the rendered string width).
+					const strokeWidthMm = wksItem.bold ? wksItem.sizeMm / 5 : wksItem.sizeMm / 8;
+					const geometry = computeStrokeTextGeometry(
+						resolved, pos, wksItem.sizeMm, 0, false, strokeWidthMm, anchor);
 					const id = `wks-text:${ uid++ }`;
 					const bbox = { x: pos.x - 10, y: pos.y - 2, w: 20, h: 4 };
 					items.push({
-						id, layer: 'Frame', kind: 'frame', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: null,
+						id,
+						layer: 'Frame',
+						kind: 'frame',
+						shape: { type: 'rect', ...bbox },
+						bbox,
+						hitTestable: false,
+						element: null,
 						defaultColor: schColors.frame,
-						draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+						draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 					});
 				}
 			}
@@ -657,8 +698,9 @@ export class SchematicPainter {
 			id, layer, kind: 'wire', shape, bbox: shapeToBBox(shape), hitTestable: true, element: wire,
 			defaultColor: wire.getStrokeColorOverride?.() ?? color,
 			draw: (renderer, drawColor) => {
-				drawStrokeOutline(renderer, [new Vec2(start.x, start.y), new Vec2(end.x, end.y)], width, lineType, drawColor);
-			},
+				drawStrokeOutline(
+					renderer, [new Vec2(start.x, start.y), new Vec2(end.x, end.y)], width, lineType, drawColor);
+			}
 		};
 	}
 
@@ -676,9 +718,11 @@ export class SchematicPainter {
 		const lineType = (stroke.type ?? 'default') as KicadStrokeLineType;
 		const s = item.shape as { x1: number; y1: number; x2: number; y2: number };
 		const shape: PaintedShape = { ...item.shape, width } as PaintedShape;
-		return { ...item, shape, kind: 'bus', bbox: shapeToBBox(shape), draw: (renderer, color) => {
-			drawStrokeOutline(renderer, [new Vec2(s.x1, s.y1), new Vec2(s.x2, s.y2)], width, lineType, color);
-		} };
+		return {
+			...item, shape, kind: 'bus', bbox: shapeToBBox(shape), draw: (renderer, color) => {
+				drawStrokeOutline(renderer, [new Vec2(s.x1, s.y1), new Vec2(s.x2, s.y2)], width, lineType, color);
+			}
+		};
 	}
 
 	protected buildBusEntry(entry: any): SchPaintedItem | null {
@@ -701,7 +745,7 @@ export class SchematicPainter {
 			defaultColor: entry.getStrokeColorOverride?.() ?? colorForKind('wire'),
 			draw: (renderer, color) => {
 				drawStrokeOutline(renderer, [new Vec2(x1, y1), new Vec2(x2, y2)], width, lineType, color);
-			},
+			}
 		};
 	}
 
@@ -715,11 +759,17 @@ export class SchematicPainter {
 		const shape: PaintedShape = { type: 'circle', cx: origin.x, cy: origin.y, r: radius };
 		const id = junction.getUuid() ?? `junction:${ origin.x },${ origin.y }`;
 		return {
-			id, layer: 'Junctions', kind: 'junction', shape, bbox: shapeToBBox(shape), hitTestable: true, element: junction,
+			id,
+			layer: 'Junctions',
+			kind: 'junction',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: junction,
 			defaultColor: junction.getColorOverride?.() ?? undefined,
 			draw: (renderer, color) => {
 				renderer.circle(new Vec2(origin.x, origin.y), radius, { fillColor: color });
-			},
+			}
 		};
 	}
 
@@ -732,9 +782,15 @@ export class SchematicPainter {
 			id, layer: 'NoConnects', kind: 'no-connect', shape, bbox: shape, hitTestable: true, element: nc,
 			draw: (renderer, color) => {
 				const width = 0.3;
-				renderer.line([new Vec2(origin.x - half, origin.y - half), new Vec2(origin.x + half, origin.y + half)], { strokeColor: color, strokeWidth: width });
-				renderer.line([new Vec2(origin.x - half, origin.y + half), new Vec2(origin.x + half, origin.y - half)], { strokeColor: color, strokeWidth: width });
-			},
+				renderer.line(
+					[new Vec2(origin.x - half, origin.y - half), new Vec2(origin.x + half, origin.y + half)],
+					{ strokeColor: color, strokeWidth: width }
+				);
+				renderer.line(
+					[new Vec2(origin.x - half, origin.y + half), new Vec2(origin.x + half, origin.y - half)],
+					{ strokeColor: color, strokeWidth: width }
+				);
+			}
 		};
 	}
 
@@ -754,9 +810,10 @@ export class SchematicPainter {
 		const { start, end } = rect.getStartEnd();
 		const corners = [
 			new Vec2(start.x, start.y), new Vec2(end.x, start.y),
-			new Vec2(end.x, end.y), new Vec2(start.x, end.y),
+			new Vec2(end.x, end.y), new Vec2(start.x, end.y)
 		];
-		const { width, type: lineType } = typeof rect.getStroke === 'function' ? rect.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof rect.getStroke === 'function' ? rect.getStroke() :
+			{ width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof rect.getFill === 'function' ? rect.getFill() : 'none';
 		const id = rect.getUuid() ?? `sch-rect:${ start.x },${ start.y }`;
 		// filled/closed/strokeWidth drive shapeContainsPoint's edge-only hit
@@ -767,10 +824,16 @@ export class SchematicPainter {
 		// rectangle too — EDA_SHAPE::hitTest's SHAPE_T::RECTANGLE case).
 		const shape: PaintedShape = {
 			type: 'polygon', points: corners.map(p => ({ x: p.x, y: p.y })),
-			filled: fillType !== 'none', closed: true, strokeWidth: width,
+			filled: fillType !== 'none', closed: true, strokeWidth: width
 		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: rect,
+			id,
+			layer: 'Graphics',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: rect,
 			defaultColor: rect.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color, rect.getFillColorOverride?.() ?? undefined);
@@ -778,24 +841,31 @@ export class SchematicPainter {
 					renderer.polygon(corners, { fillColor });
 				}
 				drawStrokeOutline(renderer, [...corners, corners[0]!], width, lineType, color);
-			},
+			}
 		};
 	}
 
 	protected buildSchCircle(circle: any): SchPaintedItem {
 		const center = circle.getCenter();
 		const radius = typeof circle.getRadius === 'function' ? circle.getRadius() : 0;
-		const { width, type: lineType } = typeof circle.getStroke === 'function' ? circle.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof circle.getStroke === 'function' ? circle.getStroke() :
+			{ width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof circle.getFill === 'function' ? circle.getFill() : 'none';
 		const id = circle.getUuid() ?? `sch-circle:${ center.x },${ center.y }`;
 		// Standalone schematic circles are annotation outlines.  Keep their
 		// picker permeable even when a file omits/normalizes the fill child;
 		// otherwise the enclosing disk steals clicks from objects inside it.
 		const shape: PaintedShape = {
-			type: 'circle', cx: center.x, cy: center.y, r: radius, filled: false, strokeWidth: width,
+			type: 'circle', cx: center.x, cy: center.y, r: radius, filled: false, strokeWidth: width
 		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: circle,
+			id,
+			layer: 'Graphics',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: circle,
 			defaultColor: circle.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
 				const worldCenter = new Vec2(center.x, center.y);
@@ -809,7 +879,7 @@ export class SchematicPainter {
 				else {
 					drawStrokeOutline(renderer, circleToRing(worldCenter, radius), width, lineType, color);
 				}
-			},
+			}
 		};
 	}
 
@@ -824,20 +894,28 @@ export class SchematicPainter {
 		catch {
 			return null;
 		}
-		const { width, type: lineType } = typeof arc.getStroke === 'function' ? arc.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof arc.getStroke === 'function' ? arc.getStroke() :
+			{ width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof arc.getFill === 'function' ? arc.getFill() : 'none';
 		const id = arc.getUuid() ?? `sch-arc:${ local.centerX },${ local.centerY }`;
 		// An arc must not use its enclosing circle as the hit shape: that makes
 		// every point inside the arc selectable and prevents selecting graphics
 		// placed underneath it.  Use the sampled arc outline so the shared
 		// unfilled-shape hit test only accepts the visible edge.
-		const hitPoints = arcToPolyline(new Vec2(local.centerX, local.centerY), local.radius, local.startAngle, local.endAngle)
+		const hitPoints = arcToPolyline(
+			new Vec2(local.centerX, local.centerY), local.radius, local.startAngle, local.endAngle)
 			.map(point => ({ x: point.x, y: point.y }));
 		const shape: PaintedShape = {
-			type: 'polygon', points: hitPoints, filled: fillType !== 'none', closed: false, strokeWidth: width,
+			type: 'polygon', points: hitPoints, filled: fillType !== 'none', closed: false, strokeWidth: width
 		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
+			id,
+			layer: 'Graphics',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: arc,
 			defaultColor: arc.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
 				const worldCenter = new Vec2(local.centerX, local.centerY);
@@ -847,15 +925,24 @@ export class SchematicPainter {
 					// plus the center, closed into a polygon (ports kicanvas's
 					// MathArc.to_polygon()). Solder-jumper-style symbols rely
 					// on this to render a solid half-moon, not just an outline.
-					renderer.polygon([...arcToPolyline(worldCenter, local.radius, local.startAngle, local.endAngle), worldCenter], { fillColor });
+					renderer.polygon(
+						[...arcToPolyline(worldCenter, local.radius, local.startAngle, local.endAngle), worldCenter],
+						{ fillColor }
+					);
 				}
 				if (lineType === 'solid' || lineType === 'default') {
-					renderer.arc(worldCenter, local.radius, local.startAngle, local.endAngle, { strokeColor: color, strokeWidth: width || 0.1 });
+					renderer.arc(
+						worldCenter, local.radius, local.startAngle, local.endAngle,
+						{ strokeColor: color, strokeWidth: width || 0.1 }
+					);
 				}
 				else {
-					drawStrokeOutline(renderer, arcToPolyline(worldCenter, local.radius, local.startAngle, local.endAngle), width, lineType, color);
+					drawStrokeOutline(
+						renderer, arcToPolyline(worldCenter, local.radius, local.startAngle, local.endAngle), width,
+						lineType, color
+					);
 				}
-			},
+			}
 		};
 	}
 
@@ -873,7 +960,8 @@ export class SchematicPainter {
 	protected buildSchPolyline(poly: any, forceClosed = false): SchPaintedItem {
 		const points: { x: number; y: number }[] = typeof poly.getPoints === 'function' ? poly.getPoints() : [];
 		const worldPoints = points.map(p => new Vec2(p.x, p.y));
-		const { width, type: lineType } = typeof poly.getStroke === 'function' ? poly.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof poly.getStroke === 'function' ? poly.getStroke() :
+			{ width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof poly.getFill === 'function' ? poly.getFill() : 'none';
 		const first = points[0], last = points[points.length - 1];
 		const id = poly.getUuid() ?? `sch-poly:${ first?.x },${ first?.y }`;
@@ -889,18 +977,25 @@ export class SchematicPainter {
 		// closed also gets its wrap-around edge included in the hit-test.
 		const shape: PaintedShape = {
 			type: 'polygon', points: worldPoints.map(p => ({ x: p.x, y: p.y })),
-			filled: fillType !== 'none', closed, strokeWidth: width,
+			filled: fillType !== 'none', closed, strokeWidth: width
 		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: poly,
+			id,
+			layer: 'Graphics',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: poly,
 			defaultColor: poly.getStrokeColorOverride?.() ?? schColors.graphic,
 			draw: (renderer, color) => {
-				const fillColor = closed ? symbolFillColor(fillType, color, poly.getFillColorOverride?.() ?? undefined) : undefined;
+				const fillColor = closed ?
+					symbolFillColor(fillType, color, poly.getFillColorOverride?.() ?? undefined) : undefined;
 				if (fillColor) {
 					renderer.polygon(worldPoints, { fillColor });
 				}
 				drawStrokeOutline(renderer, strokePoints, width, lineType, color);
-			},
+			}
 		};
 	}
 
@@ -915,19 +1010,26 @@ export class SchematicPainter {
 		}
 		const curve = cubicBezierToPolyline(
 			new Vec2(points[0]!.x, points[0]!.y), new Vec2(points[1]!.x, points[1]!.y),
-			new Vec2(points[2]!.x, points[2]!.y), new Vec2(points[3]!.x, points[3]!.y),
+			new Vec2(points[2]!.x, points[2]!.y), new Vec2(points[3]!.x, points[3]!.y)
 		);
-		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() : { width: 0.15, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() :
+			{ width: 0.15, type: 'solid' as KicadStrokeLineType };
 		const drawWidth = width || 0.15;
 		const id = bezier.getUuid() ?? `sch-bezier:${ points[0]!.x },${ points[0]!.y }`;
 		const shape: PaintedShape = {
 			type: 'polygon', points: curve.map(p => ({ x: p.x, y: p.y })),
-			filled: false, closed: false, strokeWidth: drawWidth,
+			filled: false, closed: false, strokeWidth: drawWidth
 		};
 		return {
-			id, layer: 'Graphics', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: bezier,
+			id,
+			layer: 'Graphics',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: bezier,
 			defaultColor: bezier.getStrokeColorOverride?.() ?? schColors.graphic,
-			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color),
+			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color)
 		};
 	}
 
@@ -963,14 +1065,14 @@ export class SchematicPainter {
 		}
 		const x = origin.x - width / 2;
 		const y = origin.y - height / 2;
-		const id = image.getUuid?.() ?? `sch-image:${origin.x},${origin.y}`;
+		const id = image.getUuid?.() ?? `sch-image:${ origin.x },${ origin.y }`;
 		// Images are opaque to the picker even when their decoded pixels contain
 		// transparency: KiCad selects the image by its full rectangular extent.
 		const shape: PaintedShape = { type: 'rect', x, y, w: width, h: height, filled: true };
 		const embedded: EmbeddedImage = { data, mimeType: info.mimeType };
 		return {
 			id, layer: 'Images', kind: 'image', shape, bbox: shapeToBBox(shape), hitTestable: true, element: image,
-			draw: renderer => renderer.image(embedded, new Vec2(x, y), width, height),
+			draw: renderer => renderer.image(embedded, new Vec2(x, y), width, height)
 		};
 	}
 
@@ -1011,7 +1113,12 @@ export class SchematicPainter {
 			// already resolved this the same way), not `ruleArea` itself, so
 			// a user-customized border color is respected same as any other
 			// shape; still defaults to the distinctive theme red otherwise.
-			...base, id, shape, layer: 'RuleAreas', defaultColor: polyline.getStrokeColorOverride?.() ?? schColors.ruleArea, element: ruleArea,
+			...base,
+			id,
+			shape,
+			layer: 'RuleAreas',
+			defaultColor: polyline.getStrokeColorOverride?.() ?? schColors.ruleArea,
+			element: ruleArea
 		};
 	}
 
@@ -1031,13 +1138,14 @@ export class SchematicPainter {
 		// buildLocalLabel()).
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = typeof text.getAnchorPoint === 'function' ? text.getAnchorPoint() : { x: 0.5, y: 0.5 };
-		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, textAngle, false, thickness, anchor, italic);
+		const geometry = computeStrokeTextGeometry(
+			value, worldPos, textSize, textAngle, false, thickness, anchor, italic);
 		const id = text.getUuid() ?? `sch-text:${ origin.x },${ origin.y }`;
 		const bbox = getStrokeTextBounds(geometry);
 		return {
 			id, layer: 'Text', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: text,
 			defaultColor: text.getFontColorOverride?.() ?? schColors.note,
-			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 		};
 	}
 
@@ -1064,7 +1172,19 @@ export class SchematicPainter {
 		if (!libId) {
 			return items;
 		}
-		const libDef = typeof libSymbols.findSymbolByName === 'function' ? libSymbols.findSymbolByName(libId) : null;
+		// (lib_name "X") overrides which lib_symbols entry this instance's
+		// cached definition actually lives under — real KiCad writes this
+		// whenever the same lib_id needed more than one independently-cached
+		// copy in the file (disambiguated with a numeric suffix, e.g.
+		// multiple power:GND placements ending up as "GND_1"/"GND_2"); in
+		// that case lib_id's bare name may not exist as a lib_symbols entry
+		// at all. Confirmed against a real file where every power:GND
+		// instance had (lib_name "GND_1") and lib_symbols had no "power:GND"
+		// entry, only "GND_1" — every such symbol silently rendered as
+		// nothing before this fell back to lib_id unconditionally.
+		const libLookupName = (typeof instance.getLibName === 'function' ? instance.getLibName() : undefined) ?? libId;
+		const libDef = typeof libSymbols.findSymbolByName === 'function' ? libSymbols.findSymbolByName(libLookupName) :
+			null;
 		if (!libDef) {
 			return items;
 		}
@@ -1074,18 +1194,28 @@ export class SchematicPainter {
 		const instanceMatrix = buildInstanceMatrix(origin.x, origin.y, origin.rotation ?? 0, mirror);
 		const instanceId = instance.getUuid() ?? `sym:${ origin.x },${ origin.y }`;
 		const placedUnit: number = typeof instance.getUnitId === 'function' ? instance.getUnitId() : 0;
-		const instanceRef: string = typeof instance.getReference === 'function' ? (String(instance.getReference() ?? '').trim()) : '';
+		const instanceRef: string = typeof instance.getReference === 'function' ?
+			(String(instance.getReference() ?? '').trim()) : '';
 		// Real KiCad's unit count gates the "U1" → "U1A" reference suffix
 		// (SCH_SYMBOL::GetRef, `if (aIncludeUnit && GetUnitCount() > 1) ref +=
 		// subRef`) — resolved through the same one-level `extends` fallback as
 		// relevantSubUnits, since a derived multi-unit part's own libDef has
 		// no sub-units of its own to count.
 		let unitCountSource = libDef;
-		if (typeof libDef.isDerived === 'function' && libDef.isDerived() && typeof libDef.getLayers === 'function' && libDef.getLayers().length === 0) {
-			const base = typeof libSymbols?.findSymbolByName === 'function' ? libSymbols.findSymbolByName(libDef.getExtends()) : null;
-			if (base) unitCountSource = base;
+		if (
+			typeof libDef.isDerived === 'function' &&
+			libDef.isDerived() &&
+			typeof libDef.getLayers === 'function'
+			&& libDef.getLayers().length === 0
+		) {
+			const base = typeof libSymbols?.findSymbolByName === 'function' ?
+				libSymbols.findSymbolByName(libDef.getExtends()) : null;
+			if (base) {
+				unitCountSource = base;
+			}
 		}
-		const unitCount: number = typeof unitCountSource.getUnitCount === 'function' ? unitCountSource.getUnitCount() : 1;
+		const unitCount: number = typeof unitCountSource.getUnitCount === 'function' ? unitCountSource.getUnitCount() :
+			1;
 		const isDnp = typeof instance.isDnp === 'function'
 			? !!instance.isDnp()
 			: !!instance.findFirstChildByName?.('dnp')?.value;
@@ -1177,11 +1307,15 @@ export class SchematicPainter {
 				// This is a real KiCad file-format convention, not a
 				// symbol-type heuristic, which is why it was wrong to try to
 				// special-case "opamp vs transistor" directly.
-				const offsetEl = pinNamesEl && typeof pinNamesEl.findFirstChildByName === 'function' ? pinNamesEl.findFirstChildByName('offset') : null;
+				const offsetEl = pinNamesEl && typeof pinNamesEl.findFirstChildByName === 'function' ?
+					pinNamesEl.findFirstChildByName('offset') : null;
 				const pinNameOffset = readNumericValue(offsetEl, 0.508);
 
 				for (const pin of subUnit.findChildrenByClass(getPinClass())) {
-						for (const item of this.buildPin(pin, instanceMatrix, instanceId, pinNumbersHidden, pinNamesHidden, pinNameOffset, instanceRef || undefined)) {
+					for (const item of this.buildPin(
+						pin, instanceMatrix, instanceId, pinNumbersHidden, pinNamesHidden, pinNameOffset,
+						instanceRef || undefined
+					)) {
 						items.push(item);
 					}
 				}
@@ -1231,26 +1365,28 @@ export class SchematicPainter {
 					value += letterSubReference(placedUnit > 0 ? placedUnit : 1);
 				}
 				value = this.expandText(value);
-				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x: 0, y: 0, rotation: 0 };
+				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() :
+					{ x: 0, y: 0, rotation: 0 };
 				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0.5, y: 0.5 };
 				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
 				const drawRotationDeg = fieldDrawRotation(propOrigin.rotation ?? 0, origin.rotation ?? 0);
 				const textWorld = symbolFieldWorldCenter(
 					propOrigin, anchor, value, textSize, origin, mirror
 				);
-				const geometry = computeStrokeTextGeometry(value, textWorld, textSize, drawRotationDeg, false, thickness, { x: 0.5, y: 0.5 }, italic);
+				const geometry = computeStrokeTextGeometry(
+					value, textWorld, textSize, drawRotationDeg, false, thickness, { x: 0.5, y: 0.5 }, italic);
 				const bbox = getStrokeTextBounds(geometry);
 				items.push({
 					id: `${ instanceId }:prop:${ name }`, layer: 'Text', kind: 'label',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: instance,
 					labelName: name, labelKind: 'symbol-field', fieldName: name,
 					fieldOrigin: { x: propOrigin.x, y: propOrigin.y, rotation: propOrigin.rotation ?? 0 },
-					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 				});
 				items.push({
 					id: `${ instanceId }:prop:${ name }:text`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: instance,
-					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 				});
 			}
 		}
@@ -1313,7 +1449,7 @@ export class SchematicPainter {
 					x: cx - w / 2 - pad,
 					y: cy - h / 2 - pad,
 					w: w + pad * 2,
-					h: h + pad * 2,
+					h: h + pad * 2
 				};
 				items.push({
 					id: `symbol:${ instanceId }`,
@@ -1334,9 +1470,9 @@ export class SchematicPainter {
 						}
 						renderer.rect(new Vec2(bbox.x, bbox.y), bbox.w, bbox.h, {
 							strokeColor: color,
-							strokeWidth: 0.25,
+							strokeWidth: 0.25
 						});
-					},
+					}
 				});
 			}
 		}
@@ -1362,11 +1498,12 @@ export class SchematicPainter {
 			const bodyAndPinsItems = items.filter(item => item.kind === 'symbol-graphic' || item.kind === 'pin');
 			const body = boundsOf(bodyItems);
 			const pins = boundsOf(bodyAndPinsItems);
-			if (Number.isFinite(pins.minX) && Number.isFinite(pins.minY) && pins.maxX > pins.minX && pins.maxY > pins.minY) {
+			if (Number.isFinite(pins.minX) && Number.isFinite(pins.minY) && pins.maxX > pins.minX && pins.maxY
+				> pins.minY) {
 				// A malformed/graphic-less library symbol can have no body items;
 				// fall back to the body-and-pins box rather than producing NaNs.
 				const bodyBounds = Number.isFinite(body.minX) && Number.isFinite(body.minY)
-					&& body.maxX > body.minX && body.maxY > body.minY ? body : pins;
+				&& body.maxX > body.minX && body.maxY > body.minY ? body : pins;
 				let marginX = Math.max(bodyBounds.minX - pins.minX, pins.maxX - bodyBounds.maxX);
 				let marginY = Math.max(bodyBounds.minY - pins.minY, pins.maxY - bodyBounds.maxY);
 				// Exact port of SCH_SYMBOL::PlotDNP(): margins are intentionally
@@ -1381,7 +1518,10 @@ export class SchematicPainter {
 				const markerY = bodyBounds.minY - marginY;
 				const markerW = bodyBounds.maxX - bodyBounds.minX + marginX * 2;
 				const markerH = bodyBounds.maxY - bodyBounds.minY + marginY * 2;
-				const points = [new Vec2(markerX, markerY), new Vec2(markerX + markerW, markerY + markerH), new Vec2(markerX + markerW, markerY), new Vec2(markerX, markerY + markerH)];
+				const points = [
+					new Vec2(markerX, markerY), new Vec2(markerX + markerW, markerY + markerH),
+					new Vec2(markerX + markerW, markerY), new Vec2(markerX, markerY + markerH)
+				];
 				const markerShape: PaintedShape = { type: 'polygon', points: points.map(p => ({ x: p.x, y: p.y })) };
 				items.push({
 					id: `dnp-marker:${ instanceId }`, layer: 'Frame', kind: 'symbol-graphic',
@@ -1393,7 +1533,7 @@ export class SchematicPainter {
 						const strokeWidth = 0.4572;
 						renderer.line([points[0]!, points[1]!], { strokeColor: color, strokeWidth });
 						renderer.line([points[2]!, points[3]!], { strokeColor: color, strokeWidth });
-					},
+					}
 				});
 			}
 		}
@@ -1420,8 +1560,10 @@ export class SchematicPainter {
 	 * lib_symbols block the placed instance's own libId resolved against. */
 	protected relevantSubUnits(libDef: any, placedUnit: number, libSymbols?: any): any[] {
 		let graphicsSource = libDef;
-		if (typeof libDef.isDerived === 'function' && libDef.isDerived() && typeof libDef.getLayers === 'function' && libDef.getLayers().length === 0) {
-			const base = typeof libSymbols?.findSymbolByName === 'function' ? libSymbols.findSymbolByName(libDef.getExtends()) : null;
+		if (typeof libDef.isDerived === 'function' && libDef.isDerived() && typeof libDef.getLayers === 'function'
+			&& libDef.getLayers().length === 0) {
+			const base = typeof libSymbols?.findSymbolByName === 'function' ?
+				libSymbols.findSymbolByName(libDef.getExtends()) : null;
 			if (base) {
 				graphicsSource = base;
 			}
@@ -1443,21 +1585,28 @@ export class SchematicPainter {
 		const { start, end } = rect.getStartEnd();
 		const corners = [
 			flippedTransform(instanceMatrix, start.x, start.y), flippedTransform(instanceMatrix, end.x, start.y),
-			flippedTransform(instanceMatrix, end.x, end.y), flippedTransform(instanceMatrix, start.x, end.y),
+			flippedTransform(instanceMatrix, end.x, end.y), flippedTransform(instanceMatrix, start.x, end.y)
 		];
-		const { width, type: lineType } = typeof rect.getStroke === 'function' ? rect.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof rect.getStroke === 'function' ? rect.getStroke() :
+			{ width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof rect.getFill === 'function' ? rect.getFill() : 'none';
 		const id = rect.getUuid() ?? `sym-rect:${ instanceId }:${ start.x },${ start.y }`;
 		const shape: PaintedShape = { type: 'polygon', points: corners.map(p => ({ x: p.x, y: p.y })) };
 		return {
-			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: rect,
+			id,
+			layer: 'Symbols',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: false,
+			element: rect,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
 				if (fillColor) {
 					renderer.polygon(corners, { fillColor });
 				}
 				drawStrokeOutline(renderer, [...corners, corners[0]!], width, lineType, color);
-			},
+			}
 		};
 	}
 
@@ -1467,12 +1616,19 @@ export class SchematicPainter {
 		const worldCenter = flippedTransform(instanceMatrix, center.x, center.y);
 		// A pure rotation+mirror (no non-uniform scale) never distorts a
 		// circle's radius, so it's safe to reuse unchanged.
-		const { width, type: lineType } = typeof circle.getStroke === 'function' ? circle.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof circle.getStroke === 'function' ? circle.getStroke() :
+			{ width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof circle.getFill === 'function' ? circle.getFill() : 'none';
 		const id = circle.getUuid() ?? `sym-circle:${ instanceId }:${ center.x },${ center.y }`;
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: radius };
 		return {
-			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: circle,
+			id,
+			layer: 'Symbols',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: false,
+			element: circle,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
 				if (fillColor) {
@@ -1484,7 +1640,7 @@ export class SchematicPainter {
 				else {
 					drawStrokeOutline(renderer, circleToRing(worldCenter, radius), width, lineType, color);
 				}
-			},
+			}
 		};
 	}
 
@@ -1531,23 +1687,37 @@ export class SchematicPainter {
 			const worldStartPt = flippedTransform(instanceMatrix, rawPts.start.x, rawPts.start.y);
 			const worldMidPt = flippedTransform(instanceMatrix, rawPts.mid.x, rawPts.mid.y);
 			const worldEndPt = flippedTransform(instanceMatrix, rawPts.end.x, rawPts.end.y);
-			({ startAngle: worldStartAngle, endAngle: worldEndAngle } = arcSweepAngles(worldCenter, worldStartPt, worldMidPt, worldEndPt));
+			({ startAngle: worldStartAngle, endAngle: worldEndAngle } = arcSweepAngles(
+				worldCenter, worldStartPt, worldMidPt, worldEndPt));
 		}
 		else {
-			const worldStart = flippedTransform(instanceMatrix, local.centerX + local.radius * Math.cos(local.startAngle), local.centerY + local.radius * Math.sin(local.startAngle));
-			const worldEnd = flippedTransform(instanceMatrix, local.centerX + local.radius * Math.cos(local.endAngle), local.centerY + local.radius * Math.sin(local.endAngle));
+			const worldStart = flippedTransform(
+				instanceMatrix, local.centerX + local.radius * Math.cos(local.startAngle),
+				local.centerY + local.radius * Math.sin(local.startAngle)
+			);
+			const worldEnd = flippedTransform(
+				instanceMatrix, local.centerX + local.radius * Math.cos(local.endAngle),
+				local.centerY + local.radius * Math.sin(local.endAngle)
+			);
 			worldStartAngle = Math.atan2(worldStart.y - worldCenter.y, worldStart.x - worldCenter.x);
 			worldEndAngle = Math.atan2(worldEnd.y - worldCenter.y, worldEnd.x - worldCenter.x);
 		}
 		// A pure rotation+flip (no non-uniform scale) never distorts a
 		// circle's radius, so the local radius carries over unchanged.
 		const radius = local.radius;
-		const { width, type: lineType } = typeof arc.getStroke === 'function' ? arc.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof arc.getStroke === 'function' ? arc.getStroke() :
+			{ width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof arc.getFill === 'function' ? arc.getFill() : 'none';
 		const id = `sym-arc:${ instanceId }:${ local.centerX },${ local.centerY }`;
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: radius };
 		return {
-			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			id,
+			layer: 'Symbols',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: false,
+			element: arc,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
 				if (fillColor) {
@@ -1556,28 +1726,44 @@ export class SchematicPainter {
 					// example: Jumper:SolderJumper_2_Bridged's two `(fill
 					// (type outline))` arcs, meant to render as solid
 					// half-moons on either side of the bridge rectangle.
-					renderer.polygon([...arcToPolyline(worldCenter, radius, worldStartAngle, worldEndAngle), worldCenter], { fillColor });
+					renderer.polygon(
+						[...arcToPolyline(worldCenter, radius, worldStartAngle, worldEndAngle), worldCenter],
+						{ fillColor }
+					);
 				}
 				if (lineType === 'solid' || lineType === 'default') {
-					renderer.arc(worldCenter, radius, worldStartAngle, worldEndAngle, { strokeColor: color, strokeWidth: width || 0.1 });
+					renderer.arc(
+						worldCenter, radius, worldStartAngle, worldEndAngle,
+						{ strokeColor: color, strokeWidth: width || 0.1 }
+					);
 				}
 				else {
-					drawStrokeOutline(renderer, arcToPolyline(worldCenter, radius, worldStartAngle, worldEndAngle), width, lineType, color);
+					drawStrokeOutline(
+						renderer, arcToPolyline(worldCenter, radius, worldStartAngle, worldEndAngle), width, lineType,
+						color
+					);
 				}
-			},
+			}
 		};
 	}
 
 	protected buildSymPolyline(poly: any, instanceMatrix: Matrix3, instanceId: string): SchPaintedItem {
 		const points: { x: number; y: number }[] = typeof poly.getPoints === 'function' ? poly.getPoints() : [];
 		const worldPoints = points.map(p => flippedTransform(instanceMatrix, p.x, p.y));
-		const { width, type: lineType } = typeof poly.getStroke === 'function' ? poly.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof poly.getStroke === 'function' ? poly.getStroke() :
+			{ width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const fillType = typeof poly.getFill === 'function' ? poly.getFill() : 'none';
 		const first = points[0], last = points[points.length - 1];
 		const id = poly.getUuid() ?? `sym-poly:${ instanceId }:${ first?.x },${ first?.y }`;
 		const shape: PaintedShape = { type: 'polygon', points: worldPoints.map(p => ({ x: p.x, y: p.y })) };
 		return {
-			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: poly,
+			id,
+			layer: 'Symbols',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: false,
+			element: poly,
 			draw: (renderer, color) => {
 				// Fill is gated on fillType alone (matching buildSymArc's own
 				// unconditional pattern), NOT on whether the point list
@@ -1597,7 +1783,7 @@ export class SchematicPainter {
 					renderer.polygon(worldPoints, { fillColor });
 				}
 				drawStrokeOutline(renderer, worldPoints, width, lineType, color);
-			},
+			}
 		};
 	}
 
@@ -1630,7 +1816,9 @@ export class SchematicPainter {
 			: new Vec2(x + left + anchor.x * contentW, y + top + anchor.y * contentH);
 		const wrappedValue = wrapTableCellText(value, vertical ? contentH : contentW, textSize);
 		const textAngle = vertical ? 90 : 0;
-		const geometry = value ? computeStrokeTextGeometry(wrappedValue, textPos, textSize, textAngle, false, thickness, anchor, italic) : null;
+		const geometry = value ?
+			computeStrokeTextGeometry(wrappedValue, textPos, textSize, textAngle, false, thickness, anchor, italic) :
+			null;
 		const { width: strokeWidth, type: strokeType } = typeof textBox.getStroke === 'function'
 			? textBox.getStroke()
 			: { width: 0, type: 'solid' as KicadStrokeLineType };
@@ -1647,28 +1835,33 @@ export class SchematicPainter {
 		// when a color child is absent. For a text box that means “use the
 		// Notes-layer color”, not a transparent border.
 		const strokeColor = strokeNode?.findFirstChildByName?.('color')?.getColor?.() as string | undefined;
-		const id = textBox.getUuid?.() ?? `sch-text-box:${x},${y}`;
+		const id = textBox.getUuid?.() ?? `sch-text-box:${ x },${ y }`;
 		// Same hit-test contract as ordinary schematic rectangles: an unfilled
 		// text box is selectable by its border only, so it cannot steal clicks
 		// from symbols/wires visually inside it. A filled box remains an area.
 		const shape: PaintedShape = {
 			type: 'rect', x, y, w: width, h: height,
-			filled: fillType !== 'none', strokeWidth: effectiveStrokeWidth,
+			filled: fillType !== 'none', strokeWidth: effectiveStrokeWidth
 		};
 		return {
 			id, layer: 'Graphics', kind: 'text', shape, bbox: shapeToBBox(shape), hitTestable: true, element: textBox,
 			defaultColor: schColors.note,
 			draw: (renderer, color) => {
-				if (fillColor) renderer.rect(new Vec2(x, y), width, height, { fillColor });
+				if (fillColor) {
+					renderer.rect(new Vec2(x, y), width, height, { fillColor });
+				}
 				// Independent from strokeColor/fillColor above (font vs border
 				// vs fill are 3 separate overridable colors in the file format)
 				// — falls through to the same shared `color` the border already
 				// falls back to when no font color is explicitly set.
-				if (geometry) drawStrokeTextGeometry(renderer, geometry, textBox.getFontColorOverride?.() ?? color);
+				if (geometry) {
+					drawStrokeTextGeometry(renderer, geometry, textBox.getFontColorOverride?.() ?? color);
+				}
 				drawStrokeOutline(renderer, [
-					new Vec2(x, y), new Vec2(x + width, y), new Vec2(x + width, y + height), new Vec2(x, y + height), new Vec2(x, y),
+					new Vec2(x, y), new Vec2(x + width, y), new Vec2(x + width, y + height), new Vec2(x, y + height),
+					new Vec2(x, y)
 				], effectiveStrokeWidth, strokeType, strokeColor || color);
-			},
+			}
 		};
 	}
 
@@ -1678,19 +1871,28 @@ export class SchematicPainter {
 			return null;
 		}
 		const curve = cubicBezierToPolyline(
-			flippedTransform(instanceMatrix, points[0]!.x, points[0]!.y), flippedTransform(instanceMatrix, points[1]!.x, points[1]!.y),
-			flippedTransform(instanceMatrix, points[2]!.x, points[2]!.y), flippedTransform(instanceMatrix, points[3]!.x, points[3]!.y),
+			flippedTransform(instanceMatrix, points[0]!.x, points[0]!.y),
+			flippedTransform(instanceMatrix, points[1]!.x, points[1]!.y),
+			flippedTransform(instanceMatrix, points[2]!.x, points[2]!.y),
+			flippedTransform(instanceMatrix, points[3]!.x, points[3]!.y)
 		);
-		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() : { width: 0.25, type: 'solid' as KicadStrokeLineType };
+		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() :
+			{ width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const drawWidth = width || 0.25;
 		const id = bezier.getUuid() ?? `sym-bezier:${ instanceId }:${ points[0]!.x },${ points[0]!.y }`;
 		const shape: PaintedShape = {
 			type: 'polygon', points: curve.map(p => ({ x: p.x, y: p.y })),
-			filled: false, closed: false, strokeWidth: drawWidth,
+			filled: false, closed: false, strokeWidth: drawWidth
 		};
 		return {
-			id, layer: 'Symbols', kind: 'symbol-graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: bezier,
-			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color),
+			id,
+			layer: 'Symbols',
+			kind: 'symbol-graphic',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: false,
+			element: bezier,
+			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color)
 		};
 	}
 
@@ -1718,13 +1920,20 @@ export class SchematicPainter {
 		const { size: textSize, thickness, italic } = readElementFontMetrics(text);
 		const rawAnchor = typeof text.getAnchorPoint === 'function' ? text.getAnchorPoint() : { x: 0.5, y: 0.5 };
 		const anchor = { x: upright.flipped ? 1 - rawAnchor.x : rawAnchor.x, y: rawAnchor.y };
-		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, upright.angleDeg, false, thickness, anchor, italic);
+		const geometry = computeStrokeTextGeometry(
+			value, worldPos, textSize, upright.angleDeg, false, thickness, anchor, italic);
 		const id = text.getUuid() ?? `sym-text:${ instanceId }:${ origin.x },${ origin.y }`;
 		const bbox = getStrokeTextBounds(geometry);
 		return {
-			id, layer: 'Symbols', kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: text,
+			id,
+			layer: 'Symbols',
+			kind: 'text',
+			shape: { type: 'rect', ...bbox },
+			bbox,
+			hitTestable: false,
+			element: text,
 			defaultColor: schColors.componentOutline,
-			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 		};
 	}
 
@@ -1740,7 +1949,10 @@ export class SchematicPainter {
 	 * Pin name/number text position/size isn't modeled by @kicad-io
 	 * (confirmed gap) — using KiCad's own fixed conventional offsets.
 	 */
-	protected buildPin(pin: any, instanceMatrix: Matrix3, instanceId: string, pinNumbersHidden = false, pinNamesHidden = false, pinNameOffset = 0.508, refDesignator?: string): SchPaintedItem[] {
+	protected buildPin(
+		pin: any, instanceMatrix: Matrix3, instanceId: string, pinNumbersHidden = false, pinNamesHidden = false,
+		pinNameOffset = 0.508, refDesignator?: string
+	): SchPaintedItem[] {
 		const items: SchPaintedItem[] = [];
 		const origin = pin.getOrigin();
 		const length = typeof pin.getLength === 'function' ? pin.getLength() : 2.54;
@@ -1749,11 +1961,18 @@ export class SchematicPainter {
 		const id = pin.getUuid() ?? `pin:${ instanceId }:${ origin.x },${ origin.y }`;
 
 		if (isHidden) {
-			const shape: PaintedShape = { type: 'segment', x1: worldOuter.x, y1: worldOuter.y, x2: worldOuter.x, y2: worldOuter.y, width: 0 };
+			const shape: PaintedShape = {
+				type: 'segment',
+				x1: worldOuter.x,
+				y1: worldOuter.y,
+				x2: worldOuter.x,
+				y2: worldOuter.y,
+				width: 0
+			};
 			items.push({
 				id, layer: 'Pins', kind: 'pin', shape, bbox: shapeToBBox(shape), hitTestable: false, element: pin,
 				refDesignator,
-				draw: () => {},
+				draw: () => {}
 			});
 			return items;
 		}
@@ -1773,7 +1992,8 @@ export class SchematicPainter {
 		// SCH_PAINTER::draw(LIB_PIN*, ...). `dir` there is the OUTWARD
 		// direction (body -> wire) — the opposite of our (ux,uy), which
 		// points wire -> body — so it's just their negation here.
-		const { electricalType, shape: pinShape } = typeof pin.getType === 'function' ? pin.getType() : { electricalType: 'passive', shape: 'line' };
+		const { electricalType, shape: pinShape } = typeof pin.getType === 'function' ? pin.getType() :
+			{ electricalType: 'passive', shape: 'line' };
 		const symbolRadius = 0.635; // DefaultValues.pinsymbol_size
 		const symbolDiam = symbolRadius * 2;
 		const ncRadius = 0.381; // DefaultValues.target_pin_radius
@@ -1784,19 +2004,39 @@ export class SchematicPainter {
 		const decorations: Vec2[][] = [];
 
 		if (electricalType === 'no_connect') {
-			decorations.push([new Vec2(worldOuter.x - ncRadius, worldOuter.y - ncRadius), new Vec2(worldOuter.x + ncRadius, worldOuter.y + ncRadius)]);
-			decorations.push([new Vec2(worldOuter.x + ncRadius, worldOuter.y - ncRadius), new Vec2(worldOuter.x - ncRadius, worldOuter.y + ncRadius)]);
+			decorations.push([
+				new Vec2(worldOuter.x - ncRadius, worldOuter.y - ncRadius),
+				new Vec2(worldOuter.x + ncRadius, worldOuter.y + ncRadius)
+			]);
+			decorations.push([
+				new Vec2(worldOuter.x + ncRadius, worldOuter.y - ncRadius),
+				new Vec2(worldOuter.x - ncRadius, worldOuter.y + ncRadius)
+			]);
 		}
 		else {
 			const clockNotch = () => {
 				decorations.push(dirY === 0
-					? [new Vec2(worldInner.x, worldInner.y + symbolRadius), new Vec2(worldInner.x - dirX * symbolRadius, worldInner.y), new Vec2(worldInner.x, worldInner.y - symbolRadius)]
-					: [new Vec2(worldInner.x + symbolRadius, worldInner.y), new Vec2(worldInner.x, worldInner.y - dirY * symbolRadius), new Vec2(worldInner.x - symbolRadius, worldInner.y)]);
+					? [
+						new Vec2(worldInner.x, worldInner.y + symbolRadius),
+						new Vec2(worldInner.x - dirX * symbolRadius, worldInner.y),
+						new Vec2(worldInner.x, worldInner.y - symbolRadius)
+					]
+					: [
+						new Vec2(worldInner.x + symbolRadius, worldInner.y),
+						new Vec2(worldInner.x, worldInner.y - dirY * symbolRadius),
+						new Vec2(worldInner.x - symbolRadius, worldInner.y)
+					]);
 			};
 			const lowInTri = () => {
 				decorations.push(dirY === 0
-					? [new Vec2(worldInner.x + dirX * symbolDiam, worldInner.y), new Vec2(worldInner.x + dirX * symbolDiam, worldInner.y - symbolDiam), worldInner]
-					: [new Vec2(worldInner.x, worldInner.y + dirY * symbolDiam), new Vec2(worldInner.x - symbolDiam, worldInner.y + dirY * symbolDiam), worldInner]);
+					? [
+						new Vec2(worldInner.x + dirX * symbolDiam, worldInner.y),
+						new Vec2(worldInner.x + dirX * symbolDiam, worldInner.y - symbolDiam), worldInner
+					]
+					: [
+						new Vec2(worldInner.x, worldInner.y + dirY * symbolDiam),
+						new Vec2(worldInner.x - symbolDiam, worldInner.y + dirY * symbolDiam), worldInner
+					]);
 			};
 
 			switch (pinShape) {
@@ -1822,23 +2062,40 @@ export class SchematicPainter {
 					break;
 				case 'output_low':
 					decorations.push(dirY === 0
-						? [new Vec2(worldInner.x, worldInner.y - symbolDiam), new Vec2(worldInner.x + dirX * symbolDiam, worldInner.y)]
-						: [new Vec2(worldInner.x - symbolDiam, worldInner.y), new Vec2(worldInner.x, worldInner.y + dirY * symbolDiam)]);
+						? [
+							new Vec2(worldInner.x, worldInner.y - symbolDiam),
+							new Vec2(worldInner.x + dirX * symbolDiam, worldInner.y)
+						]
+						: [
+							new Vec2(worldInner.x - symbolDiam, worldInner.y),
+							new Vec2(worldInner.x, worldInner.y + dirY * symbolDiam)
+						]);
 					break;
 				case 'non_logic':
 					decorations.push([
-						new Vec2(worldInner.x - (dirX + dirY) * symbolRadius, worldInner.y - (dirY - dirX) * symbolRadius),
-						new Vec2(worldInner.x + (dirX + dirY) * symbolRadius, worldInner.y + (dirY - dirX) * symbolRadius),
+						new Vec2(
+							worldInner.x - (dirX + dirY) * symbolRadius, worldInner.y - (dirY - dirX) * symbolRadius),
+						new Vec2(
+							worldInner.x + (dirX + dirY) * symbolRadius, worldInner.y + (dirY - dirX) * symbolRadius)
 					]);
 					decorations.push([
-						new Vec2(worldInner.x - (dirX - dirY) * symbolRadius, worldInner.y - (dirY + dirX) * symbolRadius),
-						new Vec2(worldInner.x + (dirX - dirY) * symbolRadius, worldInner.y + (dirY + dirX) * symbolRadius),
+						new Vec2(
+							worldInner.x - (dirX - dirY) * symbolRadius, worldInner.y - (dirY + dirX) * symbolRadius),
+						new Vec2(
+							worldInner.x + (dirX - dirY) * symbolRadius, worldInner.y + (dirY + dirX) * symbolRadius)
 					]);
 					break;
 			}
 		}
 
-		const shape: PaintedShape = { type: 'segment', x1: worldOuter.x, y1: worldOuter.y, x2: lineEnd.x, y2: lineEnd.y, width };
+		const shape: PaintedShape = {
+			type: 'segment',
+			x1: worldOuter.x,
+			y1: worldOuter.y,
+			x2: lineEnd.x,
+			y2: lineEnd.y,
+			width
+		};
 		items.push({
 			id, layer: 'Pins', kind: 'pin', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pin,
 			refDesignator,
@@ -1850,7 +2107,7 @@ export class SchematicPainter {
 				for (const deco of decorations) {
 					renderer.line(deco, { strokeColor: color, strokeWidth: width });
 				}
-			},
+			}
 		});
 
 		const { name, number } = typeof pin.getPin === 'function' ? pin.getPin() : { name: '', number: '' };
@@ -1903,7 +2160,8 @@ export class SchematicPainter {
 			const hAlignAnchor: Record<'left' | 'center' | 'right', number> = { left: 0, center: 0.5, right: 1 };
 			const vAlignAnchor: Record<'top' | 'center' | 'bottom', number> = { top: 0, center: 0.5, bottom: 1 };
 			const nameAnchor = { x: hAlignAnchor[hAlign], y: vAlignAnchor[vAlign] };
-			const geometry = computeStrokeTextGeometry(name, namePos, nameTextSize, textAngle, false, undefined, nameAnchor);
+			const geometry = computeStrokeTextGeometry(
+				name, namePos, nameTextSize, textAngle, false, undefined, nameAnchor);
 			items.push(textItem(`${ id }:name`, 'Text', namePos, nameTextSize, pin, geometry, schColors.pinName));
 		}
 		if (number && number !== '~' && !pinNumbersHidden) {
@@ -1918,8 +2176,10 @@ export class SchematicPainter {
 			const oriented = orientPinOffset(local, orientation);
 			const numberPos = new Vec2(worldOuter.x + oriented.offset.x, worldOuter.y + oriented.offset.y);
 			const numberAnchor = { x: 0.5, y: pinNameOffset > 0 ? 1 : 0 };
-			const geometry = computeStrokeTextGeometry(number, numberPos, numberTextSize, textAngle, false, undefined, numberAnchor);
-			items.push(textItem(`${ id }:number`, 'Text', numberPos, numberTextSize, pin, geometry, schColors.pinNumber));
+			const geometry = computeStrokeTextGeometry(
+				number, numberPos, numberTextSize, textAngle, false, undefined, numberAnchor);
+			items.push(
+				textItem(`${ id }:number`, 'Text', numberPos, numberTextSize, pin, geometry, schColors.pinNumber));
 		}
 
 		return items;
@@ -1975,7 +2235,8 @@ export class SchematicPainter {
 		// `justify`, unmodified (see the block comment above).
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = readJustifyAnchor(label);
-		const geometry = computeStrokeTextGeometry(name, worldPos, textSize, textAngle, false, thickness, anchor, italic);
+		const geometry = computeStrokeTextGeometry(
+			name, worldPos, textSize, textAngle, false, thickness, anchor, italic);
 		// getUuid() (not an x/y/name-derived id) — matches every other
 		// builder's convention, and is load-bearing here specifically:
 		// translateElementById's caller (main.ts's drag loop) holds onto the
@@ -1987,10 +2248,17 @@ export class SchematicPainter {
 			: `local-label:${ x },${ y }:${ name }`;
 		const bbox = getStrokeTextBounds(geometry);
 		return {
-			id, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: label,
-			labelName: name, labelKind: 'local',
+			id,
+			layer: 'Labels',
+			kind: 'label',
+			shape: { type: 'rect', ...bbox },
+			bbox,
+			hitTestable: true,
+			element: label,
+			labelName: name,
+			labelKind: 'local',
 			defaultColor: label.getFontColorOverride?.() ?? undefined,
-			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 		};
 	}
 
@@ -2023,15 +2291,24 @@ export class SchematicPainter {
 
 		let textOffset: Vec2;
 		switch (rotation) {
-			case 90: textOffset = new Vec2(vert, -horz); break;
-			case 180: textOffset = new Vec2(-horz, vert); break;
-			case 270: textOffset = new Vec2(vert, horz); break;
-			default: textOffset = new Vec2(horz, vert); break;
+			case 90:
+				textOffset = new Vec2(vert, -horz);
+				break;
+			case 180:
+				textOffset = new Vec2(-horz, vert);
+				break;
+			case 270:
+				textOffset = new Vec2(vert, horz);
+				break;
+			default:
+				textOffset = new Vec2(horz, vert);
+				break;
 		}
 		const worldTextPos = new Vec2(worldOrigin.x + textOffset.x, worldOrigin.y + textOffset.y);
 		const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 		const anchor = readJustifyAnchor(label);
-		const geometry = computeStrokeTextGeometry(name, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
+		const geometry = computeStrokeTextGeometry(
+			name, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
 		const id = label.getUuid() ?? `label:${ origin.x },${ origin.y }`;
 		const bbox = getStrokeTextBounds(geometry);
 		// Same override color drives BOTH the text and its flag/arrow below —
@@ -2040,9 +2317,15 @@ export class SchematicPainter {
 		// where border/fill/text genuinely are 3 independent colors).
 		const labelColor = label.getFontColorOverride?.() ?? schColors.labelGlobal;
 		items.push({
-			id: `${ id }:text`, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: label,
+			id: `${ id }:text`,
+			layer: 'Labels',
+			kind: 'label',
+			shape: { type: 'rect', ...bbox },
+			bbox,
+			hitTestable: false,
+			element: label,
 			defaultColor: labelColor,
-			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 		});
 
 		const halfSize = textSize / 2 + margin;
@@ -2050,17 +2333,23 @@ export class SchematicPainter {
 		const x = symbolLength + thickness;
 		const y = halfSize + thickness;
 		const pts: { x: number; y: number }[] = [
-			{ x: 0, y: 0 }, { x: 0, y: -y }, { x: -x, y: -y }, { x: -x, y: 0 }, { x: -x, y }, { x: 0, y }, { x: 0, y: 0 },
+			{ x: 0, y: 0 }, { x: 0, y: -y }, { x: -x, y: -y }, { x: -x, y: 0 }, { x: -x, y }, { x: 0, y },
+			{ x: 0, y: 0 }
 		];
 		let offX = 0;
 		if (shape === 'input') {
-			offX = -halfSize; pts[0]!.x += halfSize; pts[6]!.x += halfSize;
+			offX = -halfSize;
+			pts[0]!.x += halfSize;
+			pts[6]!.x += halfSize;
 		}
 		else if (shape === 'output') {
 			pts[3]!.x -= halfSize;
 		}
 		else if (shape === 'bidirectional' || shape === 'tri_state') {
-			offX = -halfSize; pts[0]!.x += halfSize; pts[6]!.x += halfSize; pts[3]!.x -= halfSize;
+			offX = -halfSize;
+			pts[0]!.x += halfSize;
+			pts[6]!.x += halfSize;
+			pts[3]!.x -= halfSize;
 		}
 		const shapeRotation = rotation + 180;
 		const worldPts = pts.map((p) => {
@@ -2072,7 +2361,7 @@ export class SchematicPainter {
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: flagShape, bbox: shapeToBBox(flagShape),
 			hitTestable: true, element: label, defaultColor: labelColor,
 			labelName: name, labelKind: 'global',
-			draw: (renderer, color) => renderer.line(worldPts, { strokeColor: color, strokeWidth: thickness || 0.15 }),
+			draw: (renderer, color) => renderer.line(worldPts, { strokeColor: color, strokeWidth: thickness || 0.15 })
 		});
 		return items;
 	}
@@ -2093,7 +2382,8 @@ export class SchematicPainter {
 		const anchor = readJustifyAnchor(label);
 		const id = label.getUuid() ?? `hlabel:${ origin.x },${ origin.y }`;
 		return this.buildHierLabelShape(
-			id, name, new Vec2(origin.x, origin.y), rotation, shape, textSize, thickness, anchor.x, label, schColors.labelHier,
+			id, name, new Vec2(origin.x, origin.y), rotation, shape, textSize, thickness, anchor.x, label,
+			schColors.labelHier,
 			true, italic
 		);
 	}
@@ -2173,37 +2463,63 @@ export class SchematicPainter {
 
 		let textOffset: Vec2;
 		switch (geomRotation) {
-			case 90: textOffset = new Vec2(0, -dist); break;
-			case 180: textOffset = new Vec2(-dist, 0); break;
-			case 270: textOffset = new Vec2(0, dist); break;
-			default: textOffset = new Vec2(dist, 0); break;
+			case 90:
+				textOffset = new Vec2(0, -dist);
+				break;
+			case 180:
+				textOffset = new Vec2(-dist, 0);
+				break;
+			case 270:
+				textOffset = new Vec2(0, dist);
+				break;
+			default:
+				textOffset = new Vec2(dist, 0);
+				break;
 		}
 		const worldTextPos = new Vec2(worldOrigin.x + textOffset.x, worldOrigin.y + textOffset.y);
 		const textAngle = (geomRotation === 90 || geomRotation === 270) ? 90 : 0;
 		const anchor = { x: hAlign, y: 0.5 };
-		const geometry = computeStrokeTextGeometry(text, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
+		const geometry = computeStrokeTextGeometry(
+			text, worldTextPos, textSize, textAngle, false, thickness, anchor, italic);
 		const bbox = getStrokeTextBounds(geometry);
 		items.push({
-			id: `${ id }:text`, layer: 'Labels', kind: 'label', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element,
+			id: `${ id }:text`,
+			layer: 'Labels',
+			kind: 'label',
+			shape: { type: 'rect', ...bbox },
+			bbox,
+			hitTestable: false,
+			element,
 			defaultColor: resolvedColor,
-			draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor),
+			draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor)
 		});
 
 		const s = textSize;
 		let pts: { x: number; y: number }[];
 		switch (shape) {
 			case 'output':
-				pts = [{ x: 0, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 }, { x: 0, y: -s / 2 }, { x: 0, y: s / 2 }];
+				pts = [
+					{ x: 0, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 },
+					{ x: 0, y: -s / 2 }, { x: 0, y: s / 2 }
+				];
 				break;
 			case 'input':
-				pts = [{ x: s, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: 0, y: 0 }, { x: s / 2, y: -s / 2 }, { x: s, y: -s / 2 }, { x: s, y: s / 2 }];
+				pts = [
+					{ x: s, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: 0, y: 0 }, { x: s / 2, y: -s / 2 },
+					{ x: s, y: -s / 2 }, { x: s, y: s / 2 }
+				];
 				break;
 			case 'bidirectional':
 			case 'tri_state':
-				pts = [{ x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 }, { x: 0, y: 0 }, { x: s / 2, y: s / 2 }];
+				pts = [
+					{ x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 }, { x: 0, y: 0 },
+					{ x: s / 2, y: s / 2 }
+				];
 				break;
 			default: // passive
-				pts = [{ x: 0, y: s / 2 }, { x: s, y: s / 2 }, { x: s, y: -s / 2 }, { x: 0, y: -s / 2 }, { x: 0, y: s / 2 }];
+				pts = [
+					{ x: 0, y: s / 2 }, { x: s, y: s / 2 }, { x: s, y: -s / 2 }, { x: 0, y: -s / 2 }, { x: 0, y: s / 2 }
+				];
 				break;
 		}
 		const worldPts = pts.map((p) => {
@@ -2222,7 +2538,8 @@ export class SchematicPainter {
 			// apply to a raw KicadElementPin the way they do a real label,
 			// so the right-click menu must still be able to tell them apart.
 			labelName: labelKind === 'hier' ? text : undefined, labelKind,
-			draw: (renderer, drawColor) => renderer.line(worldPts, { strokeColor: drawColor, strokeWidth: thickness || 0.15 }),
+			draw: (renderer, drawColor) => renderer.line(
+				worldPts, { strokeColor: drawColor, strokeWidth: thickness || 0.15 })
 		});
 		return items;
 	}
@@ -2287,12 +2604,14 @@ export class SchematicPainter {
 				? [
 					{ x: 0, y: 0 }, { x: 0, y: pinLength - symbolSize }, { x: -2 * symbolSize, y: pinLength },
 					{ x: 0, y: pinLength + symbolSize }, { x: 2 * symbolSize, y: pinLength },
-					{ x: 0, y: pinLength - symbolSize }, { x: 0, y: 0 },
+					{ x: 0, y: pinLength - symbolSize }, { x: 0, y: 0 }
 				]
 				: [
-					{ x: 0, y: 0 }, { x: 0, y: pinLength - symbolSize }, { x: -2 * symbolSize, y: pinLength - symbolSize },
+					{ x: 0, y: 0 }, { x: 0, y: pinLength - symbolSize },
+					{ x: -2 * symbolSize, y: pinLength - symbolSize },
 					{ x: -2 * symbolSize, y: pinLength + symbolSize }, { x: 2 * symbolSize, y: pinLength + symbolSize },
-					{ x: 2 * symbolSize, y: pinLength - symbolSize }, { x: 0, y: pinLength - symbolSize }, { x: 0, y: 0 },
+					{ x: 2 * symbolSize, y: pinLength - symbolSize }, { x: 0, y: pinLength - symbolSize },
+					{ x: 0, y: 0 }
 				];
 			const worldPts = localPts.map(toWorld);
 			hitShape = { type: 'polygon', points: worldPts.map(p => ({ x: p.x, y: p.y })) };
@@ -2305,7 +2624,7 @@ export class SchematicPainter {
 		const flagColor = flag.getFontColorOverride?.() ?? schColors.labelDirective;
 		items.push({
 			id: `${ id }:flag`, layer: 'Labels', kind: 'label', shape: hitShape, bbox: shapeToBBox(hitShape),
-			hitTestable: true, element: flag, labelKind: 'directive', defaultColor: flagColor, draw,
+			hitTestable: true, element: flag, labelKind: 'directive', defaultColor: flagColor, draw
 		});
 
 		if (typeof flag.getProperties === 'function') {
@@ -2314,17 +2633,19 @@ export class SchematicPainter {
 				if (!value || (typeof prop.isHidden === 'function' && prop.isHidden())) {
 					continue;
 				}
-				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x: origin.x, y: origin.y, rotation: 0 };
+				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() :
+					{ x: origin.x, y: origin.y, rotation: 0 };
 				const worldPos = new Vec2(propOrigin.x, propOrigin.y);
 				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
 				const anchor = typeof prop.getAnchorPoint === 'function' ? prop.getAnchorPoint() : { x: 0, y: 1 };
-				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
+				const geometry = computeStrokeTextGeometry(
+					value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
 				const bbox = getStrokeTextBounds(geometry);
 				items.push({
 					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: flag,
 					defaultColor: flagColor,
-					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 				});
 			}
 		}
@@ -2356,9 +2677,9 @@ export class SchematicPainter {
 				renderer.rect(new Vec2(x, y), w, h, {
 					fillColor: schColors.sheetBackground,
 					strokeColor: color,
-					strokeWidth: 0.25,
+					strokeWidth: 0.25
 				});
-			},
+			}
 		});
 
 		if (typeof sheet.getProperties === 'function') {
@@ -2367,7 +2688,8 @@ export class SchematicPainter {
 				if (!value || (typeof prop.isHidden === 'function' && prop.isHidden())) {
 					continue;
 				}
-				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() : { x, y: y - 1, rotation: 0 };
+				const propOrigin = typeof prop.getOrigin === 'function' ? prop.getOrigin() :
+					{ x, y: y - 1, rotation: 0 };
 				const worldPos = new Vec2(propOrigin.x, propOrigin.y);
 				const isFilename = prop.propertyName === 'Sheetfile';
 				const isSheetname = prop.propertyName === 'Sheetname';
@@ -2396,13 +2718,14 @@ export class SchematicPainter {
 				// is a strict upgrade: real bold/italic/custom-size now
 				// apply when present, with an identical fallback otherwise.
 				const { size: textSize, thickness, italic } = readElementFontMetrics(prop);
-				const geometry = computeStrokeTextGeometry(value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
+				const geometry = computeStrokeTextGeometry(
+					value, worldPos, textSize, propOrigin.rotation ?? 0, false, thickness, anchor, italic);
 				const bbox = { x: worldPos.x - 2, y: worldPos.y - 2, w: 4, h: 4 };
 				items.push({
 					id: `${ id }:prop:${ prop.propertyName }`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: sheet,
 					defaultColor: isFilename ? schColors.sheetFilename : undefined,
-					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 				});
 			}
 		}
@@ -2468,18 +2791,20 @@ export class SchematicPainter {
 			const value = el.findFirstChildByName?.(name)?.attributes?.[0]?.value;
 			return value === true || value === 'yes';
 		};
-		const tableId = table.getUuid?.() ?? `table:${cells[0]!.getUuid?.() ?? 'anonymous'}`;
+		const tableId = table.getUuid?.() ?? `table:${ cells[0]!.getUuid?.() ?? 'anonymous' }`;
 		const columnCount = Math.max(1, Math.round(numberChild(table, 'column_count', 1)));
 		const border = table.findFirstChildByName?.('border');
 		const separators = table.findFirstChildByName?.('separators');
 		const strokeFor = (owner: any) => {
 			const stroke = owner?.findFirstChildByName?.('stroke');
-			const width = Number(stroke?.getWidth?.() ?? stroke?.findFirstChildByName?.('width')?.attributes?.[0]?.value);
+			const width = Number(
+				stroke?.getWidth?.() ?? stroke?.findFirstChildByName?.('width')?.attributes?.[0]?.value);
 			const colorEl = stroke?.findFirstChildByName?.('color');
 			return {
 				width: Number.isFinite(width) && width > 0 ? width : pinThickness,
-				type: String(stroke?.getType?.() ?? stroke?.findFirstChildByName?.('type')?.attributes?.[0]?.value ?? 'solid') as KicadStrokeLineType,
-				color: colorEl?.getColor?.() as string | undefined,
+				type: String(stroke?.getType?.() ?? stroke?.findFirstChildByName?.('type')?.attributes?.[0]?.value
+					?? 'solid') as KicadStrokeLineType,
+				color: colorEl?.getColor?.() as string | undefined
 			};
 		};
 		const borderStroke = strokeFor(border);
@@ -2507,7 +2832,7 @@ export class SchematicPainter {
 				col: index % columnCount,
 				row: Math.floor(index / columnCount),
 				colSpan: Math.max(0, Number(span?.attributes?.[0]?.value) || 1),
-				rowSpan: Math.max(0, Number(span?.attributes?.[1]?.value) || 1),
+				rowSpan: Math.max(0, Number(span?.attributes?.[1]?.value) || 1)
 			};
 		}).filter((cell: TableCell) => cell.colSpan > 0 && cell.rowSpan > 0 && cell.w > 0 && cell.h > 0);
 		if (!parsedCells.length) {
@@ -2526,17 +2851,22 @@ export class SchematicPainter {
 			const margin = (index: number) => Number(margins[index]?.value) || 0;
 			const left = margin(0), right = margin(1), top = margin(2), bottom = margin(3);
 			const fill = cell.el.findFirstChildByName?.('fill');
-			const fillType = String(fill?.getType?.() ?? fill?.findFirstChildByName?.('type')?.attributes?.[0]?.value ?? 'none');
+			const fillType = String(
+				fill?.getType?.() ?? fill?.findFirstChildByName?.('type')?.attributes?.[0]?.value ?? 'none');
 			const colorEl = fill?.findFirstChildByName?.('color');
 			const fillColor = fillType === 'color'
 				? (colorEl?.getColor?.() ?? schColors.componentBody)
 				: fillType === 'background' ? schematicBackgroundColor : undefined;
 			if (fillColor) {
 				items.push({
-					id: `${tableId}:cell:${cell.el.getUuid?.() ?? `${cell.row},${cell.col}`}:fill`,
-					layer: 'Graphics', kind: 'table', shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
-					bbox: { x: cell.x, y: cell.y, w: cell.w, h: cell.h }, hitTestable: false, element: cell.el,
-					draw: renderer => renderer.rect(new Vec2(cell.x, cell.y), cell.w, cell.h, { fillColor }),
+					id: `${ tableId }:cell:${ cell.el.getUuid?.() ?? `${ cell.row },${ cell.col }` }:fill`,
+					layer: 'Graphics',
+					kind: 'table',
+					shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
+					bbox: { x: cell.x, y: cell.y, w: cell.w, h: cell.h },
+					hitTestable: false,
+					element: cell.el,
+					draw: renderer => renderer.rect(new Vec2(cell.x, cell.y), cell.w, cell.h, { fillColor })
 				});
 			}
 			if (cell.value) {
@@ -2551,16 +2881,21 @@ export class SchematicPainter {
 				// 0-based, ADDR = spreadsheet-style column letter + row number
 				// (e.g. col 1, row 5 → "B5").
 				const cellValue = this.expandText(cell.value, {
-					ROW: String(cell.row), COL: String(cell.col), ADDR: `${ columnLetter(cell.col) }${ cell.row }`,
+					ROW: String(cell.row), COL: String(cell.col), ADDR: `${ columnLetter(cell.col) }${ cell.row }`
 				});
 				const wrappedValue = wrapTableCellText(cellValue, contentW, textSize);
-				const geometry = computeStrokeTextGeometry(wrappedValue, position, textSize, rotation, false, thickness, anchor, italic);
+				const geometry = computeStrokeTextGeometry(
+					wrappedValue, position, textSize, rotation, false, thickness, anchor, italic);
 				items.push({
-					id: `${tableId}:cell:${cell.el.getUuid?.() ?? `${cell.row},${cell.col}`}:text`,
-					layer: 'Graphics', kind: 'text', shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
-					bbox: { x: cell.x, y: cell.y, w: cell.w, h: cell.h }, hitTestable: false, element: cell.el,
+					id: `${ tableId }:cell:${ cell.el.getUuid?.() ?? `${ cell.row },${ cell.col }` }:text`,
+					layer: 'Graphics',
+					kind: 'text',
+					shape: { type: 'rect', x: cell.x, y: cell.y, w: cell.w, h: cell.h },
+					bbox: { x: cell.x, y: cell.y, w: cell.w, h: cell.h },
+					hitTestable: false,
+					element: cell.el,
 					defaultColor: schColors.note,
-					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color),
+					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 				});
 			}
 		}
@@ -2570,10 +2905,16 @@ export class SchematicPainter {
 		const rowCount = Math.ceil(cells.length / columnCount);
 		for (const cell of parsedCells) {
 			if (cell.col + cell.colSpan < columnCount && (strokeColumns || (cell.row === 0 && strokeHeader))) {
-				addLine(new Vec2(cell.x + cell.w, cell.y), new Vec2(cell.x + cell.w, cell.y + cell.h), cell.row === 0 && strokeHeader ? borderStroke : separatorStroke);
+				addLine(
+					new Vec2(cell.x + cell.w, cell.y), new Vec2(cell.x + cell.w, cell.y + cell.h),
+					cell.row === 0 && strokeHeader ? borderStroke : separatorStroke
+				);
 			}
 			if (cell.row + cell.rowSpan < rowCount && (strokeRows || (cell.row === 0 && strokeHeader))) {
-				addLine(new Vec2(cell.x, cell.y + cell.h), new Vec2(cell.x + cell.w, cell.y + cell.h), cell.row === 0 && strokeHeader ? borderStroke : separatorStroke);
+				addLine(
+					new Vec2(cell.x, cell.y + cell.h), new Vec2(cell.x + cell.w, cell.y + cell.h),
+					cell.row === 0 && strokeHeader ? borderStroke : separatorStroke
+				);
 			}
 		}
 		if (strokeExternal) {
@@ -2583,15 +2924,21 @@ export class SchematicPainter {
 			addLine(new Vec2(minX, maxY), new Vec2(minX, minY), borderStroke);
 		}
 		items.push({
-			id: `${tableId}:borders`, layer: 'Graphics', kind: 'table', shape: { type: 'rect', ...bbox, filled: true }, bbox, hitTestable: true, element: table,
+			id: `${ tableId }:borders`,
+			layer: 'Graphics',
+			kind: 'table',
+			shape: { type: 'rect', ...bbox, filled: true },
+			bbox,
+			hitTestable: true,
+			element: table,
 			draw: (renderer, color) => {
 				for (const line of lines) {
 					const lineColor = line.stroke.color || color;
 					strokeDashedPolyline([line.a, line.b], line.stroke.width, line.stroke.type, segment =>
-						renderer.line(segment, { strokeColor: lineColor, strokeWidth: line.stroke.width }),
+						renderer.line(segment, { strokeColor: lineColor, strokeWidth: line.stroke.width })
 					);
 				}
-			},
+			}
 		});
 		return items;
 	}
@@ -2700,7 +3047,8 @@ export class SchematicPainter {
 		// to tell them apart.
 		const liesOnAnyBusSpan = (x: number, y: number): boolean =>
 			buses.some(bus => bus.shape.type === 'segment'
-				&& distanceToSegment(x, y, bus.shape.x1, bus.shape.y1, bus.shape.x2, bus.shape.y2) < JUNCTION_POINT_EPS);
+				&& distanceToSegment(x, y, bus.shape.x1, bus.shape.y1, bus.shape.x2, bus.shape.y2)
+				< JUNCTION_POINT_EPS);
 		// A directive label (netclass_flag) anchored on a rule area's border
 		// is considered "connected" to it even with no wire touching either —
 		// confirmed in the user's local checkout:
@@ -2730,7 +3078,8 @@ export class SchematicPainter {
 			(it.kind === 'wire' || it.kind === 'bus') && it.shape.type === 'segment');
 		const liesOnAnyWireOrBusSpan = (x: number, y: number): boolean =>
 			wireAndBusSegments.some(seg => seg.shape.type === 'segment'
-				&& distanceToSegment(x, y, seg.shape.x1, seg.shape.y1, seg.shape.x2, seg.shape.y2) < JUNCTION_POINT_EPS);
+				&& distanceToSegment(x, y, seg.shape.x1, seg.shape.y1, seg.shape.x2, seg.shape.y2)
+				< JUNCTION_POINT_EPS);
 		const flags: SchPaintedItem[] = [];
 
 		for (const item of wireLike) {
@@ -2739,11 +3088,15 @@ export class SchematicPainter {
 			}
 			const isBusEntry = typeof item.element?.getSize === 'function';
 			const color = brightenColor(item.defaultColor ?? colorForKind(item.kind), 0.3);
-			if (isDangling(item.shape.x1, item.shape.y1) && !(isBusEntry && liesOnAnyBusSpan(item.shape.x1, item.shape.y1))) {
-				flags.push(danglingSquare(`${ item.id }:dangling:start`, item.shape.x1, item.shape.y1, color, item.element));
+			if (isDangling(item.shape.x1, item.shape.y1) && !(isBusEntry && liesOnAnyBusSpan(
+				item.shape.x1, item.shape.y1))) {
+				flags.push(
+					danglingSquare(`${ item.id }:dangling:start`, item.shape.x1, item.shape.y1, color, item.element));
 			}
-			if (isDangling(item.shape.x2, item.shape.y2) && !(isBusEntry && liesOnAnyBusSpan(item.shape.x2, item.shape.y2))) {
-				flags.push(danglingSquare(`${ item.id }:dangling:end`, item.shape.x2, item.shape.y2, color, item.element));
+			if (isDangling(item.shape.x2, item.shape.y2) && !(isBusEntry && liesOnAnyBusSpan(
+				item.shape.x2, item.shape.y2))) {
+				flags.push(
+					danglingSquare(`${ item.id }:dangling:end`, item.shape.x2, item.shape.y2, color, item.element));
 			}
 		}
 		for (const item of pins) {
@@ -2823,9 +3176,11 @@ function danglingSquare(id: string, x: number, y: number, color: string, element
 		id, layer: 'Dangling', kind: 'dangling', shape, bbox: shape, hitTestable: false, element,
 		defaultColor: color,
 		draw: (renderer, drawColor) => {
-			renderer.rect(new Vec2(x - half, y - half), half * 2, half * 2,
-				{ strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH });
-		},
+			renderer.rect(
+				new Vec2(x - half, y - half), half * 2, half * 2,
+				{ strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH }
+			);
+		}
 	};
 }
 
@@ -2835,8 +3190,9 @@ function danglingCircle(id: string, x: number, y: number, color: string, element
 		id, layer: 'Dangling', kind: 'dangling', shape, bbox: shapeToBBox(shape), hitTestable: false, element,
 		defaultColor: color,
 		draw: (renderer, drawColor) => {
-			renderer.circle(new Vec2(x, y), DANGLING_CIRCLE_RADIUS, { strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH });
-		},
+			renderer.circle(
+				new Vec2(x, y), DANGLING_CIRCLE_RADIUS, { strokeColor: drawColor, strokeWidth: DANGLING_STROKE_WIDTH });
+		}
 	};
 }
 
@@ -2862,7 +3218,8 @@ function rotateLocalPoint(p: { x: number; y: number }, rotationDeg: number): Vec
  * an already-closed ring (first point repeated at the end) for closed
  * shapes — this never appends a closing point itself, since circleToRing()
  * and the rect/polygon corner lists already do. */
-function drawStrokeOutline(renderer: Renderer, ring: Vec2[], width: number, lineType: KicadStrokeLineType, color: string): void {
+function drawStrokeOutline(
+	renderer: Renderer, ring: Vec2[], width: number, lineType: KicadStrokeLineType, color: string): void {
 	strokeDashedPolyline(ring, width, lineType, (segment) => {
 		renderer.line(segment, { strokeColor: color, strokeWidth: width || 0.1 });
 	});
@@ -2877,7 +3234,7 @@ function cubicBezierToPolyline(start: Vec2, control1: Vec2, control2: Vec2, end:
 	const flatten = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, depth: number): void => {
 		const flatness = Math.max(
 			distanceToSegment(b.x, b.y, a.x, a.y, d.x, d.y),
-			distanceToSegment(c.x, c.y, a.x, a.y, d.x, d.y),
+			distanceToSegment(c.x, c.y, a.x, a.y, d.x, d.y)
 		);
 		if (depth >= 10 || flatness <= 0.05) {
 			points.push(d);
@@ -2896,10 +3253,17 @@ function cubicBezierToPolyline(start: Vec2, control1: Vec2, control2: Vec2, end:
 /** Identifies the image formats KiCad embeds and reads their pixel extent
  * without waiting for browser image decoding. This keeps hit testing and the
  * initial fit-to-page correct even while the actual texture loads. */
-function embeddedImageInfo(data: string): { width: number; height: number; mimeType: string; ppi: number; legacyPpi: number } | null {
+function embeddedImageInfo(data: string): {
+	width: number;
+	height: number;
+	mimeType: string;
+	ppi: number;
+	legacyPpi: number
+} | null {
 	const byteAt = (index: number) => index < data.length ? data.charCodeAt(index) & 0xff : 0;
 	const be16 = (index: number) => (byteAt(index) << 8) | byteAt(index + 1);
-	const be32 = (index: number) => ((byteAt(index) * 0x1000000) + (byteAt(index + 1) << 16) + (byteAt(index + 2) << 8) + byteAt(index + 3)) >>> 0;
+	const be32 = (index: number) => ((byteAt(index) * 0x1000000) + (byteAt(index + 1) << 16) + (byteAt(index + 2) << 8)
+		+ byteAt(index + 3)) >>> 0;
 	const le16 = (index: number) => byteAt(index) | (byteAt(index + 1) << 8);
 	// PNG signature + IHDR width/height. KiCad reads pHYs' pixels-per-meter
 	// metadata as pixels/cm, then rounds pixels/cm × 2.54 to integer PPI.
@@ -2909,13 +3273,19 @@ function embeddedImageInfo(data: string): { width: number; height: number; mimeT
 		let chunk = 8;
 		while (chunk + 12 <= data.length) {
 			const length = be32(chunk);
-			if (length > data.length - chunk - 12) break;
+			if (length > data.length - chunk - 12) {
+				break;
+			}
 			if (data.slice(chunk + 4, chunk + 8) === 'pHYs' && length >= 9 && byteAt(chunk + 8 + 8) === 1) {
 				const pixelsPerMeter = be32(chunk + 8);
 				const parsedPpi = Math.round((pixelsPerMeter / 100) * 2.54);
 				const parsedLegacyPpi = Math.round(Math.floor(pixelsPerMeter / 100) * 2.54);
-				if (parsedPpi > 1) ppi = parsedPpi;
-				if (parsedLegacyPpi > 1) legacyPpi = parsedLegacyPpi;
+				if (parsedPpi > 1) {
+					ppi = parsedPpi;
+				}
+				if (parsedLegacyPpi > 1) {
+					legacyPpi = parsedLegacyPpi;
+				}
 				break;
 			}
 			chunk += length + 12;
@@ -2938,19 +3308,28 @@ function embeddedImageInfo(data: string): { width: number; height: number; mimeT
 				index++;
 				continue;
 			}
-			while (byteAt(index) === 0xff) index++;
+			while (byteAt(index) === 0xff) {
+				index++;
+			}
 			const marker = byteAt(index++);
-			if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+			if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+				continue;
+			}
 			const length = be16(index);
-			if (length < 2 || index + length > data.length) break;
+			if (length < 2 || index + length > data.length) {
+				break;
+			}
 			const segmentData = index + 2;
 			if (marker === 0xe0 && length >= 14 && data.slice(segmentData, segmentData + 5) === 'JFIF\0') {
 				const unit = byteAt(segmentData + 7);
 				const density = be16(segmentData + 8);
 				const parsedPpi = unit === 1 ? density : unit === 2 ? Math.round(density * 2.54) : 0;
-				if (parsedPpi > 1) ppi = parsedPpi;
+				if (parsedPpi > 1) {
+					ppi = parsedPpi;
+				}
 			}
-			if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+			if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker
+				<= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
 				return { width: be16(index + 5), height: be16(index + 3), mimeType: 'image/jpeg', ppi, legacyPpi: ppi };
 			}
 			index += length;
@@ -2986,18 +3365,29 @@ function readElementFontMetrics(el: any): { size: number; thickness: number; bol
 		const font = el.getFont();
 		if (font.height > 0) {
 			const bold = !!font.bold;
-			return { size: font.height, thickness: font.thickness || (bold ? boldPenWidth(font.height) : pinThickness), bold, italic: !!font.italic };
+			return {
+				size: font.height,
+				thickness: font.thickness || (bold ? boldPenWidth(font.height) : pinThickness),
+				bold,
+				italic: !!font.italic
+			};
 		}
 	}
 	const effects = typeof el.findFirstChildByName === 'function' ? el.findFirstChildByName('effects') : null;
-	const font = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('font') : null;
+	const font = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('font') :
+		null;
 	if (font) {
 		const size = typeof font.getSize === 'function' ? font.getSize() : null;
 		const thickness = typeof font.getThickness === 'function' ? font.getThickness() : 0;
 		const bold = typeof font.getBold === 'function' ? !!font.getBold() : false;
 		const italic = typeof font.getItalic === 'function' ? !!font.getItalic() : false;
 		if (size && size.height > 0) {
-			return { size: size.height, thickness: thickness || (bold ? boldPenWidth(size.height) : pinThickness), bold, italic };
+			return {
+				size: size.height,
+				thickness: thickness || (bold ? boldPenWidth(size.height) : pinThickness),
+				bold,
+				italic
+			};
 		}
 	}
 	return { size: 1.27, thickness: pinThickness, bold: false, italic: false };
@@ -3019,11 +3409,14 @@ function labelClearanceOffset(textSize: number, thickness: number, rotationDeg: 
 	return isVertical ? new Vec2(-dist, 0) : new Vec2(0, -dist);
 }
 
-function textItem(id: string, layer: string, worldPos: Vec2, textSize: number, element: any, geometry: ReturnType<typeof computeStrokeTextGeometry>, defaultColor: string): SchPaintedItem {
+function textItem(
+	id: string, layer: string, worldPos: Vec2, textSize: number, element: any,
+	geometry: ReturnType<typeof computeStrokeTextGeometry>, defaultColor: string
+): SchPaintedItem {
 	const bbox = getStrokeTextBounds(geometry);
 	return {
 		id, layer, kind: 'text', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element, defaultColor,
-		draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor),
+		draw: (renderer, drawColor) => drawStrokeTextGeometry(renderer, geometry, drawColor)
 	};
 }
 
@@ -3046,7 +3439,7 @@ function wrapTableCellText(value: string, maxWidthMm: number, textSizeMm: number
 		}
 		let line = '';
 		for (const word of sourceLine.trim().split(/\s+/)) {
-			const candidate = line ? `${line} ${word}` : word;
+			const candidate = line ? `${ line } ${ word }` : word;
 			if (fits(candidate)) {
 				line = candidate;
 				continue;
@@ -3104,16 +3497,23 @@ function letterSubReference(unit: number, initialLetter = 'A'): string {
  * fallback stays for any unregistered/legacy-shaped element that slips
  * through, same defensive spirit as this file's other readers. */
 function readMirror(instance: any): 'x' | 'y' | null {
-	const mirrorEl = typeof instance.findFirstChildByName === 'function' ? instance.findFirstChildByName('mirror') : null;
+	const mirrorEl = typeof instance.findFirstChildByName === 'function' ? instance.findFirstChildByName('mirror') :
+		null;
 	if (mirrorEl) {
 		const value = String(mirrorEl.value ?? '');
-		if (value === 'x' || value === 'y') return value;
+		if (value === 'x' || value === 'y') {
+			return value;
+		}
 		for (const attr of mirrorEl.attributes) {
 			const v = String(attr.value);
-			if (v === 'x' || v === 'y') return v as 'x' | 'y';
+			if (v === 'x' || v === 'y') {
+				return v as 'x' | 'y';
+			}
 		}
 		for (const child of mirrorEl.children) {
-			if (child.name === 'x' || child.name === 'y') return child.name as 'x' | 'y';
+			if (child.name === 'x' || child.name === 'y') {
+				return child.name as 'x' | 'y';
+			}
 		}
 	}
 	return null;
@@ -3178,8 +3578,10 @@ function readNumericValue(el: any, fallback: number): number {
  * libraries that just rely on the schematic's global default text size). */
 function readPinChildFontSize(pin: any, childName: 'name' | 'number', fallback: number): number {
 	const child = typeof pin.findFirstChildByName === 'function' ? pin.findFirstChildByName(childName) : null;
-	const effects = child && typeof child.findFirstChildByName === 'function' ? child.findFirstChildByName('effects') : null;
-	const font = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('font') : null;
+	const effects = child && typeof child.findFirstChildByName === 'function' ? child.findFirstChildByName('effects') :
+		null;
+	const font = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('font') :
+		null;
 	if (font && typeof font.getSize === 'function') {
 		const size = font.getSize();
 		if (size.height > 0) {
@@ -3195,8 +3597,10 @@ function readPinChildFontSize(pin: any, childName: 'name' | 'number', fallback: 
  * clearance from the pin line. */
 function readPinChildFontThickness(pin: any, childName: 'name' | 'number', fallback: number): number {
 	const child = typeof pin.findFirstChildByName === 'function' ? pin.findFirstChildByName(childName) : null;
-	const effects = child && typeof child.findFirstChildByName === 'function' ? child.findFirstChildByName('effects') : null;
-	const font = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('font') : null;
+	const effects = child && typeof child.findFirstChildByName === 'function' ? child.findFirstChildByName('effects') :
+		null;
+	const font = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('font') :
+		null;
 	if (font && typeof font.getThickness === 'function') {
 		const thickness = font.getThickness();
 		if (thickness > 0) {
@@ -3234,10 +3638,14 @@ function pinOrientationFromDir(ux: number, uy: number): PinOrientation {
  */
 function orientPinOffset(local: Vec2, orientation: PinOrientation): { offset: Vec2; flipH: boolean } {
 	switch (orientation) {
-		case 'right': return { offset: local, flipH: false };
-		case 'left': return { offset: new Vec2(-local.x, local.y), flipH: true };
-		case 'up': return { offset: new Vec2(local.y, -local.x), flipH: false };
-		case 'down': return { offset: new Vec2(local.y, local.x), flipH: true };
+		case 'right':
+			return { offset: local, flipH: false };
+		case 'left':
+			return { offset: new Vec2(-local.x, local.y), flipH: true };
+		case 'up':
+			return { offset: new Vec2(local.y, -local.x), flipH: false };
+		case 'down':
+			return { offset: new Vec2(local.y, local.x), flipH: true };
 	}
 }
 
@@ -3272,21 +3680,34 @@ function readJustifyAnchor(el: any): { x: number; y: number } {
 		return el.getAnchorPoint();
 	}
 	const effects = typeof el.findFirstChildByName === 'function' ? el.findFirstChildByName('effects') : null;
-	const justifyEl = effects && typeof effects.findFirstChildByName === 'function' ? effects.findFirstChildByName('justify') : null;
+	const justifyEl = effects && typeof effects.findFirstChildByName === 'function' ?
+		effects.findFirstChildByName('justify') : null;
 	const justify = justifyEl && typeof justifyEl.getJustify === 'function' ? justifyEl.getJustify() : null;
 	if (!justify) {
 		return { x: 0.5, y: 0.5 };
 	}
 	let x = 0.5, y = 0.5;
 	switch (justify.horizontal) {
-		case 'left': x = 0; break;
-		case 'middle': x = 0.5; break;
-		case 'right': x = 1; break;
+		case 'left':
+			x = 0;
+			break;
+		case 'middle':
+			x = 0.5;
+			break;
+		case 'right':
+			x = 1;
+			break;
 	}
 	switch (justify.vertical) {
-		case 'top': y = 0; break;
-		case 'middle': y = 0.5; break;
-		case 'bottom': y = 1; break;
+		case 'top':
+			y = 0;
+			break;
+		case 'middle':
+			y = 0.5;
+			break;
+		case 'bottom':
+			y = 1;
+			break;
 	}
 	if (justify.mirrored) {
 		x = 1 - x;
@@ -3365,7 +3786,10 @@ function flippedTransform(instanceMatrix: Matrix3, localX: number, localY: numbe
  * winding, so re-deriving world angles from independently-transformed
  * start/end points (without re-checking against mid) silently picks the
  * wrong one of the two possible arcs for roughly half of all symbol arcs. */
-function arcSweepAngles(center: Vec2, startPt: Vec2, midPt: Vec2, endPt: Vec2): { startAngle: number; endAngle: number } {
+function arcSweepAngles(center: Vec2, startPt: Vec2, midPt: Vec2, endPt: Vec2): {
+	startAngle: number;
+	endAngle: number
+} {
 	const angleOf = (p: Vec2) => Math.atan2(p.y - center.y, p.x - center.x);
 	const rawStart = angleOf(startPt);
 	const rawMid = angleOf(midPt);
@@ -3493,10 +3917,14 @@ function fieldDrawRotation(propRotationDeg: number, symbolRotationDeg: number): 
  */
 function symbolFillColor(fillType: string, strokeColor: string, customColor?: string): string | undefined {
 	switch (fillType) {
-		case 'outline': return strokeColor;
-		case 'background': return schColors.componentBody;
-		case 'color': return customColor ?? schColors.componentBody;
-		default: return undefined;
+		case 'outline':
+			return strokeColor;
+		case 'background':
+			return schColors.componentBody;
+		case 'color':
+			return customColor ?? schColors.componentBody;
+		default:
+			return undefined;
 	}
 }
 
@@ -3508,13 +3936,19 @@ function dnpDimmedColor(value: string): string {
 	let r: number, g: number, b: number;
 	const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(value);
 	if (rgb) {
-		r = Number(rgb[1]); g = Number(rgb[2]); b = Number(rgb[3]);
+		r = Number(rgb[1]);
+		g = Number(rgb[2]);
+		b = Number(rgb[3]);
 	}
 	else {
 		const hex = /^#([\da-f]{6})$/i.exec(value);
-		if (!hex) return value;
+		if (!hex) {
+			return value;
+		}
 		const n = Number.parseInt(hex[1]!, 16);
-		r = (n >> 16) & 0xff; g = (n >> 8) & 0xff; b = n & 0xff;
+		r = (n >> 16) & 0xff;
+		g = (n >> 8) & 0xff;
+		b = n & 0xff;
 	}
 	const gray = 0.299 * r + 0.587 * g + 0.114 * b;
 	const bg = [40, 44, 52];
@@ -3524,33 +3958,70 @@ function dnpDimmedColor(value: string): string {
 
 function colorForKind(kind: SchPaintedItem['kind']): string {
 	switch (kind) {
-		case 'wire': return schColors.wire;
-		case 'bus': return schColors.bus;
-		case 'junction': return schColors.junction;
-		case 'no-connect': return schColors.noConnect;
-		case 'symbol-graphic': return schColors.componentOutline;
-		case 'pin': return schColors.pin;
-		case 'label': return schColors.labelLocal;
-		case 'sheet': return schColors.sheet;
-		case 'table': return schColors.note;
-		case 'image': return schColors.note;
-		case 'text': return schColors.reference;
-		case 'frame': return schColors.frame;
-		case 'dangling': return schColors.wire;
-		default: return schColors.componentOutline;
+		case 'wire':
+			return schColors.wire;
+		case 'bus':
+			return schColors.bus;
+		case 'junction':
+			return schColors.junction;
+		case 'no-connect':
+			return schColors.noConnect;
+		case 'symbol-graphic':
+			return schColors.componentOutline;
+		case 'pin':
+			return schColors.pin;
+		case 'label':
+			return schColors.labelLocal;
+		case 'sheet':
+			return schColors.sheet;
+		case 'table':
+			return schColors.note;
+		case 'image':
+			return schColors.note;
+		case 'text':
+			return schColors.reference;
+		case 'frame':
+			return schColors.frame;
+		case 'dangling':
+			return schColors.wire;
+		default:
+			return schColors.componentOutline;
 	}
 }
 
 // Lazily-resolved class registry — see the file-level comment for why this
 // doesn't need to (and shouldn't) hard-code an @kicad-io import path.
 let _Wire: any, _Bus: any, _BusEntry: any, _Junction: any, _NoConnect: any, _Symbol: any, _LibSymbols: any;
-let _GlobalLabel: any, _HierLabel: any, _Sheet: any, _Table: any, _Image: any, _Pin: any, _NetclassFlag: any, _RuleArea: any;
-let _Rect: any, _SymCircle: any, _SymArc: any, _Polyline: any, _Bezier: any, _At: any, _Size: any, _Text: any, _TextBox: any;
+let _GlobalLabel: any, _HierLabel: any, _Sheet: any, _Table: any, _Image: any, _Pin: any, _NetclassFlag: any,
+	_RuleArea: any;
+let _Rect: any, _SymCircle: any, _SymArc: any, _Polyline: any, _Bezier: any, _At: any, _Size: any, _Text: any,
+	_TextBox: any;
 
 export function registerSchematicIoClasses(classes: {
-	Wire?: any; Bus?: any; BusEntry?: any; Junction?: any; NoConnect?: any; Symbol?: any; LibSymbols?: any;
-	GlobalLabel?: any; HierLabel?: any; Sheet?: any; Table?: any; Image?: any; Pin?: any; NetclassFlag?: any; RuleArea?: any;
-	Rect?: any; SymCircle?: any; SymArc?: any; Polyline?: any; Bezier?: any; At?: any; Size?: any; Text?: any; TextBox?: any;
+	Wire?: any;
+	Bus?: any;
+	BusEntry?: any;
+	Junction?: any;
+	NoConnect?: any;
+	Symbol?: any;
+	LibSymbols?: any;
+	GlobalLabel?: any;
+	HierLabel?: any;
+	Sheet?: any;
+	Table?: any;
+	Image?: any;
+	Pin?: any;
+	NetclassFlag?: any;
+	RuleArea?: any;
+	Rect?: any;
+	SymCircle?: any;
+	SymArc?: any;
+	Polyline?: any;
+	Bezier?: any;
+	At?: any;
+	Size?: any;
+	Text?: any;
+	TextBox?: any;
 }): void {
 	_Wire = classes.Wire;
 	_Bus = classes.Bus;
@@ -3577,27 +4048,51 @@ export function registerSchematicIoClasses(classes: {
 	_Text = classes.Text;
 	_TextBox = classes.TextBox;
 }
+
 function getWireClass() { return _Wire; }
+
 function getBusClass() { return _Bus; }
+
 function getBusEntryClass() { return _BusEntry; }
+
 function getJunctionClass() { return _Junction; }
+
 function getNoConnectClass() { return _NoConnect; }
+
 function getSymbolClass() { return _Symbol; }
+
 function getLibSymbolsClass() { return _LibSymbols; }
+
 function getGlobalLabelClass() { return _GlobalLabel; }
+
 function getHierLabelClass() { return _HierLabel; }
+
 function getSheetClass() { return _Sheet; }
+
 function getTableClass() { return _Table; }
+
 function getImageClass() { return _Image; }
+
 function getPinClass() { return _Pin; }
+
 function getNetclassFlagClass() { return _NetclassFlag; }
+
 function getRuleAreaClass() { return _RuleArea; }
+
 function getRectClass() { return _Rect; }
+
 function getSymCircleClass() { return _SymCircle; }
+
 function getSymArcClass() { return _SymArc; }
+
 function getPolylineClass() { return _Polyline; }
+
 function getBezierClass() { return _Bezier; }
+
 function getAtClass() { return _At; }
+
 function getSizeClass() { return _Size; }
+
 function getTextClass() { return _Text; }
+
 function getTextBoxClass() { return _TextBox; }
