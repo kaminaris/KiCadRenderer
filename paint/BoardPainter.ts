@@ -27,6 +27,8 @@ export interface PaintedItem {
 	element: any;
 	netId?: number | null;
 	netName?: string | null;
+	/** Zone geometry belongs to one of Pcbnew's primary display modes. */
+	zoneDisplayMode?: ZoneDisplayMode;
 	// Captures whatever geometry this item needs to redraw itself — built
 	// once, replayed every frame against the current camera transform. See
 	// LayeredBoardScene.paint() below for how highlight color is threaded
@@ -52,6 +54,21 @@ export interface LayeredBoardScene {
 export interface LayerVisibilityState {
 	visible: boolean;
 	opacity: number;
+}
+
+/** Pcbnew's two primary zone-display actions. */
+export type ZoneDisplayMode = 'filled' | 'outline';
+
+/**
+ * KiCad lifts the active PCB layer above the ordinary board stack while
+ * keeping editor overlays above it.  The scene retains its canonical order;
+ * this derives the transient draw order needed for the active view.
+ */
+export function boardPaintOrder(layersPresent: readonly string[], activeLayer: string | null): string[] {
+	if (!activeLayer || !layersPresent.includes(activeLayer)) {
+		return [...layersPresent];
+	}
+	return [...layersPresent.filter(layer => layer !== activeLayer), activeLayer];
 }
 
 /** Options for BoardPainter.build() — kept off the hot paint() path. */
@@ -275,6 +292,8 @@ export class BoardPainter {
 		scene: LayeredBoardScene,
 		renderer: Renderer,
 		layerState: Map<string, LayerVisibilityState>,
+		activeLayer: string | null = null,
+		zoneDisplayMode: ZoneDisplayMode = 'filled',
 		highlightedIds: Set<string> = new Set(),
 		/** World-space visible rect — when given, items whose bbox falls
 		 *  entirely outside it are skipped. Omit to draw everything (e.g. the
@@ -282,7 +301,7 @@ export class BoardPainter {
 		 *  redone on every pan/zoom — see KicadRenderSession.render). */
 		viewBBox?: { x: number; y: number; w: number; h: number }
 	): void {
-		for (const layer of scene.layersPresent) {
+		for (const layer of boardPaintOrder(scene.layersPresent, activeLayer)) {
 			const state = layerState.get(layer);
 			if (!state || !state.visible) {
 				continue;
@@ -301,6 +320,9 @@ export class BoardPainter {
 			// every layer is done — see demo/main.ts's render().
 			renderer.beginBatch?.();
 			for (const item of items) {
+				if (item.zoneDisplayMode && item.zoneDisplayMode !== zoneDisplayMode) {
+					continue;
+				}
 				if (viewBBox && !bboxesIntersect(item.bbox, viewBBox)) {
 					continue;
 				}
@@ -372,8 +394,45 @@ export class BoardPainter {
 
 	protected buildZone(zone: any): PaintedItem[] {
 		const items: PaintedItem[] = [];
+		const zoneId = zone.getUuid() ?? 'zone';
 		const filledPolygons: { layer: string; points: { x: number; y: number }[] }[] =
 			typeof zone.getFilledPolygons === 'function' ? zone.getFilledPolygons() : [];
+		const outline: { x: number; y: number }[] = typeof zone.getPolygon === 'function' ? zone.getPolygon() : [];
+		const layers: string[] = typeof zone.getLayers === 'function' ? zone.getLayers() :
+			[...new Set(filledPolygons.map(polygon => polygon.layer))];
+		// Pcbnew uses `m_outlineWidth` for both the perimeter and hatch lines,
+		// initialized to one PCB internal unit (1 nm).  KiCad's GAL rasterizer
+		// promotes that to a thin display stroke.  Our renderers take world-mm
+		// widths, so use their smallest reliably visible equivalent rather than
+		// the zone's `min_thickness` copper width.
+		const displayOutlineWidth = 0.025;
+		const hatch = typeof zone.findFirstChildByName === 'function'
+			? zone.findFirstChildByName('hatch') : undefined;
+		const hatchStyle = String(hatch?.attributes?.[0]?.value ?? 'edge');
+		const hatchPitch = Number(hatch?.attributes?.[1]?.value);
+		const edgeHatches = hatchStyle === 'edge'
+			? buildZoneEdgeHatches(outline, Number.isFinite(hatchPitch) && hatchPitch > 0 ? hatchPitch : 0.5)
+			: [];
+
+		// Outline mode displays the authored zone boundary, not the derived
+		// edge of a fill. That also keeps unfilled zones visible.
+		if (outline.length >= 3) {
+			const points = outline.map(point => new Vec2(point.x, point.y));
+			const bbox = boundsOfPoints(outline);
+			for (const layer of layers) {
+				items.push({
+					id: `${ zoneId }:${ layer }:outline`, layer, kind: 'zone',
+					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: zone,
+					zoneDisplayMode: 'outline',
+					draw: (renderer, color) => {
+						renderer.polygon(points, { strokeColor: color, strokeWidth: displayOutlineWidth });
+						for (const [start, end] of edgeHatches) {
+							renderer.line([start, end], { strokeColor: color, strokeWidth: displayOutlineWidth });
+						}
+					},
+				});
+			}
+		}
 
 		filledPolygons.forEach((fp, idx) => {
 			if (fp.points.length < 3) {
@@ -382,7 +441,7 @@ export class BoardPainter {
 			const points = fp.points.map(p => new Vec2(p.x, p.y));
 			const bbox = boundsOfPoints(fp.points);
 			items.push({
-				id: `${ zone.getUuid() ?? 'zone' }:${ fp.layer }:${ idx }`,
+				id: `${ zoneId }:${ fp.layer }:fill:${ idx }`,
 				layer: fp.layer,
 				kind: 'zone',
 				shape: { type: 'rect', ...bbox },
@@ -392,6 +451,7 @@ export class BoardPainter {
 				// the actual components/traces on top of them.
 				hitTestable: false,
 				element: zone,
+				zoneDisplayMode: 'filled',
 				draw: (renderer, color) => {
 					// multiPolygon(), not polygon() — a zone fill (copper
 					// pour) is frequently concave (it weaves around
@@ -1355,6 +1415,98 @@ function boundsOfPoints(points: { x: number; y: number }[]): { x: number; y: num
 		maxY = Math.max(maxY, p.y);
 	}
 	return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
+ * Matches KiCad's `hatch edge <pitch>` zone-border style.  Pcbnew generates
+ * short 45° strokes which start on the perimeter and run into the zone,
+ * rather than hatching the entire area.  Its exact implementation lives in
+ * SHAPE_POLY_SET; this equivalent keeps the strokes inside a simple parsed
+ * zone polygon and works before any fill has been calculated.
+ */
+function buildZoneEdgeHatches(
+	outline: readonly { x: number; y: number }[],
+	pitch: number,
+): Array<[Vec2, Vec2]> {
+	const points = outline.length > 1
+		&& outline[0]!.x === outline[outline.length - 1]!.x
+		&& outline[0]!.y === outline[outline.length - 1]!.y
+		? outline.slice(0, -1)
+		: outline;
+	if (points.length < 3 || !Number.isFinite(pitch) || pitch <= 0) {
+		return [];
+	}
+
+	// The sign selects the normal pointing into the polygon, regardless of
+	// whether the KiCad file walks this contour clockwise or counter-clockwise.
+	let twiceArea = 0;
+	for (let index = 0; index < points.length; index++) {
+		const a = points[index]!;
+		const b = points[(index + 1) % points.length]!;
+		twiceArea += a.x * b.y - b.x * a.y;
+	}
+	const interiorOnLeft = twiceArea > 0;
+	const hatches: Array<[Vec2, Vec2]> = [];
+
+	for (let index = 0; index < points.length; index++) {
+		const start = points[index]!;
+		const end = points[(index + 1) % points.length]!;
+		const dx = end.x - start.x;
+		const dy = end.y - start.y;
+		const length = Math.hypot(dx, dy);
+		if (length < pitch * 0.25) {
+			continue;
+		}
+		const tx = dx / length;
+		const ty = dy / length;
+		const nx = interiorOnLeft ? -ty : ty;
+		const ny = interiorOnLeft ? tx : -tx;
+		// A 45° vector formed from the inward normal and the reverse edge
+		// tangent gives the same edge-whisker direction used by Pcbnew.
+		const diagonalX = (nx - tx) / Math.SQRT2;
+		const diagonalY = (ny - ty) / Math.SQRT2;
+
+		for (let distance = pitch * 0.5; distance < length; distance += pitch) {
+			const hatchStart = new Vec2(start.x + tx * distance, start.y + ty * distance);
+			let hatchLength = pitch;
+			let hatchEnd = new Vec2(
+				hatchStart.x + diagonalX * hatchLength,
+				hatchStart.y + diagonalY * hatchLength,
+			);
+			// Concave vertices can place a nominally inward 45° endpoint beyond
+			// another edge. Shorten it to retain KiCad's contained edge hatch.
+			if (!pointIsInsidePolygon(hatchEnd, points)) {
+				for (let iteration = 0; iteration < 8; iteration++) {
+					hatchLength *= 0.5;
+					const candidate = new Vec2(
+						hatchStart.x + diagonalX * hatchLength,
+						hatchStart.y + diagonalY * hatchLength,
+					);
+					if (pointIsInsidePolygon(candidate, points)) {
+						hatchEnd = candidate;
+						break;
+					}
+				}
+			}
+			if (pointIsInsidePolygon(hatchEnd, points) && hatchLength >= pitch * 0.125) {
+				hatches.push([hatchStart, hatchEnd]);
+			}
+		}
+	}
+	return hatches;
+}
+
+function pointIsInsidePolygon(point: { x: number; y: number }, polygon: readonly { x: number; y: number }[]): boolean {
+	let inside = false;
+	for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+		const a = polygon[index]!;
+		const b = polygon[previous]!;
+		if ((a.y > point.y) !== (b.y > point.y)
+			&& point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) {
+			inside = !inside;
+		}
+	}
+	return inside;
 }
 
 /** KiCad's FOOTPRINT::GetBoundingHull() uses pad/drawing geometry but skips

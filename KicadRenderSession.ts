@@ -51,8 +51,8 @@ import { Renderer }                    from './render/Renderer';
 import { Canvas2dRenderer }            from './render/Canvas2dRenderer';
 import { WebGLRenderer }               from './render/WebGLRenderer';
 import {
-	BoardPainter, defaultLayerState,
-	LayeredBoardScene, LayerVisibilityState, PaintedItem
+	BoardPainter, boardPaintOrder, defaultLayerState,
+	LayeredBoardScene, LayerVisibilityState, PaintedItem, ZoneDisplayMode
 }                                      from './paint/BoardPainter';
 import {
 	SchematicPainter, defaultSchLayerState,
@@ -187,6 +187,8 @@ export class KicadRenderSession {
 	protected backend: RenderBackend;
 	protected documentType: RenderDocumentType = 'board';
 	protected scene: LayeredBoardScene | null = null;
+	/** PCB editor's active layer. It is drawn above the ordinary board stack. */
+	protected activeBoardLayer: string | null = null;
 	protected layerState: Map<string, LayerVisibilityState> = new Map();
 	protected schScene: SchematicScene | null = null;
 	protected schLayerState: Map<string, SchLayerVisibilityState> = new Map();
@@ -208,6 +210,7 @@ export class KicadRenderSession {
 	/** Overrides drawGrid()'s default spacing — see setGridSpacing(). null
 	 *  means "use the built-in default" (1.27mm schematic / 0.5mm board). */
 	protected gridSpacingMm: number | null = null;
+	protected gridVisible = true;
 	/** Hand-drawn editor's in-progress tool state — see drawEditPreview(). */
 	protected editPreview: EditPreviewState | null = null;
 	/** Board-side "outline this footprint" cue — see setFootprintHighlight()/
@@ -218,6 +221,7 @@ export class KicadRenderSession {
 	protected boardHighlight: { bbox: { x: number; y: number; w: number; h: number } } | null = null;
 	protected ratsnestLines: BoardRatsnestLine[] = [];
 	protected ratsnestVisible = true;
+	protected zoneDisplayMode: ZoneDisplayMode = 'filled';
 	/**
 	 * Snapshot-based undo/redo: full schematic text before each mutation, not
 	 * hand-written inverse commands. Chosen because rewireSchematic (circuit
@@ -938,8 +942,22 @@ export class KicadRenderSession {
 
 	get isRatsnestVisible(): boolean { return this.ratsnestVisible; }
 
+	get currentZoneDisplayMode(): ZoneDisplayMode { return this.zoneDisplayMode; }
+
 	setRatsnestVisible(visible: boolean): void {
 		this.ratsnestVisible = visible;
+		this.scheduleRender();
+	}
+
+	/** Switches between Pcbnew's filled-pour and zone-boundary display modes. */
+	setZoneDisplayMode(mode: ZoneDisplayMode): void {
+		if (this.zoneDisplayMode === mode) {
+			return;
+		}
+		this.zoneDisplayMode = mode;
+		// The WebGL static buffer preserves draw calls, so filtering zone
+		// geometry requires a rebuild. Canvas2D honors the new mode next frame.
+		this.geometryDirty = true;
 		this.scheduleRender();
 	}
 
@@ -1598,6 +1616,15 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	/** Shows or hides the procedural editor grid without changing snapping. */
+	setGridVisible(visible: boolean): void {
+		if (this.gridVisible === visible) {
+			return;
+		}
+		this.gridVisible = visible;
+		this.scheduleRender();
+	}
+
 	/** Color is baked into WebGL scene buffers, unlike Canvas2D's draw-time
 	 * styles. Rebuild the scene after replacing the shared schematic palette. */
 	refreshTheme(): void {
@@ -1629,6 +1656,23 @@ export class KicadRenderSession {
 			this.geometryDirty = true;
 			this.scheduleRender();
 		}
+	}
+
+	/**
+	 * Brings the selected PCB layer to the front of the board geometry, like
+	 * PCB Editor's SetHighContrastLayer()/SetTopLayer path. UI and selection
+	 * overlays remain in the dynamic overlay pass above it.
+	 */
+	setActiveBoardLayer(layer: string): void {
+		if (this.documentType !== 'board' || !this.scene?.layersPresent.includes(layer)
+			|| this.activeBoardLayer === layer) {
+			return;
+		}
+		this.activeBoardLayer = layer;
+		// WebGL bakes paint order into its static vertex buffer; Canvas2D picks
+		// up the new order on its next frame. Marking dirty handles both paths.
+		this.geometryDirty = true;
+		this.scheduleRender();
 	}
 
 	setBackend(backend: RenderBackend): void {
@@ -4391,7 +4435,8 @@ export class KicadRenderSession {
 						this.schScene!, renderer, this.schLayerState, highlighted, this.highlightedNetIds, viewBBox);
 				}
 				else {
-					this.painter.paint(this.scene!, renderer, this.layerState, highlighted, viewBBox);
+					this.painter.paint(this.scene!, renderer, this.layerState, this.activeBoardLayer, this.zoneDisplayMode,
+						highlighted, viewBBox);
 				}
 			};
 
@@ -4406,7 +4451,9 @@ export class KicadRenderSession {
 					this.geometryDirty = false;
 				}
 				renderer.beginDynamicFrame!();
-				this.drawGrid(renderer);
+				if (this.gridVisible) {
+					this.drawGrid(renderer);
+				}
 				// Draws the grid (behind everything) then the already-uploaded
 				// static scene on top of it. The overlay content below must be
 				// a SEPARATE dynamic pass started only after this flush() —
@@ -4420,7 +4467,9 @@ export class KicadRenderSession {
 				renderer.beginDynamicFrame!();
 			}
 			else {
-				this.drawGrid(renderer);
+				if (this.gridVisible) {
+					this.drawGrid(renderer);
+				}
 				// Canvas2D redraws the whole scene every frame (see this
 				// method's doc comment) — cull to the current viewport, grown
 				// 20% so items just outside the edge don't pop in/out on pan.
@@ -4747,7 +4796,11 @@ export class KicadRenderSession {
 			// while single-layer SMD pads (no ordering ambiguity) looked
 			// correct. Sorted once per frame; footprint item counts are
 			// small (tens, not thousands), so this is not worth caching.
-			const sorted = [...items].sort((a, b) => layerPaintRank(a.layer) - layerPaintRank(b.layer));
+			const layers = [...new Set(items.map(item => item.layer))]
+				.sort((a, b) => layerPaintRank(a) - layerPaintRank(b));
+			const activeOrder = new Map(boardPaintOrder(layers, this.activeBoardLayer)
+				.map((layer, index) => [layer, index]));
+			const sorted = [...items].sort((a, b) => activeOrder.get(a.layer)! - activeOrder.get(b.layer)!);
 			for (const item of sorted) {
 				const state = this.layerState.get(item.layer);
 				if (!state || !state.visible) {
