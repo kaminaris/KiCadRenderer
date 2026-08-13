@@ -16,7 +16,7 @@ import { PaintedShape, shapeToBBox, bboxesIntersect } from './PaintedShape';
 export interface PaintedItem {
 	id: string;
 	layer: string;
-	kind: 'pad' | 'track' | 'via' | 'footprint-ref' | 'zone' | 'graphic';
+	kind: 'pad' | 'track' | 'via' | 'footprint-ref' | 'footprint' | 'zone' | 'graphic';
 	// Precise shape for hit-testing; bbox is derived from it and used only
 	// as a broad-phase filter (see paint/HitTest.ts). Zones don't
 	// participate in hit-testing for the spike (large fills would dominate
@@ -25,6 +25,8 @@ export interface PaintedItem {
 	bbox: { x: number; y: number; w: number; h: number };
 	hitTestable: boolean;
 	element: any;
+	netId?: number | null;
+	netName?: string | null;
 	// Captures whatever geometry this item needs to redraw itself — built
 	// once, replayed every frame against the current camera transform. See
 	// LayeredBoardScene.paint() below for how highlight color is threaded
@@ -199,6 +201,72 @@ export class BoardPainter {
 	}
 
 	/**
+	 * Incrementally rebuilds ONE footprint's own PaintedItems in an
+	 * already-built scene, without re-walking the rest of the board — used
+	 * for continuous drag/rotate/flip, where re-running build() (which
+	 * re-decodes stroke-font text and recomputes pad matrices for every
+	 * OTHER unchanged footprint too) on every animation frame is the
+	 * dominant cost regardless of how little actually moved. Mutates
+	 * scene.layerBuckets/hitTestItems/layersPresent in place; does NOT
+	 * touch ratsnest (see KicadRenderSession.refreshBoardRatsnest — that
+	 * stays a deliberate, separate, less-frequent recompute).
+	 */
+	updateFootprintItems(scene: LayeredBoardScene, board: any, footprint: any): void {
+		this.removeFootprintItems(scene, footprint);
+
+		const globalLayers = this.getGlobalLayerNames(board);
+		for (const item of this.buildFootprint(footprint, globalLayers)) {
+			const bucket = scene.layerBuckets.get(item.layer);
+			if (bucket) {
+				bucket.push(item);
+			}
+			else {
+				scene.layerBuckets.set(item.layer, [item]);
+			}
+			if (item.hitTestable) {
+				scene.hitTestItems.push(item);
+			}
+		}
+
+		// Cheap (a few dozen possible layers, not board-size-dependent) —
+		// covers the rare case a flip empties or (re)populates a layer.
+		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0);
+	}
+
+	/**
+	 * Removal half of updateFootprintItems, split out for
+	 * KicadRenderSession.beginBoardDragPreview — a live drag draws the
+	 * footprint through a separate per-frame preview path (see
+	 * buildFootprintPreviewItems) instead of baking it back into this scene
+	 * on every frame, so the static scene just needs it GONE for the
+	 * duration of the drag, with no immediate re-add. Mutates
+	 * scene.layerBuckets/hitTestItems/layersPresent in place.
+	 */
+	removeFootprintItems(scene: LayeredBoardScene, footprint: any): void {
+		const origin = footprint.getOrigin();
+		const footprintId: string = footprint.getUuid() ?? `fp:${ origin.x },${ origin.y }`;
+		const belongsToFootprint = (id: string) => id === footprintId || id.startsWith(`${ footprintId }:`);
+
+		for (const [layer, items] of scene.layerBuckets) {
+			if (items.some(it => belongsToFootprint(it.id))) {
+				scene.layerBuckets.set(layer, items.filter(it => !belongsToFootprint(it.id)));
+			}
+		}
+		scene.hitTestItems = scene.hitTestItems.filter(it => !belongsToFootprint(it.id));
+		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0);
+	}
+
+	/**
+	 * Builds a footprint's own PaintedItems without touching any scene — the
+	 * live drag-preview path (KicadRenderSession.updateBoardDragPreview)
+	 * calls this every frame and draws the result through the cheap
+	 * per-frame dynamic buffer instead of baking it into the static one.
+	 */
+	buildFootprintPreviewItems(board: any, footprint: any): PaintedItem[] {
+		return this.buildFootprint(footprint, this.getGlobalLayerNames(board));
+	}
+
+	/**
 	 * Draws a scene built by build(). Cheap: just replays already-built draw
 	 * closures per visible layer, in order, with that layer's opacity — no
 	 * parsing, no element-tree walking, safe to call every frame.
@@ -236,7 +304,18 @@ export class BoardPainter {
 				if (viewBBox && !bboxesIntersect(item.bbox, viewBBox)) {
 					continue;
 				}
-				const color = highlightedIds.has(item.id) ? '#ffcc00' : baseColor;
+				const highlighted = highlightedIds.has(item.id);
+				if (item.kind === 'footprint') {
+					// The synthetic footprint item has no normal visual of its own,
+					// but its union bbox makes whole-footprint selection visible even
+					// when the click landed on non-hit-testable silkscreen geometry.
+					if (highlighted) {
+						renderer.rect(new Vec2(item.bbox.x, item.bbox.y), item.bbox.w, item.bbox.h,
+							{ strokeColor: '#ffcc00', strokeWidth: 0.18 });
+					}
+					continue;
+				}
+				const color = highlighted ? '#ffcc00' : baseColor;
 				item.draw(renderer, color);
 			}
 			renderer.endBatch?.();
@@ -260,6 +339,8 @@ export class BoardPainter {
 
 		return {
 			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: true, element: segment,
+			netId: typeof segment.getNetId === 'function' ? segment.getNetId() : null,
+			netName: typeof segment.getNetName === 'function' ? segment.getNetName() : null,
 			draw: (renderer, color) => {
 				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: color, strokeWidth: width });
 			},
@@ -429,22 +510,30 @@ export class BoardPainter {
 		if (typeof footprint.findChildrenByClass === 'function') {
 			if (getFpLineClass()) {
 				for (const line of footprint.findChildrenByClass(getFpLineClass())) {
-					items.push(this.buildFpLine(line, footprintMatrix));
+					items.push(this.buildFpLine(line, footprintMatrix, footprintId));
 				}
 			}
 			if (getFpRectClass()) {
 				for (const rect of footprint.findChildrenByClass(getFpRectClass())) {
-					items.push(this.buildFpRect(rect, footprintMatrix));
+					items.push(this.buildFpRect(rect, footprintMatrix, footprintId));
 				}
 			}
 			if (getFpCircleClass()) {
 				for (const circle of footprint.findChildrenByClass(getFpCircleClass())) {
-					items.push(this.buildFpCircle(circle, footprintMatrix));
+					items.push(this.buildFpCircle(circle, footprintMatrix, footprintId));
 				}
 			}
 			if (getFpArcClass()) {
 				for (const arc of footprint.findChildrenByClass(getFpArcClass())) {
-					const item = this.buildFpArc(arc, footprintMatrix, origin.rotation ?? 0);
+					const item = this.buildFpArc(arc, footprintMatrix, origin.rotation ?? 0, footprintId);
+					if (item) {
+						items.push(item);
+					}
+				}
+			}
+			if (getFpPolyClass()) {
+				for (const poly of footprint.findChildrenByClass(getFpPolyClass())) {
+					const item = this.buildFpPoly(poly, footprintMatrix, footprintId);
 					if (item) {
 						items.push(item);
 					}
@@ -456,13 +545,38 @@ export class BoardPainter {
 			// was entirely unrendered before this.
 			if (getFpTextClass()) {
 				for (const text of footprint.findChildrenByClass(getFpTextClass())) {
-					const item = this.buildTextElement(text, footprintMatrix);
+					const item = this.buildTextElement(text, footprintMatrix, footprintId);
 					if (item) {
 						items.push(item);
 					}
 				}
 			}
 		}
+
+		// KiCad does not select a footprint through an axis-aligned union of
+		// its rendering bboxes. FOOTPRINT::GetBoundingHull() constructs a
+		// convex hull from its pads and drawings, explicitly excluding fields
+		// (Reference/Value/custom properties). Mirror that here: a property
+		// positioned far away must never make the empty space between it and
+		// the component selectable.
+		const hullPoints = convexHull(footprintHullPoints(items));
+		const fallbackHull = hullPoints.length >= 3 ? hullPoints : [
+			{ x: origin.x - 1, y: origin.y - 1 },
+			{ x: origin.x + 1, y: origin.y - 1 },
+			{ x: origin.x + 1, y: origin.y + 1 },
+			{ x: origin.x - 1, y: origin.y + 1 },
+		];
+		const shape: PaintedShape = { type: 'polygon', points: fallbackHull };
+		items.unshift({
+			id: footprintId,
+			layer: footprintLayer,
+			kind: 'footprint',
+			shape,
+			bbox: shapeToBBox(shape),
+			hitTestable: true,
+			element: footprint,
+			draw: () => {},
+		});
 
 		return items;
 	}
@@ -486,7 +600,7 @@ export class BoardPainter {
 	 *    color — not KiCad's exact rounded-margin swatch, but visibly
 	 *    correct (readable light text on a filled patch) rather than absent.
 	 */
-	protected buildTextElement(textEl: any, footprintMatrix: Matrix3 | null): PaintedItem | null {
+	protected buildTextElement(textEl: any, footprintMatrix: Matrix3 | null, footprintId?: string): PaintedItem | null {
 		if (!textEl.value) {
 			return null;
 		}
@@ -496,7 +610,12 @@ export class BoardPainter {
 		const layer: string = typeof textEl.getLayer === 'function' ? textEl.getLayer() : 'F.SilkS';
 		const isBack = layer.startsWith('B.');
 		const knockout = isKnockoutLayer(textEl);
-		const id = textEl.getUuid() ?? `text:${ layer }:${ textEl.value }`;
+		const rawId = textEl.getUuid() ?? `text:${ layer }:${ textEl.value }`;
+		// Namespaced under footprintId when this is a footprint's own fp_text
+		// (footprintMatrix non-null) — see buildFpLine's doc comment. Board-
+		// level standalone gr_text (footprintId undefined) has no owner to
+		// namespace under and keeps its bare id.
+		const id = footprintId ? `${ footprintId }:${ rawId }` : rawId;
 
 		const cacheRings = getRenderCacheRings(textEl);
 		if (cacheRings) {
@@ -549,13 +668,19 @@ export class BoardPainter {
 		};
 	}
 
-	protected buildFpLine(line: any, footprintMatrix: Matrix3): PaintedItem {
+	protected buildFpLine(line: any, footprintMatrix: Matrix3, footprintId: string): PaintedItem {
 		const { start, end } = line.getStartEnd();
 		const layer = line.getLayer();
 		const width = typeof line.getStroke === 'function' ? line.getStroke().width : 0.1;
 		const worldStart = footprintMatrix.transform(new Vec2(start.x, start.y));
 		const worldEnd = footprintMatrix.transform(new Vec2(end.x, end.y));
-		const id = line.getUuid() ?? `fp-line:${ layer }:${ start.x },${ start.y }-${ end.x },${ end.y }`;
+		// Namespaced under footprintId — see updateFootprintItems' doc comment:
+		// a bare line.getUuid() (real boards assign one to almost every
+		// graphic) doesn't match footprintId's own prefix, so the incremental
+		// drag rebuild's cleanup pass never removes the old-position copy —
+		// exactly what produced the "ghostly copies" left behind on every
+		// dragged frame.
+		const id = `${ footprintId }:${ line.getUuid() ?? `fp-line:${ layer }:${ start.x },${ start.y }-${ end.x },${ end.y }` }`;
 		const shape: PaintedShape = { type: 'segment', x1: worldStart.x, y1: worldStart.y, x2: worldEnd.x, y2: worldEnd.y, width };
 
 		return {
@@ -566,7 +691,7 @@ export class BoardPainter {
 		};
 	}
 
-	protected buildFpRect(rect: any, footprintMatrix: Matrix3): PaintedItem {
+	protected buildFpRect(rect: any, footprintMatrix: Matrix3, footprintId: string): PaintedItem {
 		const { start, end } = rect.getStartEnd();
 		const layer = rect.getLayer();
 		const width = typeof rect.getStroke === 'function' ? rect.getStroke().width : 0.1;
@@ -579,7 +704,8 @@ export class BoardPainter {
 			new Vec2(end.x, end.y), new Vec2(start.x, end.y),
 		];
 		const worldCorners = localCorners.map(p => footprintMatrix.transform(p));
-		const id = rect.getUuid() ?? `fp-rect:${ layer }:${ start.x },${ start.y }`;
+		// Namespaced under footprintId — see buildFpLine's doc comment.
+		const id = `${ footprintId }:${ rect.getUuid() ?? `fp-rect:${ layer }:${ start.x },${ start.y }` }`;
 		const shape: PaintedShape = { type: 'polygon', points: worldCorners.map(p => ({ x: p.x, y: p.y })) };
 
 		return {
@@ -590,7 +716,7 @@ export class BoardPainter {
 		};
 	}
 
-	protected buildFpCircle(circle: any, footprintMatrix: Matrix3): PaintedItem {
+	protected buildFpCircle(circle: any, footprintMatrix: Matrix3, footprintId: string): PaintedItem {
 		const center = circle.getCenter();
 		const end = circle.getEnd();
 		const localRadius = Math.hypot(end.x - center.x, end.y - center.y);
@@ -599,7 +725,8 @@ export class BoardPainter {
 		const worldCenter = footprintMatrix.transform(new Vec2(center.x, center.y));
 		// Footprint rotation doesn't distort a circle's radius (uniform
 		// scale-free rotation), so the local radius carries over unchanged.
-		const id = circle.getUuid() ?? `fp-circle:${ layer }:${ center.x },${ center.y }`;
+		// Namespaced under footprintId — see buildFpLine's doc comment.
+		const id = `${ footprintId }:${ circle.getUuid() ?? `fp-circle:${ layer }:${ center.x },${ center.y }` }`;
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: localRadius };
 
 		return {
@@ -610,7 +737,7 @@ export class BoardPainter {
 		};
 	}
 
-	protected buildFpArc(arc: any, footprintMatrix: Matrix3, footprintRotationDeg: number): PaintedItem | null {
+	protected buildFpArc(arc: any, footprintMatrix: Matrix3, footprintRotationDeg: number, footprintId: string): PaintedItem | null {
 		if (typeof arc.getArcCenterRadiusAngles !== 'function') {
 			return null;
 		}
@@ -634,7 +761,8 @@ export class BoardPainter {
 		const width = typeof arc.getStroke === 'function' ? arc.getStroke().width : 0.1;
 		const worldCenter = footprintMatrix.transform(new Vec2(centerX, centerY));
 		const rotationRad = Angle.degToRad(footprintRotationDeg);
-		const id = arc.getUuid() ?? `fp-arc:${ layer }:${ centerX },${ centerY }`;
+		// Namespaced under footprintId — see buildFpLine's doc comment.
+		const id = `${ footprintId }:${ arc.getUuid() ?? `fp-arc:${ layer }:${ centerX },${ centerY }` }`;
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: radius };
 
 		return {
@@ -646,6 +774,32 @@ export class BoardPainter {
 					{ strokeColor: color, strokeWidth: width || 0.1 },
 				);
 			},
+		};
+	}
+
+	/** Footprint-local filled geometry used for logos, branding, and complex
+	 * silkscreen/copper artwork. multiPolygon keeps concave outlines correct
+	 * on both Canvas2D and WebGL rather than relying on fan triangulation. */
+	protected buildFpPoly(poly: any, footprintMatrix: Matrix3, footprintId: string): PaintedItem | null {
+		const points: Array<{ x: number; y: number }> = typeof poly.getPoints === 'function' ? poly.getPoints() : [];
+		if (points.length < 3) {
+			return null;
+		}
+		const layer = typeof poly.getLayer === 'function' ? poly.getLayer() : 'F.SilkS';
+		const strokeWidth = typeof poly.getStroke === 'function' ? poly.getStroke().width : 0;
+		const fill = typeof poly.getSimpleChildValue === 'function' ? poly.getSimpleChildValue('fill') : undefined;
+		const filled = fill === true || fill === 'yes' || fill === 'solid';
+		const worldPoints = points.map(point => footprintMatrix.transform(new Vec2(point.x, point.y)));
+		const shape: PaintedShape = { type: 'polygon', points: worldPoints.map(point => ({ x: point.x, y: point.y })) };
+		// Namespaced under footprintId — see buildFpLine's doc comment.
+		const id = `${ footprintId }:${ poly.getUuid?.() ?? `fp-poly:${ layer }:${ points[0]!.x },${ points[0]!.y }` }`;
+		return {
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: poly,
+			draw: (renderer, color) => renderer.multiPolygon([worldPoints], {
+				fillColor: filled ? color : undefined,
+				strokeColor: strokeWidth > 0 ? color : undefined,
+				strokeWidth: strokeWidth || undefined,
+			}),
 		};
 	}
 
@@ -725,6 +879,8 @@ export class BoardPainter {
 			for (const layer of buckets) {
 				items.push({
 					id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
+					netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
+					netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
 					draw: (renderer, color) => {
 						if (isNpth) {
 							renderer.circle(worldCenter, size.width / 2, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
@@ -753,6 +909,8 @@ export class BoardPainter {
 				for (const layer of buckets) {
 					items.push({
 						id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
+						netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
+						netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
 						draw: (renderer, color) => {
 							if (isNpth) {
 								renderer.polygon(worldCorners, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
@@ -773,6 +931,8 @@ export class BoardPainter {
 					for (const layer of buckets) {
 						items.push({
 							id: `${ id }:poly${ ri }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
+							netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
+							netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
 							draw: (renderer, color) => {
 								if (isNpth) {
 									renderer.polygon(worldCorners, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
@@ -822,6 +982,8 @@ export class BoardPainter {
 			for (const layer of buckets) {
 				items.push({
 					id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
+					netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
+					netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
 					draw: (renderer, color) => {
 						if (isNpth) {
 							renderer.polygon(worldCorners, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
@@ -933,6 +1095,8 @@ export class BoardPainter {
 
 		return [{
 			id, layer: 'Vias', kind: 'via', shape, bbox: shapeToBBox(shape), hitTestable: true, element: via,
+			netId: typeof via.getNetId === 'function' ? via.getNetId() : null,
+			netName: typeof via.getNetName === 'function' ? via.getNetName() : null,
 			draw: (renderer, color) => {
 				// Vias are drilled through-holes — draw the annular copper
 				// ring, then punch the hole by drawing the board background
@@ -1193,17 +1357,93 @@ function boundsOfPoints(points: { x: number; y: number }[]): { x: number; y: num
 	return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+/** KiCad's FOOTPRINT::GetBoundingHull() uses pad/drawing geometry but skips
+ * fields. Keep the same selection boundary rather than using display-text
+ * bboxes, which can sit many millimetres from their footprint. */
+function footprintHullPoints(items: PaintedItem[]): { x: number; y: number }[] {
+	const points: { x: number; y: number }[] = [];
+	for (const item of items) {
+		if (item.kind === 'footprint-ref') {
+			continue;
+		}
+		switch (item.shape.type) {
+			case 'rect':
+				points.push(
+					{ x: item.shape.x, y: item.shape.y },
+					{ x: item.shape.x + item.shape.w, y: item.shape.y },
+					{ x: item.shape.x + item.shape.w, y: item.shape.y + item.shape.h },
+					{ x: item.shape.x, y: item.shape.y + item.shape.h },
+				);
+				break;
+			case 'segment': {
+				const dx = item.shape.x2 - item.shape.x1;
+				const dy = item.shape.y2 - item.shape.y1;
+				const length = Math.hypot(dx, dy) || 1;
+				const offsetX = (-dy / length) * item.shape.width / 2;
+				const offsetY = (dx / length) * item.shape.width / 2;
+				points.push(
+					{ x: item.shape.x1 + offsetX, y: item.shape.y1 + offsetY },
+					{ x: item.shape.x1 - offsetX, y: item.shape.y1 - offsetY },
+					{ x: item.shape.x2 + offsetX, y: item.shape.y2 + offsetY },
+					{ x: item.shape.x2 - offsetX, y: item.shape.y2 - offsetY },
+				);
+				break;
+			}
+			case 'circle':
+				for (let i = 0; i < 16; i++) {
+					const angle = (i * 2 * Math.PI) / 16;
+					points.push({ x: item.shape.cx + item.shape.r * Math.cos(angle), y: item.shape.cy + item.shape.r * Math.sin(angle) });
+				}
+				break;
+			case 'polygon':
+				points.push(...item.shape.points);
+				break;
+		}
+	}
+	return points;
+}
+
+/** Monotonic-chain convex hull, equivalent to the hull KiCad builds from
+ * transformed footprint pads and drawings before accurate footprint picking. */
+function convexHull(points: { x: number; y: number }[]): { x: number; y: number }[] {
+	const sorted = [...points]
+		.sort((a, b) => a.x - b.x || a.y - b.y)
+		.filter((point, index, all) => index === 0 || point.x !== all[index - 1]!.x || point.y !== all[index - 1]!.y);
+	if (sorted.length <= 2) {
+		return sorted;
+	}
+	const cross = (origin: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) =>
+		(a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
+	const lower: { x: number; y: number }[] = [];
+	for (const point of sorted) {
+		while (lower.length >= 2 && cross(lower[lower.length - 2]!, lower[lower.length - 1]!, point) <= 0) {
+			lower.pop();
+		}
+		lower.push(point);
+	}
+	const upper: { x: number; y: number }[] = [];
+	for (const point of [...sorted].reverse()) {
+		while (upper.length >= 2 && cross(upper[upper.length - 2]!, upper[upper.length - 1]!, point) <= 0) {
+			upper.pop();
+		}
+		upper.push(point);
+	}
+	lower.pop();
+	upper.pop();
+	return lower.concat(upper);
+}
+
 // Lazily require the @kicad-io classes so this module doesn't need a
 // hard-coded relative path baked in at author time — the consuming app
 // (which has the @kicad-io/* path alias configured) passes real instances
 // in; these helpers only need the *classes* for findChildrenByClass()
 // lookups, resolved from the same module the caller already imported.
 let _Footprint: any, _Segment: any, _Via: any, _Pad: any, _Zone: any, _Layers: any, _GrLine: any, _GrArc: any, _GrRect: any, _GrCircle: any;
-let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _Dimension: any, _GrText: any, _FpText: any, _TrackArc: any;
+let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _FpPoly: any, _Dimension: any, _GrText: any, _FpText: any, _TrackArc: any;
 export function registerKicadIoClasses(classes: {
 	Footprint: any; Segment: any; Via: any; Pad: any; Zone: any;
 	Layers: any; GrLine: any; GrArc: any; GrRect: any; GrCircle: any;
-	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; Dimension?: any; GrText?: any; FpText?: any;
+	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; FpPoly?: any; Dimension?: any; GrText?: any; FpText?: any;
 	TrackArc?: any;
 }): void {
 	_Footprint = classes.Footprint;
@@ -1220,6 +1460,7 @@ export function registerKicadIoClasses(classes: {
 	_FpRect = classes.FpRect;
 	_FpCircle = classes.FpCircle;
 	_FpArc = classes.FpArc;
+	_FpPoly = classes.FpPoly;
 	_Dimension = classes.Dimension;
 	_GrText = classes.GrText;
 	_FpText = classes.FpText;
@@ -1239,6 +1480,7 @@ function getFpLineClass() { return _FpLine; }
 function getFpRectClass() { return _FpRect; }
 function getFpCircleClass() { return _FpCircle; }
 function getFpArcClass() { return _FpArc; }
+function getFpPolyClass() { return _FpPoly; }
 function getDimensionClass() { return _Dimension; }
 function getGrTextClass() { return _GrText; }
 function getFpTextClass() { return _FpText; }

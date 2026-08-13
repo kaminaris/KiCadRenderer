@@ -29,6 +29,9 @@ import { KicadElementGlobalLabel, type KicadGlobalLabelShape } from '@kicad-io/K
 import { KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
 import { KicadElementNetclassFlag, type KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
 import { KicadElementSymbol }          from '@kicad-io/KicadElementSymbol';
+import { KicadElementFootprint }       from '@kicad-io/KicadElementFootprint';
+import { KicadElementSegment }         from '@kicad-io/KicadElementStartEnd';
+import { KicadElementVia }             from '@kicad-io/KicadElementVia';
 import { KicadElementSheet }           from '@kicad-io/KicadElementSheet';
 import { KicadElementPin }             from '@kicad-io/KicadElementPin';
 import { KicadElementLibSymbols }      from '@kicad-io/KicadElementLibSymbols';
@@ -49,14 +52,16 @@ import { Canvas2dRenderer }            from './render/Canvas2dRenderer';
 import { WebGLRenderer }               from './render/WebGLRenderer';
 import {
 	BoardPainter, defaultLayerState,
-	LayeredBoardScene, LayerVisibilityState
+	LayeredBoardScene, LayerVisibilityState, PaintedItem
 }                                      from './paint/BoardPainter';
 import {
 	SchematicPainter, defaultSchLayerState,
 	SchematicScene, SchLayerVisibilityState, SchematicSheetRef, SchematicDocInfo, SchPaintedItem
 }                                      from './paint/SchematicPainter';
-import { boardBackgroundColor }      from './paint/LayerColors';
-import { schematicBackgroundColor }  from './paint/SchematicColors';
+import { boardBackgroundColor, styleForLayer } from './paint/LayerColors';
+import { layerPaintRank } from './paint/LayerOrder';
+import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/BoardRatsnest';
+import { schematicBackgroundColor, schematicGridColor }  from './paint/SchematicColors';
 import { hitTest }                     from './paint/HitTest';
 import { distanceToSegment }           from './paint/PaintedShape';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry } from './paint/TextPaint';
@@ -139,6 +144,7 @@ export type EditPreviewState =
 		kind: 'directive-label'; anchor: Vec2; text: string;
 		shape: KicadDirectiveLabelShape; rotation: number
 	}
+	| { kind: 'route'; points: Vec2[]; cursor: Vec2; width: number }
 	/** Power symbols place in one click (like junction/no-connect) — no
 	 *  glyph preview needed, just a cursor-follow marker. */
 	| { kind: 'power'; cursor: Vec2 }
@@ -187,6 +193,10 @@ export class KicadRenderSession {
 	/** Retained across loadSchematicText so moveSymbolByRef can mutate + rebuild the scene without re-parsing text. */
 	protected schematicRoot: { rootElement: any } | null = null;
 	protected schematicDocInfo: SchematicDocInfo | undefined = undefined;
+	/** Board-side counterpart of schematicRoot — retained across loadBoardText
+	 *  so board mutation methods (moveFootprintByPaintId, ...) can mutate +
+	 *  rebuild the scene without re-parsing text. */
+	protected boardRoot: { rootElement: any } | null = null;
 	/** Multi-select-capable — see select()/selectMultiple()/selection/selectionIds. */
 	protected selectedIds: Set<string> = new Set();
 	/** Hover-driven net highlight IDs — painted in the same highlight color as selection. */
@@ -200,6 +210,14 @@ export class KicadRenderSession {
 	protected gridSpacingMm: number | null = null;
 	/** Hand-drawn editor's in-progress tool state — see drawEditPreview(). */
 	protected editPreview: EditPreviewState | null = null;
+	/** Board-side "outline this footprint" cue — see setFootprintHighlight()/
+	 *  drawBoardHighlight(). Boards have no click-select/highlight machinery
+	 *  otherwise (see the harmonic-munching-trinket plan's Phase 7); this is
+	 *  deliberately the minimum needed to make a cross-tab schematic
+	 *  selection visible on a board, not a step toward full PCB interaction. */
+	protected boardHighlight: { bbox: { x: number; y: number; w: number; h: number } } | null = null;
+	protected ratsnestLines: BoardRatsnestLine[] = [];
+	protected ratsnestVisible = true;
 	/**
 	 * Snapshot-based undo/redo: full schematic text before each mutation, not
 	 * hand-written inverse commands. Chosen because rewireSchematic (circuit
@@ -216,6 +234,39 @@ export class KicadRenderSession {
 	protected redoLabels: string[] = [];
 	protected static readonly maxUndoDepth = 100;
 	protected frameScheduled = false;
+	/** True between a STRUCTURAL board AST mutation (add/delete/route/zone
+	 *  edit/...) and the next full scene rebuild — see rebuildActiveScene()'s
+	 *  board branch / rebuildBoardSceneIfPending(). Deferred to render()
+	 *  (at most once per animation frame) rather than run synchronously,
+	 *  since these can in principle fire faster than the display refresh
+	 *  rate too and a full board rebuild is expensive regardless of cause. */
+	protected boardStructureDirty = false;
+	/** Footprints awaiting an INCREMENTAL rebuild — see
+	 *  scheduleFootprintRebuild's doc comment. This is the path a
+	 *  continuous drag (moveFootprintByPaintId/translateBoardSelection)
+	 *  actually takes; boardStructureDirty above is the full-rebuild
+	 *  fallback every other board mutation still uses. */
+	protected boardDirtyFootprints = new Set<any>();
+	/** Footprints currently being dragged, KiCad VIEW-preview style (see
+	 *  beginBoardDragPreview's doc comment): removed from the real scene (one
+	 *  full static retessellation, not one per frame) and drawn instead
+	 *  through the cheap per-frame dynamic path via drawBoardDragPreview,
+	 *  using whatever items were last built for it here. Re-added to the real
+	 *  scene (another one-time retessellation) at drag-end. */
+	protected dragPreviewFootprints = new Map<any, PaintedItem[]>();
+	/** Ratsnest airwires whose 'from' or 'to' endpoint sits on a pad
+	 *  currently under drag-preview — see beginBoardDragPreview's doc
+	 *  comment and captureDragPreviewRatsnestEdges. Populated once at drag
+	 *  start; updateBoardDragPreview() then just overwrites these specific
+	 *  endpoints' coordinates every frame (O(edges touching the dragged
+	 *  pads), typically a handful) instead of recomputing the net's whole
+	 *  MST from scratch (O(pad count²) — confirmed via profiling as the
+	 *  dominant per-frame cost on a busy net like GND, where "MST from
+	 *  scratch every frame" is easily 100+ pads squared, 60 times a
+	 *  second). Real KiCad does the same thing: a live drag re-anchors the
+	 *  existing airwire endpoints, it doesn't re-solve connectivity —
+	 *  that only happens once, for real, at drop (endBoardDragPreview). */
+	protected dragPreviewRatsnestEdges: { lineIndex: number; padId: string; endpoint: 'from' | 'to' }[] = [];
 	// See render()'s WebGL branch — only geometry-affecting changes (new
 	// document, layer visibility/opacity, selection) need this; pure
 	// pan/zoom/flip never do.
@@ -300,6 +351,13 @@ export class KicadRenderSession {
 
 	get activeScene(): LayeredBoardScene | SchematicScene | null {
 		return this.documentType === 'schematic' ? this.schScene : this.scene;
+	}
+
+	/** Polymorphic counterpart to activeScene — the retained AST for
+	 *  whichever document type is loaded, so mutation methods can be
+	 *  generalized off their current schematic-only documentType guard. */
+	get activeRoot(): { rootElement: any } | null {
+		return this.documentType === 'schematic' ? this.schematicRoot : this.boardRoot;
 	}
 
 	get activeLayerState(): Map<string, LayerVisibilityState> | Map<string, SchLayerVisibilityState> {
@@ -616,6 +674,384 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	/**
+	 * Outlines the footprint whose Reference property matches `ref` — see
+	 * boardHighlight's doc comment. Pass null (or a ref not found on this
+	 * board) to clear. No-op outside a loaded board — a PCB tab is the only
+	 * place this makes sense to call.
+	 */
+	setFootprintHighlight(ref: string | null): void {
+		if (this.documentType !== 'board' || !this.scene) {
+			return;
+		}
+		const bbox = ref ? this.findFootprintBBoxByRef(ref) : null;
+		this.boardHighlight = bbox ? { bbox } : null;
+		this.scheduleRender();
+	}
+
+	/** Unions the bboxes of every PaintedItem belonging to the footprint
+	 *  whose Reference property matches `ref` — pads, silkscreen outline,
+	 *  and the reference/value text itself all share an id prefix (see
+	 *  BoardPainter.buildFootprint's footprintId), so this doesn't need any
+	 *  AST access beyond what the already-built scene's items carry. */
+	protected findFootprintBBoxByRef(ref: string): { x: number; y: number; w: number; h: number } | null {
+		const scene = this.scene;
+		if (!scene) {
+			return null;
+		}
+		let footprintId: string | null = null;
+		outer: for (const items of scene.layerBuckets.values()) {
+			for (const item of items) {
+				if (item.kind !== 'footprint-ref') {
+					continue;
+				}
+				const element = item.element;
+				if (typeof element?.getPropertyByName !== 'function') {
+					continue;
+				}
+				if (element.getPropertyByName('Reference')?.propertyValue === ref) {
+					const separatorIndex = item.id.indexOf(':prop:');
+					footprintId = separatorIndex >= 0 ? item.id.slice(0, separatorIndex) : null;
+					break outer;
+				}
+			}
+		}
+		if (!footprintId) {
+			return null;
+		}
+		const prefix = `${ footprintId }:`;
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const items of scene.layerBuckets.values()) {
+			for (const item of items) {
+				if (!item.id.startsWith(prefix)) {
+					continue;
+				}
+				minX = Math.min(minX, item.bbox.x);
+				minY = Math.min(minY, item.bbox.y);
+				maxX = Math.max(maxX, item.bbox.x + item.bbox.w);
+				maxY = Math.max(maxY, item.bbox.y + item.bbox.h);
+			}
+		}
+		if (!Number.isFinite(minX)) {
+			return null;
+		}
+		return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+	}
+
+	/** Board-only: walks a hit element's parent chain up to the owning
+	 *  KicadElementFootprint — a pad's own (at x y)/layers are footprint-
+	 *  LOCAL (only converted to world space/absolute layer at paint time), so
+	 *  every footprint mutation entry point needs to resolve to the
+	 *  footprint itself before touching origin/layer, never mutate a hit pad
+	 *  directly. Also handles a hit that's already the footprint's own
+	 *  synthetic whole-body item (element is already a KicadElementFootprint,
+	 *  loop body never runs) — see BoardPainter.buildFootprint's `kind:
+	 *  'footprint'` item. */
+	private footprintOwnerOfHit(paintId: string): any | null {
+		const item = this.scene?.hitTestItems.find(it => it.id === paintId);
+		let el: any = item?.element;
+		while (el && !(el instanceof KicadElementFootprint)) {
+			el = el.parent;
+		}
+		if (el) {
+			return el;
+		}
+		// A footprint under an active drag-preview (see beginBoardDragPreview)
+		// is deliberately absent from scene.hitTestItems for the rest of the
+		// gesture, so the lookup above can never find it there — every
+		// subsequent moveFootprintByPaintId/translateBoardSelection call
+		// during that same drag still needs to resolve it, so fall back to
+		// matching its own uuid against the preview set.
+		for (const footprint of this.dragPreviewFootprints.keys()) {
+			if (footprint.getUuid?.() === paintId) {
+				return footprint;
+			}
+		}
+		return null;
+	}
+
+	/** Public counterpart to footprintOwnerOfHit — resolves ANY board hit id
+	 *  (a pad, or the footprint's own synthetic whole-body item) to that
+	 *  footprint's own canonical paint id; returns the input unchanged for
+	 *  anything that isn't part of a footprint (track/via/zone), or outside
+	 *  a board document. Board callers should normalize through this ONCE
+	 *  at hit/select time — e.g. BoardPointerController.onMouseDown — so
+	 *  selectedIds always holds footprint-level ids, never pad-level ones
+	 *  (a pad's own id would never match a footprint id already sitting in
+	 *  a multi-selection, silently breaking group-drag membership checks). */
+	footprintPaintIdForHit(paintId: string): string {
+		if (this.documentType !== 'board') {
+			return paintId;
+		}
+		const el = this.footprintOwnerOfHit(paintId);
+		return el?.getUuid?.() ?? paintId;
+	}
+
+	/** Moves the footprint owning the given paint id to an absolute board
+	 *  position — `paintId` may be a pad hit or the footprint's own
+	 *  synthetic whole-body hit item, see footprintOwnerOfHit. */
+	moveFootprintByPaintId(paintId: string, x: number, y: number): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+			return false;
+		}
+		const el = this.footprintOwnerOfHit(paintId);
+		if (!el) {
+			return false;
+		}
+		// setOrigin's rotation param defaults to 0 when omitted — passing the
+		// footprint's current rotation through explicitly is required, not
+		// optional, or every drag would silently un-rotate the part.
+		const rotation = el.getOrigin().rotation;
+		el.setOrigin(x, y, rotation);
+		this.scheduleFootprintRebuild(el);
+		return true;
+	}
+
+	/** Rotates the footprint owning the given paint id in place around its
+	 *  own origin. Every footprint child (pads, graphics, property text) is
+	 *  stored in footprint-LOCAL coordinates and transformed by the
+	 *  footprint's own origin+rotation at paint time (confirmed in
+	 *  BoardPainter.buildFootprint) — unlike a schematic symbol's property
+	 *  fields (stored in absolute coordinates), so rotating a footprint is
+	 *  just updating its own (at) — no child-position math needed. */
+	rotateFootprintByPaintId(paintId: string, degrees: number): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+			return false;
+		}
+		const el = this.footprintOwnerOfHit(paintId);
+		if (!el) {
+			return false;
+		}
+		this.pushUndoSnapshot('Rotate footprint');
+		const origin = el.getOrigin();
+		const newRotation = ((origin.rotation + degrees) % 360 + 360) % 360;
+		el.setOrigin(origin.x, origin.y, newRotation);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Flips the footprint owning the given paint id to the other side of
+	 *  the board: swaps its own F./B. layer prefix and negates rotation,
+	 *  matching real KiCad's FOOTPRINT::Flip() core (footprint.cpp:2976).
+	 *  Deliberately simplified vs. real KiCad: does NOT remap each pad's own
+	 *  per-layer padstack set (PAD::Flip()'s per-layer LSET rebuild) — an
+	 *  asymmetric custom pad layer set will end up visually/electrically
+	 *  wrong after this until that's added. Flagged as a known gap, not
+	 *  attempted here to keep this phase scoped to footprint placement. */
+	flipFootprintByPaintId(paintId: string): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+			return false;
+		}
+		const el = this.footprintOwnerOfHit(paintId);
+		if (!el || typeof el.setLayer !== 'function' || typeof el.getLayer !== 'function') {
+			return false;
+		}
+		this.pushUndoSnapshot('Flip footprint');
+		const currentLayer: string = el.getLayer();
+		const flipped = currentLayer.startsWith('F.') ? `B.${ currentLayer.slice(2) }`
+			: currentLayer.startsWith('B.') ? `F.${ currentLayer.slice(2) }` : currentLayer;
+		el.setLayer(flipped);
+		const origin = el.getOrigin();
+		const newRotation = ((360 - origin.rotation) % 360 + 360) % 360;
+		el.setOrigin(origin.x, origin.y, newRotation);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Board-side rect-select — deliberately simpler than schematic's
+	 *  hitTestRect: boards have no group/nested-library-definition concept,
+	 *  so no root-children membership filter is needed. Pads ARE excluded
+	 *  though — a pad's bbox is always a subset of its owning footprint's
+	 *  synthetic 'footprint' item bbox (see BoardPainter.buildFootprint), so
+	 *  including them would only ever add redundant/partial-footprint ids;
+	 *  callers get whole-footprint (or track/via/zone) granularity only. */
+	hitTestBoardRect(worldOrigin: Vec2, worldCursor: Vec2, mode: 'contained' | 'touching'): string[] {
+		if (this.documentType !== 'board' || !this.scene) {
+			return [];
+		}
+		const minX = Math.min(worldOrigin.x, worldCursor.x);
+		const maxX = Math.max(worldOrigin.x, worldCursor.x);
+		const minY = Math.min(worldOrigin.y, worldCursor.y);
+		const maxY = Math.max(worldOrigin.y, worldCursor.y);
+		const result: string[] = [];
+		for (const item of this.scene.hitTestItems) {
+			if (item.kind === 'pad') {
+				continue;
+			}
+			const { x, y, w, h } = item.bbox;
+			const matches = mode === 'contained'
+				? (x >= minX && y >= minY && x + w <= maxX && y + h <= maxY)
+				: (x <= maxX && x + w >= minX && y <= maxY && y + h >= minY);
+			if (matches) {
+				result.push(item.id);
+			}
+		}
+		return result;
+	}
+
+	/** Group-drag primitive for a board selection. Pads resolve to their
+	 *  owning footprint so a component moves as one unit; board-level items
+	 *  such as tracks, vias, graphics and zones move through the same generic
+	 *  geometry translation used by schematic items. */
+	translateBoardSelection(ids: string[], dx: number, dy: number): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene || (dx === 0 && dy === 0)) {
+			return false;
+		}
+		const footprints = new Set<any>();
+		const elements = new Set<any>();
+		for (const id of ids) {
+			const el = this.footprintOwnerOfHit(id);
+			if (el) {
+				footprints.add(el);
+				continue;
+			}
+			const item = this.scene.hitTestItems.find(candidate => candidate.id === id);
+			if (item) {
+				elements.add(item.element);
+			}
+		}
+		if (footprints.size === 0 && elements.size === 0) {
+			return false;
+		}
+		let moved = false;
+		for (const fp of footprints) {
+			const origin = fp.getOrigin();
+			fp.setOrigin(origin.x + dx, origin.y + dy, origin.rotation);
+			moved = true;
+			// Incremental — see scheduleFootprintRebuild's doc comment.
+			this.scheduleFootprintRebuild(fp);
+		}
+		for (const el of elements) {
+			if (this.translateElementGeometry(el, dx, dy)) {
+				moved = true;
+			}
+		}
+		if (elements.size > 0) {
+			// No incremental rebuild path for bare tracks/vias/graphics yet —
+			// fall back to a full rebuild for those (a mixed footprint+track
+			// group-drag is rare; footprints above already got the fast path
+			// regardless of this).
+			this.rebuildActiveScene();
+		}
+		return moved;
+	}
+
+	get isRatsnestVisible(): boolean { return this.ratsnestVisible; }
+
+	setRatsnestVisible(visible: boolean): void {
+		this.ratsnestVisible = visible;
+		this.scheduleRender();
+	}
+
+	/** Matches KiCad's non-warping wheel-zoom branch: the world point under
+	 * the cursor remains under that same screen point as the scale changes. */
+	zoomByAt(factor: number, screenPos: Vec2): void {
+		const anchor = this.screenToWorld(screenPos);
+		const next = this.camera.zoom * factor;
+		if (!Number.isFinite(next) || next <= 1e-6) {
+			return;
+		}
+		this.camera.zoom = Math.min(next, 1e6);
+		const shiftedAnchor = this.screenToWorld(screenPos);
+		this.camera.translate(new Vec2(anchor.x - shiftedAnchor.x, anchor.y - shiftedAnchor.y));
+		this.scheduleRender();
+	}
+
+	/** Center the viewport on a screen position before a centered zoom.
+	 * Native KiCad follows this with a platform cursor warp; browsers prohibit
+	 * apps from moving the system pointer, so the renderer owns only the
+	 * portable camera half of that behavior. */
+	centerOnScreenPoint(screenPos: Vec2): void {
+		const point = this.screenToWorld(screenPos);
+		this.camera.center.set(point.x, point.y);
+		this.scheduleRender();
+	}
+
+	getRatsnestLines(): readonly BoardRatsnestLine[] {
+		return this.ratsnestLines;
+	}
+
+	/** Creates one straight copper segment in the board root. Interactive
+	 *  routing composes a 45-degree path from several of these KiCad-native
+	 *  segment elements; copper junctions are implicit when endpoints touch. */
+	addTrackSegment(
+		x1: number, y1: number, x2: number, y2: number,
+		width: number, layer: string, netId?: number | null, captureUndo = true
+	): string | null {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement
+			|| (x1 === x2 && y1 === y2)) {
+			return null;
+		}
+		if (captureUndo) {
+			this.pushUndoSnapshot('Route track');
+		}
+		const segment = new KicadElementSegment();
+		segment.setStartEnd(x1, y1, x2, y2);
+		segment.setWidth(width);
+		segment.setLayer(layer);
+		if (netId !== null && netId !== undefined) {
+			segment.setNet(netId);
+		}
+		segment.setUuid();
+		this.boardRoot.rootElement.addChild(segment);
+		this.commitAstMutation();
+		return segment.getUuid() ?? null;
+	}
+
+	/** Creates a through via spanning the supplied copper-layer pair. */
+	addVia(
+		x: number, y: number, size: number, drill: number,
+		layers: readonly string[], netId?: number | null, captureUndo = true
+	): string | null {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || layers.length < 2) {
+			return null;
+		}
+		if (captureUndo) {
+			this.pushUndoSnapshot('Place via');
+		}
+		const via = new KicadElementVia();
+		via.setOrigin(x, y);
+		via.setSize(size);
+		via.setDrill(drill);
+		for (const layer of layers) {
+			via.addLayer(layer);
+		}
+		if (netId !== null && netId !== undefined) {
+			via.setNet(netId);
+		}
+		via.setUuid();
+		this.boardRoot.rootElement.addChild(via);
+		this.commitAstMutation();
+		return via.getUuid() ?? null;
+	}
+
+	/** Reads a pad/track/via net directly from the painted item's AST node.
+	 *  Clicking mid-track therefore inherits its net without splitting the
+	 *  original segment—KiCad connectivity treats touching same-net copper
+	 *  segments as connected without a separate junction object. */
+	netIdAtScreen(screenPos: Vec2): number | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const hit = this.hitTestAtScreen(screenPos);
+		if (!hit) {
+			return null;
+		}
+		const element: any = this.scene.hitTestItems.find(item => item.id === hit.id)?.element;
+		return typeof element?.getNetId === 'function' ? element.getNetId() : null;
+	}
+
+	/** Resolves the schematic connection name for a selected paint item id.
+	 *  Returns null for objects that aren't part of a net (e.g. plain text,
+	 *  symbols without a single resolved net, non-wire geometry). */
+	connectionNameForPaintId(id: string): string | null {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			return null;
+		}
+		const item = this.findPaintItemById(id);
+		return this.netNameForPaintItem(item);
+	}
+
 	highlightNetAtScreen(screenPos: Vec2): boolean {
 		if (this.documentType !== 'schematic' || !this.schScene) {
 			this.clearNetHighlight();
@@ -642,6 +1078,19 @@ export class KicadRenderSession {
 		return true;
 	}
 
+	private findPaintItemById(id: string): SchPaintedItem | null {
+		if (!this.schScene) {
+			return null;
+		}
+		for (const bucket of this.schScene.layerBuckets.values()) {
+			const match = bucket.find(item => item.id === id);
+			if (match) {
+				return match;
+			}
+		}
+		return null;
+	}
+
 	private getConnectivitySummary(): SchematicConnectivitySummary | null {
 		const text = this.getSchematicText();
 		if (!text) {
@@ -665,6 +1114,160 @@ export class KicadRenderSession {
 		}
 	}
 
+	private wireSegmentForItem(item: SchPaintedItem | null | undefined): { x1: number; y1: number; x2: number; y2: number } | null {
+		if (!item || (item.kind !== 'wire' && item.kind !== 'bus')) {
+			return null;
+		}
+		const shape = item.shape as { type?: string; x1?: number; y1?: number; x2?: number; y2?: number } | undefined;
+		if (!shape || shape.type !== 'segment') {
+			return null;
+		}
+		if (typeof shape.x1 !== 'number' || typeof shape.y1 !== 'number' || typeof shape.x2 !== 'number' || typeof shape.y2 !== 'number') {
+			return null;
+		}
+		return { x1: shape.x1, y1: shape.y1, x2: shape.x2, y2: shape.y2 };
+	}
+
+	private pointForAttachedItem(item: SchPaintedItem): { x: number; y: number } {
+		if (item.kind === 'label') {
+			// A label's painted bbox is offset from its electrical attach point
+			// by text clearance and justification. Net lookup must use the
+			// element origin, which is the point KiCad connects to the wire.
+			const origin = (item.element as any)?.getOrigin?.();
+			if (origin && Number.isFinite(origin.x) && Number.isFinite(origin.y)) {
+				return { x: origin.x, y: origin.y };
+			}
+			return {
+				x: item.bbox.x + item.bbox.w / 2,
+				y: item.bbox.y + item.bbox.h / 2,
+			};
+		}
+		if (item.kind === 'pin') {
+			// Pin shape.x1/y1 is the outer (wire-facing) endpoint; the bbox
+			// center is somewhere along the pin body and is not connectable.
+			const shape = item.shape as any;
+			if (shape?.type === 'segment' && Number.isFinite(shape.x1) && Number.isFinite(shape.y1)) {
+				return { x: shape.x1, y: shape.y1 };
+			}
+			const origin = (item.element as any)?.getOrigin?.();
+			if (origin && Number.isFinite(origin.x) && Number.isFinite(origin.y)) {
+				return { x: origin.x, y: origin.y };
+			}
+			return { x: item.bbox.x + item.bbox.w / 2, y: item.bbox.y + item.bbox.h / 2 };
+		}
+		if (item.kind === 'symbol') {
+			return {
+				x: item.bbox.x + item.bbox.w / 2,
+				y: item.bbox.y + item.bbox.h / 2,
+			};
+		}
+		return { x: item.bbox.x, y: item.bbox.y };
+	}
+
+	private netNameForWireItem(item: SchPaintedItem): string | null {
+		if (!this.schScene) {
+			return null;
+		}
+		const startSegment = this.wireSegmentForItem(item);
+		if (!startSegment) {
+			return null;
+		}
+		const visited = new Set<string>();
+		const queue: SchPaintedItem[] = [item];
+		const names = new Set<string>();
+		const connectTolerance = 0.12;
+		const attachTolerance = 0.35;
+
+		const addCandidateName = (candidate: SchPaintedItem) => {
+			if (candidate.kind === 'label' && candidate.labelKind !== 'symbol-field' && candidate.labelName) {
+				names.add(candidate.labelName);
+				return;
+			}
+			if (candidate.kind === 'pin' && candidate.element instanceof KicadElementPin) {
+				const ref = candidate.refDesignator;
+				if (!ref) {
+					return;
+				}
+				const { number } = typeof candidate.element.getPin === 'function' ? candidate.element.getPin() : { number: '' };
+				if (!number) {
+					return;
+				}
+				const summary = this.getConnectivitySummary();
+				const component = summary?.components.find(c => c.ref === ref);
+				const matchingPin = component?.pins.find(p => p.number === number);
+				if (matchingPin?.net) {
+					names.add(matchingPin.net);
+				}
+				return;
+			}
+			if (candidate.kind === 'symbol' && candidate.refDesignator) {
+				const summary = this.getConnectivitySummary();
+				const component = summary?.components.find(c => c.ref === candidate.refDesignator);
+				if (component) {
+					const nets = [...new Set(component.pins.map(p => p.net).filter(Boolean) as string[])];
+					if (nets.length === 1) {
+						names.add(nets[0]!);
+					}
+				}
+			}
+		};
+
+		const pointsClose = (x1: number, y1: number, x2: number, y2: number) => Math.hypot(x1 - x2, y1 - y2) <= connectTolerance;
+		const itemTouchesSegment = (candidate: SchPaintedItem, segment: { x1: number; y1: number; x2: number; y2: number }) => {
+			const anchor = this.pointForAttachedItem(candidate);
+			return distanceToSegment(anchor.x, anchor.y, segment.x1, segment.y1, segment.x2, segment.y2) <= attachTolerance;
+		};
+
+		while (queue.length) {
+			const current = queue.shift()!;
+			if (!visited.add(current.id)) {
+				continue;
+			}
+			const currentSegment = this.wireSegmentForItem(current);
+			if (currentSegment) {
+				for (const candidate of this.schScene.hitTestItems) {
+					if (candidate.id === current.id) {
+						continue;
+					}
+					const otherSegment = this.wireSegmentForItem(candidate);
+					if (otherSegment) {
+						const connected = pointsClose(currentSegment.x1, currentSegment.y1, otherSegment.x1, otherSegment.y1)
+							|| pointsClose(currentSegment.x1, currentSegment.y1, otherSegment.x2, otherSegment.y2)
+							|| pointsClose(currentSegment.x2, currentSegment.y2, otherSegment.x1, otherSegment.y1)
+							|| pointsClose(currentSegment.x2, currentSegment.y2, otherSegment.x2, otherSegment.y2);
+						if (connected && !visited.has(candidate.id) && !queue.includes(candidate)) {
+							queue.push(candidate);
+						}
+						continue;
+					}
+					if (itemTouchesSegment(candidate, currentSegment) && !visited.has(candidate.id) && !queue.includes(candidate)) {
+						addCandidateName(candidate);
+					}
+				}
+			}
+			addCandidateName(current);
+		}
+
+		return names.size === 1 ? [...names][0]! : null;
+	}
+
+	private netNameForWireByMembership(itemId: string): string | null {
+		const summary = this.getConnectivitySummary();
+		if (!summary?.nets?.length) {
+			return null;
+		}
+		for (const net of summary.nets) {
+			if (!net?.name) {
+				continue;
+			}
+			const ids = this.paintIdsForNet(net.name);
+			if (ids.has(itemId)) {
+				return net.name;
+			}
+		}
+		return null;
+	}
+
 	private netNameForPaintItem(item: SchPaintedItem | null | undefined): string | null {
 		if (!item) {
 			return null;
@@ -685,6 +1288,9 @@ export class KicadRenderSession {
 			const component = summary?.components.find(c => c.ref === ref);
 			const matchingPin = component?.pins.find(p => p.number === number);
 			return matchingPin?.net ?? null;
+		}
+		if (item.kind === 'wire' || item.kind === 'bus') {
+			return this.netNameForWireItem(item) ?? this.netNameForWireByMembership(item.id);
 		}
 		if (item.kind === 'symbol' && item.refDesignator) {
 			const summary = this.getConnectivitySummary();
@@ -992,6 +1598,13 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	/** Color is baked into WebGL scene buffers, unlike Canvas2D's draw-time
+	 * styles. Rebuild the scene after replacing the shared schematic palette. */
+	refreshTheme(): void {
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
 	// ---- Layers / backend ----
 
 	setLayerVisible(layer: string, visible: boolean): void {
@@ -1033,22 +1646,33 @@ export class KicadRenderSession {
 
 	// ---- Loading ----
 
-	async loadBoardText(text: string): Promise<LoadResult> {
+	async loadBoardText(text: string, options?: { preserveView?: boolean }): Promise<LoadResult> {
 		this.documentType = 'board';
 		const t0 = performance.now();
 		const parser = new KicadParser();
 		const rootElement = parser.parse(text);
 		const parseMs = performance.now() - t0;
 		const boardRoot = { rootElement };
+		this.boardRoot = boardRoot;
 
 		const t1 = performance.now();
 		this.scene = this.painter.build(boardRoot);
+		this.ratsnestLines = buildBoardRatsnest(this.scene);
 		const buildMs = performance.now() - t1;
 		this.layerState = defaultLayerState(this.scene.layersPresent);
 		this.geometryDirty = true;
 		this.selectedIds = new Set();
+		// A fresh parse means every element reference held elsewhere (undo/
+		// cancel reloading mid-drag, in particular) is now stale — a
+		// leftover drag-preview entry would otherwise keep drawing a ghost
+		// forever, since nothing else ever clears dragPreviewFootprints.
+		this.boardDirtyFootprints.clear();
+		this.dragPreviewFootprints.clear();
+		this.dragPreviewRatsnestEdges = [];
 
-		this.fitToItems(this.scene.hitTestItems);
+		if (!options?.preserveView) {
+			this.fitToItems(this.scene.hitTestItems);
+		}
 		this.scheduleRender();
 
 		return { parseMs, buildMs, layersPresent: this.scene.layersPresent };
@@ -1063,6 +1687,22 @@ export class KicadRenderSession {
 			return '';
 		}
 		const root = this.schematicRoot.rootElement;
+		if (typeof root.write === 'function') {
+			return String(root.write());
+		}
+		return '';
+	}
+
+	/**
+	 * Board-side counterpart to {@link getSchematicText} — serializes the
+	 * currently loaded board AST (including any mutations from
+	 * {@link moveFootprintByPaintId}). Empty string if none loaded.
+	 */
+	getBoardText(): string {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return '';
+		}
+		const root = this.boardRoot.rootElement;
 		if (typeof root.write === 'function') {
 			return String(root.write());
 		}
@@ -1116,7 +1756,55 @@ export class KicadRenderSession {
 		if (this.batchDepth > 0) {
 			return;
 		}
-		this.rebuildSchScene();
+		this.rebuildActiveScene();
+	}
+
+	/** Dispatches to whichever document type is actually loaded — every
+	 *  existing call site only ever runs while documentType==='schematic'
+	 *  (each caller guards on that itself before reaching here), so this
+	 *  branch is a no-op change for schematic and purely additive for board.
+	 *  This is the SAFE, CONSERVATIVE board path (a full rebuild) — used by
+	 *  every board mutation method except the footprint move/group-drag
+	 *  ones, which call scheduleFootprintRebuild() instead (see its doc
+	 *  comment for why). */
+	private rebuildActiveScene(): void {
+		if (this.documentType === 'schematic') {
+			this.rebuildSchScene();
+		}
+		else {
+			this.boardStructureDirty = true;
+			this.scheduleRender();
+		}
+	}
+
+	/** Fast path for a footprint move/group-drag: marks just that footprint
+	 *  for an INCREMENTAL rebuild (BoardPainter.updateFootprintItems() only
+	 *  re-walks this one footprint's own pads/graphics/text, not the rest
+	 *  of the board) instead of the full-board rebuildActiveScene() path.
+	 *  Re-decoding stroke-font text and recomputing pad matrices for every
+	 *  OTHER unchanged footprint, every animation frame of a drag, was the
+	 *  dominant cost behind the reported FPS drop on real boards — a
+	 *  connector with many pads doesn't cost any more than a 2-pad part
+	 *  here, since only ITS OWN items are rebuilt either way. Deliberately
+	 *  does not touch ratsnest (see refreshBoardRatsnest's doc comment —
+	 *  that stays a separate, deliberately less-frequent recompute) or
+	 *  boardStructureDirty (a pending full rebuild, e.g. from an add/delete
+	 *  earlier in the same batch, must still win — see
+	 *  rebuildBoardSceneIfPending). getBoardText() serializes straight from
+	 *  boardRoot (the AST), not from this scene, so undo/save correctness
+	 *  is unaffected by the deferral either way. */
+	private scheduleFootprintRebuild(footprint: any): void {
+		if (this.dragPreviewFootprints.has(footprint)) {
+			// An active drag-preview (see beginBoardDragPreview) already owns
+			// this footprint's redraw for the rest of the gesture — the caller
+			// (BoardPointerController) drives updateBoardDragPreview() once per
+			// frame instead. Marking it dirty here too would put it right back
+			// on the expensive per-frame incremental-scene + GPU-retessellation
+			// path this whole mechanism exists to avoid.
+			return;
+		}
+		this.boardDirtyFootprints.add(footprint);
+		this.scheduleRender();
 	}
 
 	private rebuildSchScene(): void {
@@ -1126,6 +1814,275 @@ export class KicadRenderSession {
 		this.schScene = this.schematicPainter.build(this.schematicRoot, this.schematicDocInfo);
 		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
 		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	/** Called from render(), never schedules another render itself (the
+	 *  caller is already mid-frame). Branches between the full rebuild
+	 *  (structural changes — add/delete/route/zone edit/...) and the cheap
+	 *  incremental per-footprint one (continuous move/group-drag) — see
+	 *  scheduleFootprintRebuild's doc comment for why the split exists. A
+	 *  pending full rebuild always wins over incremental ones, since a
+	 *  structural change (e.g. this exact footprint got deleted earlier in
+	 *  the same frame) can invalidate what an incremental update would
+	 *  otherwise touch. */
+	private rebuildBoardSceneIfPending(): void {
+		if (!this.boardRoot) {
+			this.boardStructureDirty = false;
+			this.boardDirtyFootprints.clear();
+			return;
+		}
+		if (this.boardStructureDirty) {
+			this.boardStructureDirty = false;
+			this.boardDirtyFootprints.clear();
+			const previousLayerState = this.layerState;
+			this.scene = this.painter.build(this.boardRoot);
+			this.ratsnestLines = buildBoardRatsnest(this.scene);
+			this.layerState = defaultLayerState(this.scene.layersPresent);
+			// A board edit rebuilds geometry on every drag step. Preserve the
+			// user's Appearance choices across that rebuild instead of silently
+			// restoring every layer to its default visibility/opacity.
+			for (const [layer, state] of this.layerState) {
+				const previous = previousLayerState.get(layer);
+				if (previous) {
+					state.visible = previous.visible;
+					state.opacity = previous.opacity;
+				}
+			}
+			this.geometryDirty = true;
+			return;
+		}
+		if (this.boardDirtyFootprints.size > 0 && this.scene) {
+			for (const footprint of this.boardDirtyFootprints) {
+				this.painter.updateFootprintItems(this.scene, this.boardRoot, footprint);
+			}
+			// Incremental ratsnest too — see refreshRatsnestForFootprints'
+			// doc comment. Without this, airwires stay anchored to the
+			// PRE-move pad positions for the whole drag (only catching up
+			// once at mouseup), which reads as a ghostly duplicate trailing
+			// behind the part you're actually moving.
+			this.refreshRatsnestForFootprints(this.boardDirtyFootprints);
+			this.boardDirtyFootprints.clear();
+			this.geometryDirty = true;
+		}
+	}
+
+	/** Incremental ratsnest update for a drag: recomputes airwires only for
+	 *  the net(s) the given footprint(s) actually belong to (via
+	 *  buildBoardRatsnest's netFilter) and splices those into the existing
+	 *  this.ratsnestLines, leaving every other net's lines untouched. A
+	 *  footprint's own pads keep the same net assignments while it moves —
+	 *  only positions change — so this stays correct across the whole drag,
+	 *  cheaply, unlike a full per-frame buildBoardRatsnest() (whole-board
+	 *  union-find + MST) which is what made ratsnest a per-frame liability
+	 *  in the first place. */
+	private refreshRatsnestForFootprints(footprints: Iterable<any>): void {
+		// Ratsnest hidden — skip the computation entirely, not just the draw.
+		// Confirmed via a real profiling trace: buildBoardRatsnest's O(scene
+		// size) scan was running (and dominating per-frame CPU cost — up to
+		// ~45% of active time on a real board) even with the ratsnest layer
+		// toggled off in Appearance, since only drawBoardRatsnest() checked
+		// ratsnestVisible before; nothing gated the computation feeding it.
+		if (!this.ratsnestVisible || !this.scene) {
+			return;
+		}
+		const footprintIds = new Set<string>();
+		for (const footprint of footprints) {
+			const uuid = typeof footprint.getUuid === 'function' ? footprint.getUuid() : null;
+			if (uuid) {
+				footprintIds.add(uuid);
+			}
+		}
+		if (footprintIds.size === 0) {
+			return;
+		}
+		const netIds = new Set<number>();
+		for (const item of this.scene.hitTestItems) {
+			if (item.kind !== 'pad' || item.netId == null) {
+				continue;
+			}
+			const ownerId = item.id.split(':')[0]!;
+			if (footprintIds.has(ownerId)) {
+				netIds.add(item.netId);
+			}
+		}
+		if (netIds.size === 0) {
+			return;
+		}
+		const freshLines = buildBoardRatsnest(this.scene, netIds);
+		this.ratsnestLines = [...this.ratsnestLines.filter(line => !netIds.has(line.netId)), ...freshLines];
+	}
+
+	/** Starts a KiCad-VIEW-preview-style drag for one or more footprints
+	 *  (paintId may be a pad hit or the synthetic whole-footprint hit, same
+	 *  as moveFootprintByPaintId). Real KiCad's own MOVE tool never
+	 *  re-tessellates the moved item into its cached VIEW geometry on every
+	 *  step of a drag — it hides the item and draws a live copy through a
+	 *  VIEW_GROUP preview overlay instead, only baking the final position
+	 *  back into the cache once, on drop (see VIEW::Update/AddToPreview in
+	 *  KiCad's own view.cpp). This mirrors that: removes each footprint from
+	 *  the real scene right now (one full static retessellation, same cost
+	 *  as any other structural edit — but only ONE for the whole drag, not
+	 *  one per frame) and starts tracking it here so drawBoardDragPreview()
+	 *  can draw it through the cheap per-frame dynamic path for the rest of
+	 *  the gesture. Call updateBoardDragPreview() after mutating position
+	 *  each frame, and endBoardDragPreview() once on release. */
+	beginBoardDragPreview(paintIds: Iterable<string>): void {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+			return;
+		}
+		let changed = false;
+		for (const paintId of paintIds) {
+			const el = this.footprintOwnerOfHit(paintId);
+			if (el && !this.dragPreviewFootprints.has(el)) {
+				if (this.ratsnestVisible) {
+					this.captureDragPreviewRatsnestEdges(el);
+				}
+				this.painter.removeFootprintItems(this.scene, el);
+				// Seed with a real preview at the CURRENT (pre-drag) position
+				// right away, not an empty list — otherwise a plain click that
+				// never moves (mousedown+mouseup with no mousemove between)
+				// could paint one frame with the footprint gone from both the
+				// static scene AND the preview.
+				this.dragPreviewFootprints.set(el, this.painter.buildFootprintPreviewItems(this.boardRoot, el));
+				changed = true;
+			}
+		}
+		if (changed) {
+			this.geometryDirty = true;
+			this.scheduleRender();
+		}
+	}
+
+	/** Finds every existing ratsnest airwire endpoint that sits on one of
+	 *  this (about-to-be-dragged) footprint's own pads and records it in
+	 *  dragPreviewRatsnestEdges — see that field's doc comment. Must run
+	 *  BEFORE removeFootprintItems() pulls the footprint's pads out of
+	 *  scene.hitTestItems, since it reads their CURRENT (pre-drag) world
+	 *  centers to match against buildBoardRatsnest's own centerOf()
+	 *  computation (identical formula, so an exact-ish match is reliable —
+	 *  the epsilon only guards float rounding, not real ambiguity). */
+	private captureDragPreviewRatsnestEdges(footprint: any): void {
+		if (!this.scene) {
+			return;
+		}
+		const uuid = typeof footprint.getUuid === 'function' ? footprint.getUuid() : null;
+		if (!uuid) {
+			return;
+		}
+		const prefix = `${ uuid }:`;
+		const EPS = 1e-4;
+		for (const item of this.scene.hitTestItems) {
+			if (item.kind !== 'pad' || item.netId == null) {
+				continue;
+			}
+			if (item.id !== uuid && !item.id.startsWith(prefix)) {
+				continue;
+			}
+			const cx = item.bbox.x + item.bbox.w / 2, cy = item.bbox.y + item.bbox.h / 2;
+			for (let i = 0; i < this.ratsnestLines.length; i++) {
+				const line = this.ratsnestLines[i]!;
+				if (line.netId !== item.netId) {
+					continue;
+				}
+				if (Math.hypot(line.from.x - cx, line.from.y - cy) <= EPS) {
+					this.dragPreviewRatsnestEdges.push({ lineIndex: i, padId: item.id, endpoint: 'from' });
+				}
+				if (Math.hypot(line.to.x - cx, line.to.y - cy) <= EPS) {
+					this.dragPreviewRatsnestEdges.push({ lineIndex: i, padId: item.id, endpoint: 'to' });
+				}
+			}
+		}
+	}
+
+	/** Call once per frame (after the footprint(s)' AST position has already
+	 *  been mutated, e.g. via moveFootprintByPaintId/translateBoardSelection)
+	 *  while a drag-preview is active. Cheap: rebuilds only the preview
+	 *  footprints' own items (a few dozen shapes, not the whole board) for
+	 *  drawBoardDragPreview() to draw next frame, and keeps ratsnest airwires
+	 *  live by temporarily splicing those preview pads' positions into a
+	 *  throwaway scene view for buildBoardRatsnest — the real scene can't be
+	 *  used directly since these footprints were removed from it in
+	 *  beginBoardDragPreview. Never touches the static GPU buffer. */
+	updateBoardDragPreview(): void {
+		if (!this.boardRoot || this.dragPreviewFootprints.size === 0) {
+			return;
+		}
+		const previewPadItems: PaintedItem[] = [];
+		for (const footprint of this.dragPreviewFootprints.keys()) {
+			const items = this.painter.buildFootprintPreviewItems(this.boardRoot, footprint);
+			this.dragPreviewFootprints.set(footprint, items);
+			for (const item of items) {
+				if (item.kind === 'pad' && item.netId != null) {
+					previewPadItems.push(item);
+				}
+			}
+		}
+		// Ratsnest hidden — nothing to update. Note there's no
+		// buildBoardRatsnest() call in this method at all anymore (see
+		// dragPreviewRatsnestEdges' doc comment) — recomputing a busy net's
+		// MST from scratch every frame was measured as the single dominant
+		// per-frame cost with ratsnest visible (up to ~45% of active CPU
+		// time on a real board's GND net). Instead: just re-anchor whichever
+		// airwire endpoints captureDragPreviewRatsnestEdges found touching
+		// the dragged pad(s) at drag-start, to wherever that pad is THIS
+		// frame — O(edges), not O(pad count²).
+		if (this.ratsnestVisible && this.dragPreviewRatsnestEdges.length > 0) {
+			const padCenters = new Map<string, Vec2>();
+			for (const item of previewPadItems) {
+				padCenters.set(item.id, new Vec2(item.bbox.x + item.bbox.w / 2, item.bbox.y + item.bbox.h / 2));
+			}
+			for (const edge of this.dragPreviewRatsnestEdges) {
+				const center = padCenters.get(edge.padId);
+				const line = this.ratsnestLines[edge.lineIndex];
+				if (!center || !line) {
+					continue;
+				}
+				if (edge.endpoint === 'from') {
+					line.from = center;
+				}
+				else {
+					line.to = center;
+				}
+			}
+		}
+		this.scheduleRender();
+	}
+
+	/** Ends an active drag-preview: bakes every preview footprint's final
+	 *  position back into the real scene (one more full static
+	 *  retessellation — same "VIEW::Update on drop" idea as
+	 *  beginBoardDragPreview's doc comment) and refreshes their ratsnest
+	 *  through the normal net-scoped incremental path. Safe to call with no
+	 *  preview active (no-op). */
+	endBoardDragPreview(): void {
+		if (!this.boardRoot || !this.scene || this.dragPreviewFootprints.size === 0) {
+			return;
+		}
+		const footprints = [...this.dragPreviewFootprints.keys()];
+		this.dragPreviewFootprints.clear();
+		// These indexed into the ratsnestLines array as it stood mid-drag —
+		// refreshRatsnestForFootprints below reassigns that array, so they'd
+		// point at the wrong entries (or nothing) afterward regardless.
+		this.dragPreviewRatsnestEdges = [];
+		for (const footprint of footprints) {
+			this.painter.updateFootprintItems(this.scene, this.boardRoot, footprint);
+		}
+		this.refreshRatsnestForFootprints(footprints);
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	/** Full-board ratsnest recompute — the safety net a drag's own
+	 *  incremental refreshRatsnestForFootprints() shouldn't normally need,
+	 *  but structural edits (delete/route/zone edit/...) already get one for
+	 *  free via boardStructureDirty's full rebuild above; this is for
+	 *  callers that want to force a fresh whole-board resync explicitly. */
+	refreshBoardRatsnest(): void {
+		if (this.documentType !== 'board' || !this.scene) {
+			return;
+		}
+		this.ratsnestLines = buildBoardRatsnest(this.scene);
 		this.scheduleRender();
 	}
 
@@ -1144,7 +2101,7 @@ export class KicadRenderSession {
 	private endBatch(): void {
 		this.batchDepth = Math.max(0, this.batchDepth - 1);
 		if (this.batchDepth === 0) {
-			this.rebuildSchScene();
+			this.rebuildActiveScene();
 		}
 	}
 
@@ -1154,7 +2111,7 @@ export class KicadRenderSession {
 	 *  translateElementById, …) do NOT call this themselves (would flood the
 	 *  stack every mousemove) — the caller pushes once at gesture start. */
 	pushUndoSnapshot(label = 'Edit'): void {
-		const text = this.getSchematicText();
+		const text = this.documentType === 'schematic' ? this.getSchematicText() : this.getBoardText();
 		if (!text || this.undoStack[this.undoStack.length - 1] === text) {
 			return;
 		}
@@ -1200,14 +2157,20 @@ export class KicadRenderSession {
 		if (!this.undoStack.length) {
 			return false;
 		}
-		const current = this.getSchematicText();
+		const isSchematic = this.documentType === 'schematic';
+		const current = isSchematic ? this.getSchematicText() : this.getBoardText();
 		const previous = this.undoStack.pop()!;
 		const previousLabel = this.undoLabels.pop() ?? 'Edit';
 		if (current) {
 			this.redoStack.push(current);
 			this.redoLabels.push(previousLabel);
 		}
-		await this.loadSchematicText(previous, { ...this.schematicDocInfo, preserveView: true });
+		if (isSchematic) {
+			await this.loadSchematicText(previous, { ...this.schematicDocInfo, preserveView: true });
+		}
+		else {
+			await this.loadBoardText(previous, { preserveView: true });
+		}
 		return true;
 	}
 
@@ -1215,14 +2178,42 @@ export class KicadRenderSession {
 		if (!this.redoStack.length) {
 			return false;
 		}
-		const current = this.getSchematicText();
+		const isSchematic = this.documentType === 'schematic';
+		const current = isSchematic ? this.getSchematicText() : this.getBoardText();
 		const next = this.redoStack.pop()!;
 		const nextLabel = this.redoLabels.pop() ?? 'Edit';
 		if (current) {
 			this.undoStack.push(current);
 			this.undoLabels.push(nextLabel);
 		}
-		await this.loadSchematicText(next, { ...this.schematicDocInfo, preserveView: true });
+		if (isSchematic) {
+			await this.loadSchematicText(next, { ...this.schematicDocInfo, preserveView: true });
+		}
+		else {
+			await this.loadBoardText(next, { preserveView: true });
+		}
+		return true;
+	}
+
+	/**
+	 * Restores and discards the most recent undo snapshot without creating a
+	 * redo entry.  Interactive tools use this for Escape: cancelling a move
+	 * must leave the document and its history exactly as they were before the
+	 * tool was entered, rather than making the cancelled placement redoable.
+	 */
+	async cancelLatestUndoSnapshot(): Promise<boolean> {
+		if (!this.undoStack.length) {
+			return false;
+		}
+		const isSchematic = this.documentType === 'schematic';
+		const previous = this.undoStack.pop()!;
+		this.undoLabels.pop();
+		if (isSchematic) {
+			await this.loadSchematicText(previous, { ...this.schematicDocInfo, preserveView: true });
+		}
+		else {
+			await this.loadBoardText(previous, { preserveView: true });
+		}
 		return true;
 	}
 
@@ -2860,16 +3851,24 @@ export class KicadRenderSession {
 	 * elsewhere. Returns how many were actually found and removed.
 	 */
 	deleteElements(ids: string[]): number {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
+		if (!this.activeRoot?.rootElement) {
 			return 0;
 		}
 		this.pushUndoSnapshot();
 		const idSet = new Set(ids);
-		const children: any[] = this.schematicRoot.rootElement.children;
+		const children: any[] = this.activeRoot.rootElement.children;
 		let removed = 0;
 		for (const id of idSet) {
-			const item = this.schScene?.hitTestItems.find(it => it.id === id);
-			const el = item?.element;
+			const item = this.activeScene?.hitTestItems.find(it => it.id === id);
+			let el = item?.element;
+			// Board-only: a pad hit deletes its owning footprint — pads
+			// aren't root children themselves (footprint-local, nested), so
+			// without this the indexOf below would just silently no-op.
+			if (this.documentType === 'board' && item?.kind === 'pad') {
+				while (el && !(el instanceof KicadElementFootprint)) {
+					el = el.parent;
+				}
+			}
 			if (!el) {
 				continue;
 			}
@@ -3307,7 +4306,6 @@ export class KicadRenderSession {
 	}
 
 	// ---- Rendering ----
-
 	scheduleRender(): void {
 		if (this.frameScheduled) {
 			return;
@@ -3341,6 +4339,7 @@ export class KicadRenderSession {
 	 */
 	render(): void {
 		this.frameScheduled = false;
+		this.rebuildBoardSceneIfPending();
 		const renderer: Renderer = this.backend === 'webgl' && this.webglRenderer ? this.webglRenderer :
 			this.canvas2dRenderer;
 		const canvas = this.backend === 'webgl' && this.webglRenderer ? this.canvasGl! : this.canvas2d;
@@ -3408,6 +4407,17 @@ export class KicadRenderSession {
 				}
 				renderer.beginDynamicFrame!();
 				this.drawGrid(renderer);
+				// Draws the grid (behind everything) then the already-uploaded
+				// static scene on top of it. The overlay content below must be
+				// a SEPARATE dynamic pass started only after this flush() —
+				// WebGL accumulates draw calls into one buffer that gets drawn
+				// as a unit, so anything accumulated before this point would
+				// end up drawn BEHIND the static scene, not on top of it (the
+				// exact bug behind a dragged footprint rendering underneath
+				// the rest of the board — see Renderer.flushOverlay's doc
+				// comment).
+				renderer.flush?.();
+				renderer.beginDynamicFrame!();
 			}
 			else {
 				this.drawGrid(renderer);
@@ -3417,12 +4427,25 @@ export class KicadRenderSession {
 				const viewBBox = this.camera.bbox.grow(this.camera.bbox.w * 0.2, this.camera.bbox.h * 0.2);
 				paintActive(viewBBox);
 			}
-			// Always last — the hand-drawn editor's in-progress tool state draws
-			// on top of everything else, for both backends.
+			// Always last — the hand-drawn editor's in-progress tool state, board
+			// drag preview, etc. draw on top of everything else, for both
+			// backends. Canvas2D's calls above already painted immediately, so
+			// these just draw immediately on top too, in call order; WebGL
+			// accumulated them into the fresh dynamic buffer just started above,
+			// and flushOverlay() draws JUST that — no second static redraw to
+			// cover it back up.
+			this.drawBoardRatsnest(renderer);
+			this.drawBoardDragPreview(renderer);
 			this.drawEditPreview(renderer);
+			this.drawBoardHighlight(renderer);
 			this.drawSelectionResizeHandles(renderer);
 			this.drawSelectionCurveAnchors(renderer);
-			renderer.flush?.();
+			if (renderer.flushOverlay) {
+				renderer.flushOverlay();
+			}
+			else {
+				renderer.flush?.();
+			}
 
 			this.onRender?.(activeScene);
 		}
@@ -3491,7 +4514,7 @@ export class KicadRenderSession {
 		// theme color that looked fine in the desktop renderer became almost
 		// indistinguishable from this viewer's dark background, so use a muted
 		// blue-gray with enough alpha to remain legible on the GPU canvas.
-		const gridColor = 'rgba(185, 198, 214, 0.30)';
+		const gridColor = schematicGridColor;
 		renderer.beginBatch?.();
 		for (let ix = startX; ix <= endX; ix++) {
 			const width = minorDotWorld * (ix % gridTick === 0 ? 2 : 1);
@@ -3527,6 +4550,9 @@ export class KicadRenderSession {
 				if (p.kind === 'line' && !p.anchor) {
 					drawCrosshair(renderer, p.cursor, color);
 				}
+				break;
+			case 'route':
+				renderer.line([...p.points, p.cursor], { strokeColor: color, strokeWidth: p.width });
 				break;
 			case 'junction':
 				renderer.circle(p.cursor, 0.4, { fillColor: color });
@@ -3678,6 +4704,86 @@ export class KicadRenderSession {
 		}
 	}
 
+	/** One plain flat-ended line per airwire — real KiCad's own ratsnest is a
+	 *  thin solid line, not dashed. The dashed version this replaced chopped
+	 *  every airwire into many ~1mm segments, and WebGLRenderer gives every
+	 *  open polyline a pair of round semicircle end caps by default — for a
+	 *  board with hundreds of unrouted airwires that was thousands of extra
+	 *  tiny fans tessellated every single drag frame (measured as the
+	 *  dominant per-frame draw cost with ratsnest visible). One segment with
+	 *  capStyle: 'butt' draws the same visual line for a fraction of the
+	 *  geometry. */
+	protected drawBoardRatsnest(renderer: Renderer): void {
+		if (this.documentType !== 'board' || !this.ratsnestVisible) {
+			return;
+		}
+		for (const line of this.ratsnestLines) {
+			renderer.line([line.from, line.to], { strokeColor: '#b7c7d8', strokeWidth: 0.05, capStyle: 'butt' });
+		}
+	}
+
+	/** Draws every footprint currently under an active drag-preview (see
+	 *  beginBoardDragPreview) through the same per-frame dynamic path as the
+	 *  grid/ratsnest — these items were built fresh this frame by
+	 *  updateBoardDragPreview() and were deliberately removed from the real
+	 *  (static-buffer-backed) scene, so this is the ONLY place they get
+	 *  drawn from during the drag. Mirrors LayeredBoardScene.paint()'s own
+	 *  per-item logic (footprint synthetic bbox / highlight color) since
+	 *  these items never flow through paint() itself. */
+	protected drawBoardDragPreview(renderer: Renderer): void {
+		if (this.dragPreviewFootprints.size === 0) {
+			return;
+		}
+		for (const items of this.dragPreviewFootprints.values()) {
+			// buildFootprint() emits items in BUILD order (pads sorted
+			// biggest-first, then properties, then graphics) — not layer
+			// paint order. paint() gets layer ordering for free by walking
+			// scene.layersPresent (itself layerPaintOrder-sorted) one layer
+			// at a time; this preview draws straight from the flat items
+			// list instead, so without its own sort here, a through-hole
+			// pad's B.Cu copy (pushed right after its F.Cu copy in
+			// buildPad) drew ON TOP of the F.Cu one — showing the back
+			// layer's color (blue) despite F.Cu being the active layer,
+			// while single-layer SMD pads (no ordering ambiguity) looked
+			// correct. Sorted once per frame; footprint item counts are
+			// small (tens, not thousands), so this is not worth caching.
+			const sorted = [...items].sort((a, b) => layerPaintRank(a.layer) - layerPaintRank(b.layer));
+			for (const item of sorted) {
+				const state = this.layerState.get(item.layer);
+				if (!state || !state.visible) {
+					continue;
+				}
+				const highlighted = this.selectedIds.has(item.id);
+				if (item.kind === 'footprint') {
+					if (highlighted) {
+						renderer.rect(new Vec2(item.bbox.x, item.bbox.y), item.bbox.w, item.bbox.h,
+							{ strokeColor: '#ffcc00', strokeWidth: 0.18 });
+					}
+					continue;
+				}
+				const color = highlighted ? '#ffcc00' : styleForLayer(item.layer).color;
+				item.draw(renderer, color);
+			}
+		}
+	}
+
+	/** Draws boardHighlight's outline, padded a little beyond the
+	 *  footprint's own bbox so the outline doesn't hug pad edges exactly —
+	 *  see setFootprintHighlight(). Procedural like drawEditPreview/
+	 *  drawGrid, so panning/zooming/re-selecting never needs a scene
+	 *  rebuild, just another frame. */
+	protected drawBoardHighlight(renderer: Renderer): void {
+		const highlight = this.boardHighlight;
+		if (this.documentType !== 'board' || !highlight) {
+			return;
+		}
+		const { x, y, w, h } = highlight.bbox;
+		const pad = Math.max(0.5, Math.max(w, h) * 0.08);
+		renderer.rect(
+			new Vec2(x - pad, y - pad), w + pad * 2, h + pad * 2,
+			{ strokeColor: BOARD_HIGHLIGHT_COLOR, strokeWidth: 0.2 });
+	}
+
 	/** KiCad-style 3×3 resize affordance for the two selected root shapes that
 	 * have an axis-aligned editable box. Kept in the dynamic pass so handle
 	 * size remains constant in screen pixels while zooming. */
@@ -3799,6 +4905,11 @@ function pointLiesOnSegmentInterior(px: number, py: number, x1: number, y1: numb
 /** Semi-transparent white reads as a "ghost" preview over any real element
  *  color underneath, without colliding with schColors' saturated palette. */
 const EDIT_PREVIEW_COLOR = 'rgba(255, 255, 255, 0.6)';
+
+/** Opaque, saturated yellow — reads clearly against board copper/silkscreen
+ *  colors at any zoom, and doesn't collide with any of them (see
+ *  setFootprintHighlight). */
+const BOARD_HIGHLIGHT_COLOR = '#ffcc00';
 
 /** Real KiCad's own drag-select box colors (dark color scheme), ported from
  *  common/preview_items/selection_area.cpp's 0-1 float RGB — confirmed

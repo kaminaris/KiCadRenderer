@@ -10,9 +10,39 @@
 // with a guessed orange that didn't match the user's real KiCad at all
 // (confirmed both by rule_area's value being genuinely different AND by the
 // user's own visual report: "rendered red... viewer shows orange").
-export const schematicBackgroundColor = 'rgb(40, 44, 52)';
+export let schematicBackgroundColor = 'rgb(40, 44, 52)';
+export let schematicGridColor = 'rgba(185, 198, 214, 0.30)';
 
-export const schColors = {
+export interface SchematicColorSet {
+	wire: string;
+	bus: string;
+	junction: string;
+	noConnect: string;
+	componentOutline: string;
+	componentBody: string;
+	pin: string;
+	pinName: string;
+	pinNumber: string;
+	reference: string;
+	value: string;
+	fields: string;
+	labelLocal: string;
+	labelGlobal: string;
+	labelHier: string;
+	labelDirective: string;
+	ruleArea: string;
+	sheet: string;
+	sheetBackground: string;
+	sheetFields: string;
+	sheetFilename: string;
+	sheetLabel: string;
+	note: string;
+	dnpMarker: string;
+	graphic: string;
+	frame: string;
+}
+
+export const schColors: SchematicColorSet = {
 	wire: 'rgb(152, 195, 121)',
 	bus: 'rgb(97, 175, 239)',
 	junction: 'rgb(152, 195, 121)',
@@ -59,7 +89,30 @@ export const schColors = {
 	// file guessed — that never matched wDark, only "looked plausibly
 	// KiCad-ish."
 	frame: 'rgb(127, 132, 142)',
-} as const;
+};
+
+export type SchematicColorName = keyof SchematicColorSet;
+
+function gridPaintColor(color: string): string {
+	const hex = color.match(/^#([0-9a-f]{6})$/i)?.[1];
+	if (!hex) {
+		return color;
+	}
+	return `rgba(${ parseInt(hex.slice(0, 2), 16) }, ${ parseInt(hex.slice(2, 4), 16) }, ${ parseInt(hex.slice(4, 6), 16) }, 0.30)`;
+}
+
+/** Theme values are mutable because a browser preference can be applied while
+ * a session is alive; callers must request a theme refresh afterwards so a
+ * WebGL session rebuilds its color-baked buffers. */
+export function setSchematicTheme(
+	background: string,
+	grid: string,
+	colors: Partial<SchematicColorSet>
+): void {
+	schematicBackgroundColor = background;
+	schematicGridColor = gridPaintColor(grid);
+	Object.assign(schColors, colors);
+}
 
 // Coarse category buckets for the schematic layer-toggle UI, bottom-to-top
 // paint order — schematics have nowhere near PCB's real layer-stack

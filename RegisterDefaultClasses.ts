@@ -23,6 +23,7 @@ import { KicadElementGrArc, KicadElementFpArc, KicadElementTrackArc } from '@kic
 import { KicadElementGrCircle, KicadElementFpCircle }  from '@kicad-io/KicadElementCircle';
 import { KicadElementDimension } from '@kicad-io/KicadElementDimension';
 import { KicadElementGrText, KicadElementFpText, KicadElementText, KicadElementTextBox } from '@kicad-io/KicadElementText';
+import { KicadElementFpPoly } from '@kicad-io/KicadElementPolygon';
 
 import { KicadElementWire }       from '@kicad-io/KicadElementWire';
 import { KicadElementBus, KicadElementBusEntry }        from '@kicad-io/KicadElementBus';
@@ -71,6 +72,7 @@ export function registerDefaultKicadClasses(): void {
 		FpRect: KicadElementFpRect,
 		FpCircle: KicadElementFpCircle,
 		FpArc: KicadElementFpArc,
+		FpPoly: KicadElementFpPoly,
 		Dimension: KicadElementDimension,
 		GrText: KicadElementGrText,
 		FpText: KicadElementFpText,

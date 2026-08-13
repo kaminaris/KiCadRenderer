@@ -105,10 +105,17 @@ interface ImageRecord {
  *    the actual scene content changes: layer visibility/opacity, selection
  *    highlight, or a new board loaded.
  *  - DYNAMIC: small per-frame content that genuinely changes every frame
- *    (currently just the grid, which depends on the camera's current bbox).
+ *    (the grid, ratsnest, drag/edit previews, selection highlight/handles).
  *    Cheap enough to fully re-tessellate every frame since it's a few
- *    hundred dots, not thousands of board items.
+ *    hundred shapes, not thousands of board items. Drawn in TWO passes —
+ *    grid first via flush() (drawn behind everything, then the static
+ *    scene on top of it), then everything else via a second
+ *    beginDynamicFrame()/flushOverlay() pass AFTER the static scene is
+ *    already on screen, so overlay content actually ends up on top of it
+ *    instead of underneath (see KicadRenderSession.render() and
+ *    Renderer.flushOverlay's doc comment).
  *
+
  * Even-odd glyph fills (render_cache text) are part of the STATIC set too —
  * each gets its own small "stencil, then cover" pair of GPU buffers, built
  * once in endStaticBuild() and just bound-and-drawn (no CPU work) every
@@ -341,7 +348,7 @@ export class WebGLRenderer implements Renderer {
 		if (points.length < 2 || !this.wantsStroke(style)) {
 			return;
 		}
-		this.pushStrokePolyline(points, style.strokeColor!, style.strokeWidth!, false);
+		this.pushStrokePolyline(points, style.strokeColor!, style.strokeWidth!, false, style.capStyle);
 	}
 
 	polygon(points: Vec2[], style: RenderStyle): void {
@@ -458,13 +465,6 @@ export class WebGLRenderer implements Renderer {
 			return;
 		}
 		if (style.fillColor) {
-			let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-			for (const ring of usableRings) {
-				for (const p of ring) {
-					minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-					maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-				}
-			}
 			// parseColor's 4th element is the color string's OWN alpha (e.g.
 			// zone fills bake ZONE_FILL_ALPHA into an rgba() string via
 			// LayerColors.withAlpha()) — discarding it and using only
@@ -475,11 +475,38 @@ export class WebGLRenderer implements Renderer {
 			// this bug never showed up there, only on WebGL's own manual
 			// color handling.
 			const [r, g, b, colorAlpha] = parseColor(style.fillColor);
-			// Close out whatever regular geometry came before this, so this
-			// stencil job's position in staticCommands reflects its real
-			// paint-order position instead of getting bucketed separately.
-			this.flushPendingRegular();
-			this.buildCommands.push({ kind: 'stencil', job: { rings: usableRings, color: [r, g, b, colorAlpha * this.currentOpacity], minX, minY, maxX, maxY } });
+			const color: [number, number, number, number] = [r, g, b, colorAlpha * this.currentOpacity];
+			if (this.buildingStatic) {
+				let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+				for (const ring of usableRings) {
+					for (const p of ring) {
+						minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+						maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+					}
+				}
+				// Close out whatever regular geometry came before this, so this
+				// stencil job's position in staticCommands reflects its real
+				// paint-order position instead of getting bucketed separately.
+				this.flushPendingRegular();
+				this.buildCommands.push({ kind: 'stencil', job: { rings: usableRings, color, minX, minY, maxX, maxY } });
+			}
+			else {
+				// Outside a static build (grid/ratsnest/drag-preview/edit-
+				// preview — anything drawn through beginDynamicFrame()), a
+				// buildCommands entry is a dead letter: only endStaticBuild()
+				// ever bakes buildCommands into staticCommands, and only
+				// flush()'s STATIC branch ever replays staticCommands — the
+				// dynamic/overlay draw path (uploadAndDrawDynamic/
+				// flushOverlay) only ever looks at buildPositions/
+				// buildColors. Any filled multiPolygon reached this way
+				// (which is most real pad shapes — rect/roundrect/oval/
+				// custom all fill via polygon()→multiPolygon(), only plain
+				// circular pads take the direct pushCircleFan path instead)
+				// was therefore silently never drawn — confirmed as why a
+				// dragged footprint's pads disappeared during the live
+				// preview. See drawImmediateStencilFill's doc comment.
+				this.drawImmediateStencilFill(usableRings, color);
+			}
 		}
 		if (this.wantsStroke(style)) {
 			for (const ring of usableRings) {
@@ -497,18 +524,7 @@ export class WebGLRenderer implements Renderer {
 	 * that only happens inside a beginStaticBuild()/endStaticBuild() pair.
 	 */
 	flush(): void {
-		const gl = this.gl;
-		gl.useProgram(this.program);
-		gl.uniformMatrix3fv(this.matrixLocation, false, new Float32Array(this.viewMatrix.elements));
-		gl.disable(gl.STENCIL_TEST);
-
-		if (this.buildPositions.length > 0) {
-			gl.bindBuffer(gl.ARRAY_BUFFER, this.dynamicPositionBuffer);
-			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.buildPositions), gl.DYNAMIC_DRAW);
-			gl.bindBuffer(gl.ARRAY_BUFFER, this.dynamicColorBuffer);
-			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.buildColors), gl.DYNAMIC_DRAW);
-			this.bindAndDraw(this.dynamicPositionBuffer, this.dynamicColorBuffer, 0, this.buildPositions.length / 2);
-		}
+		this.uploadAndDrawDynamic();
 
 		for (const cmd of this.staticCommands) {
 			if (cmd.kind === 'regular') {
@@ -521,6 +537,73 @@ export class WebGLRenderer implements Renderer {
 				this.drawCachedImageJob(cmd.job);
 			}
 		}
+	}
+
+	/** See Renderer.flushOverlay's doc comment — the second, overlay-only
+	 *  pass: just uploads+draws whatever was accumulated since the caller's
+	 *  own beginDynamicFrame(), with no static redraw after it. */
+	flushOverlay(): void {
+		this.uploadAndDrawDynamic();
+	}
+
+	protected uploadAndDrawDynamic(): void {
+		const gl = this.gl;
+		gl.useProgram(this.program);
+		gl.uniformMatrix3fv(this.matrixLocation, false, new Float32Array(this.viewMatrix.elements));
+		gl.disable(gl.STENCIL_TEST);
+
+		if (this.buildPositions.length > 0) {
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.dynamicPositionBuffer);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.buildPositions), gl.DYNAMIC_DRAW);
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.dynamicColorBuffer);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.buildColors), gl.DYNAMIC_DRAW);
+			this.bindAndDraw(this.dynamicPositionBuffer, this.dynamicColorBuffer, 0, this.buildPositions.length / 2);
+		}
+	}
+
+	/** multiPolygon()'s dynamic-context fill path — see its call site's doc
+	 *  comment for why the normal buildCommands/staticCommands route
+	 *  (bake once, replay cheaply forever) doesn't apply here: dynamic
+	 *  content is rebuilt from scratch every single frame regardless, so
+	 *  there's no caching win to chase — just fan-into-stencil, cover, done,
+	 *  using throwaway buffers deleted the same tick. Flushes whatever
+	 *  regular triangles have already accumulated first (and resets the
+	 *  accumulator after), so this fill lands at its correct position in
+	 *  paint order instead of before or after everything else in the frame. */
+	protected drawImmediateStencilFill(rings: Vec2[][], color: [number, number, number, number]): void {
+		this.uploadAndDrawDynamic();
+		this.buildPositions.length = 0;
+		this.buildColors.length = 0;
+
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		const fanPositions: number[] = [];
+		for (const ring of rings) {
+			const x0 = ring[0]!.x, y0 = ring[0]!.y;
+			for (const p of ring) {
+				minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+				maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+			}
+			for (let i = 1; i < ring.length - 1; i++) {
+				fanPositions.push(x0, y0, ring[i]!.x, ring[i]!.y, ring[i + 1]!.x, ring[i + 1]!.y);
+			}
+		}
+		const quad = [minX, minY, maxX, minY, maxX, maxY, minX, minY, maxX, maxY, minX, maxY];
+
+		const gl = this.gl;
+		const fanBuffer = gl.createBuffer()!;
+		gl.bindBuffer(gl.ARRAY_BUFFER, fanBuffer);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(fanPositions), gl.STREAM_DRAW);
+		const quadBuffer = gl.createBuffer()!;
+		gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad), gl.STREAM_DRAW);
+
+		this.drawCachedStencilJob({
+			fanPositionBuffer: fanBuffer, fanVertexCount: fanPositions.length / 2,
+			quadPositionBuffer: quadBuffer, color,
+		});
+
+		gl.deleteBuffer(fanBuffer);
+		gl.deleteBuffer(quadBuffer);
 	}
 
 	protected bindAndDraw(positionBuffer: WebGLBuffer, colorBuffer: WebGLBuffer, first: number, vertexCount: number): void {
@@ -639,7 +722,9 @@ export class WebGLRenderer implements Renderer {
 	 * stay full small circles since which "outward" half to use there isn't
 	 * a fixed direction (depends on the turn angle between two segments).
 	 */
-	protected pushStrokePolyline(points: Vec2[], colorStr: string, width: number, closed: boolean): void {
+	protected pushStrokePolyline(
+		points: Vec2[], colorStr: string, width: number, closed: boolean, capStyle: 'round' | 'butt' = 'round'
+	): void {
 		const color = parseColor(colorStr);
 		const halfWidth = width / 2;
 		const segmentCount = closed ? points.length : points.length - 1;
@@ -662,7 +747,11 @@ export class WebGLRenderer implements Renderer {
 			for (let i = 0; i <= jointEnd - jointStart; i++) {
 				this.pushCircleFanColor(points[jointStart + i]!.x, points[jointStart + i]!.y, halfWidth, color);
 			}
-			if (!closed) {
+			// Butt caps just leave the segment quad's own flat end edge as
+			// the boundary — the two triangles above already cover it, so
+			// there's genuinely nothing more to draw here, not even a
+			// degenerate case to guard against.
+			if (!closed && capStyle === 'round') {
 				const first = points[0]!, second = points[1]!;
 				const startOutwardAngle = Math.atan2(first.y - second.y, first.x - second.x);
 				this.pushSemicircleFanColor(first.x, first.y, halfWidth, startOutwardAngle, color);

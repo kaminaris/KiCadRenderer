@@ -67,9 +67,12 @@ export {
 export type { LayerStyle } from './paint/LayerColors';
 export {
 	schematicBackgroundColor,
+	schematicGridColor,
 	schColors,
+	setSchematicTheme,
 	schematicLayerOrder,
 } from './paint/SchematicColors';
+export type { SchematicColorName, SchematicColorSet } from './paint/SchematicColors';
 export { layerPaintOrder, layerPaintRank } from './paint/LayerOrder';
 export type { PaintedShape } from './paint/PaintedShape';
 export { shapeToBBox, shapeContainsPoint } from './paint/PaintedShape';

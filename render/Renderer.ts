@@ -5,6 +5,14 @@ export interface RenderStyle {
 	strokeColor?: string;
 	strokeWidth?: number;
 	fillColor?: string;
+	/** Open-polyline end caps only (closed shapes never draw caps — there's
+	 *  no open end to cap). Defaults to 'round' when omitted, matching every
+	 *  existing caller's prior behavior. 'butt' skips the round cap geometry
+	 *  entirely — for a thin utility overlay like ratsnest airwires, that's
+	 *  both the visually-correct look (real KiCad's ratsnest is a plain
+	 *  flat-ended line, not a rounded pill) and meaningfully cheaper: two
+	 *  semicircle fans per line add up fast across hundreds of airwires. */
+	capStyle?: 'round' | 'butt';
 }
 
 /** An image payload embedded directly in a KiCad schematic's `(data ...)`
@@ -88,4 +96,22 @@ export interface Renderer {
 	/** Starts accumulating this frame's per-frame-only content (e.g. the
 	 * camera-dependent grid) — only meaningful alongside beginStaticBuild. */
 	beginDynamicFrame?(): void;
+
+	/**
+	 * Uploads and draws ONLY whatever's been accumulated since the last
+	 * beginDynamicFrame(), without touching the static buffer — the overlay
+	 * counterpart to flush(), which draws dynamic content THEN the static
+	 * scene on top of it (grid-behind-board ordering). Callers that want an
+	 * overlay layer (ratsnest, drag preview, edit-in-progress preview,
+	 * selection highlight/handles — content that must sit ON TOP of the
+	 * static board/schematic, not under it) need a second
+	 * beginDynamicFrame()/…draw calls…/flushOverlay() pass AFTER the first
+	 * flush() has already put the static scene on screen; calling flush()
+	 * again there would draw the overlay, then redundantly redraw (and so
+	 * cover) it with the static scene a second time. Backends without a
+	 * static/dynamic split (Canvas2dRenderer) don't implement this — their
+	 * draw calls are already immediate-mode, so ordering just falls out of
+	 * call order with no separate flush needed.
+	 */
+	flushOverlay?(): void;
 }

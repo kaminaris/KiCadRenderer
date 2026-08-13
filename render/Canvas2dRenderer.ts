@@ -172,8 +172,10 @@ export class Canvas2dRenderer implements Renderer {
 		// KiCad tracks/wires always have rounded end-caps and joins (a track
 		// segment is a "stadium" shape, not a bare rectangle) — Canvas2D's
 		// default lineCap is 'butt', which is what produced the square-ended
-		// traces.
-		this.ctx.lineCap = 'round';
+		// traces. capStyle: 'butt' opts back out for callers that explicitly
+		// don't want that (see RenderStyle.capStyle's doc comment) — ratsnest
+		// airwires, specifically, which real KiCad draws flat-ended.
+		this.ctx.lineCap = style.capStyle === 'butt' ? 'butt' : 'round';
 		this.ctx.lineJoin = 'round';
 		this.ctx.beginPath();
 		this.ctx.moveTo(points[0]!.x, points[0]!.y);
