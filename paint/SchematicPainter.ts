@@ -70,6 +70,16 @@ export interface SchPaintedItem {
 	fieldName?: string;
 	/** kind:'label' for symbol instance fields — the field's own origin to use for drag-start calculations. */
 	fieldOrigin?: { x: number; y: number; rotation?: number };
+	/**
+	 * Overrides which id paint() checks against highlightedIds/
+	 * netHighlightedIds — for a purely-visual duplicate item (e.g. a symbol
+	 * field's `:text`-suffixed twin, kept hitTestable:false so it keeps
+	 * rendering even when the Labels selection filter is off) that should
+	 * still highlight in lockstep with its hit-testable sibling instead of
+	 * always drawing in its default color and masking the sibling's own
+	 * highlight underneath it. Defaults to `id`.
+	 */
+	highlightId?: string;
 }
 
 /** A hierarchical sheet reference — surfaced separately from the painted
@@ -657,10 +667,11 @@ export class SchematicPainter {
 					continue;
 				}
 				let color: string;
-				if (highlightedIds.has(item.id)) {
+				const highlightId = item.highlightId ?? item.id;
+				if (highlightedIds.has(highlightId)) {
 					color = '#ffcc00';
 				}
-				else if (netHighlightedIds.has(item.id)) {
+				else if (netHighlightedIds.has(highlightId)) {
 					color = '#ff44ff';
 				}
 				else {
@@ -1386,6 +1397,7 @@ export class SchematicPainter {
 				items.push({
 					id: `${ instanceId }:prop:${ name }:text`, layer: 'Text', kind: 'text',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: instance,
+					highlightId: `${ instanceId }:prop:${ name }`,
 					draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
 				});
 			}

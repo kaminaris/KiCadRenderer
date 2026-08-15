@@ -172,7 +172,7 @@ export function distanceToSegment(px: number, py: number, x1: number, y1: number
 }
 
 // Standard ray-casting point-in-polygon test.
-function pointInPolygon(points: { x: number; y: number }[], px: number, py: number): boolean {
+export function pointInPolygon(points: { x: number; y: number }[], px: number, py: number): boolean {
 	let inside = false;
 	for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
 		const xi = points[i]!.x, yi = points[i]!.y;

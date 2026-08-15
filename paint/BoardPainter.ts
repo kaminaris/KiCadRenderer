@@ -32,8 +32,9 @@ export interface PaintedItem {
 	// Captures whatever geometry this item needs to redraw itself — built
 	// once, replayed every frame against the current camera transform. See
 	// LayeredBoardScene.paint() below for how highlight color is threaded
-	// through without rebuilding this closure.
-	draw: (renderer: Renderer, color: string) => void;
+	// through without rebuilding this closure. displayMode is only consulted
+	// by pad/via/track items — see paint()'s modeForKind and ItemDisplayMode.
+	draw: (renderer: Renderer, color: string, displayMode?: ItemDisplayMode) => void;
 }
 
 /**
@@ -49,6 +50,28 @@ export interface LayeredBoardScene {
 	/** All hit-testable items, concatenated in paint order (so HitTest's
 	 * reverse-iteration "topmost wins" stays correct across layers). */
 	hitTestItems: PaintedItem[];
+	/** One entry per (zone, expanded copper layer) — see ZoneFillRegion. */
+	zoneFills: ZoneFillRegion[];
+	/** Copper layers in PHYSICAL stack order (F.Cu first, B.Cu last, exactly
+	 *  as declared in the board's own `(layers ...)` table — KiCad writes
+	 *  that table in stack order, not the render/paint order layersPresent
+	 *  uses). BoardRatsnest needs this to know which internal layers a
+	 *  through/blind/buried via's plated barrel actually spans. */
+	copperLayerStack: string[];
+}
+
+/** A copper pour's authored OUTLINE (not the thermal-relief-carved fill
+ * geometry from getFilledPolygons) on one copper layer — used by
+ * BoardRatsnest to treat same-net pads/vias/tracks inside the pour as
+ * electrically joined by it, the same way real KiCad's connectivity engine
+ * tests a pad against a zone's outline rather than its fractured fill (the
+ * fill has a clearance gap punched around every pad, so testing a pad's
+ * center against IT would wrongly report "not connected" for the exact
+ * pads the pour exists to join — see BoardRatsnest.ts). */
+export interface ZoneFillRegion {
+	netId: number;
+	layer: string;
+	points: { x: number; y: number }[];
 }
 
 export interface LayerVisibilityState {
@@ -58,6 +81,14 @@ export interface LayerVisibilityState {
 
 /** Pcbnew's two primary zone-display actions. */
 export type ZoneDisplayMode = 'filled' | 'outline';
+
+/** Pcbnew's "Sketch Pads/Vias/Tracks" actions — filled copper vs. a stroke-
+ *  only boundary, so DRC clearance/annular-ring gaps are easier to eyeball. */
+export type ItemDisplayMode = 'filled' | 'outline';
+
+/** World-mm stroke width for outline/"sketch" display modes — matches this
+ *  file's existing npthOutlineColor stroke convention (buildPad). */
+const SKETCH_STROKE_WIDTH = 0.05;
 
 /**
  * KiCad lifts the active PCB layer above the ordinary board stack while
@@ -149,35 +180,42 @@ export class BoardPainter {
 			}
 		}
 
-		const edgeLines = board.rootElement.findChildrenByClass(getGrLineClass())
-			.filter((l: any) => l.getLayer() === 'Edge.Cuts');
-		for (const line of edgeLines) {
+		// Board-level graphics can live on any active layer (not only Edge.Cuts).
+		// Keeping Edge.Cuts in this ordinary graphic pass also makes a newly
+		// placed board outline behave just like the original imported one.
+		const graphicLines = board.rootElement.findChildrenByClass(getGrLineClass());
+		for (const line of graphicLines) {
 			pushItem(this.buildGrLine(line));
 		}
 
-		const edgeArcs = board.rootElement.findChildrenByClass(getGrArcClass())
-			.filter((a: any) => a.getLayer() === 'Edge.Cuts');
-		for (const arc of edgeArcs) {
+		const graphicArcs = board.rootElement.findChildrenByClass(getGrArcClass());
+		for (const arc of graphicArcs) {
 			const item = this.buildGrArc(arc);
 			if (item) {
 				pushItem(item);
 			}
 		}
 
-		// A simple rectangular board outline is a single gr_rect, not a set
-		// of gr_line segments — this test board is exactly that case (a
-		// plain 20x20mm gr_rect), which is why edge cuts were missing
-		// despite the gr_line/gr_arc painters existing.
-		const edgeRects = board.rootElement.findChildrenByClass(getGrRectClass())
-			.filter((r: any) => r.getLayer() === 'Edge.Cuts');
-		for (const rect of edgeRects) {
+		const graphicRects = board.rootElement.findChildrenByClass(getGrRectClass());
+		for (const rect of graphicRects) {
 			pushItem(this.buildGrRect(rect));
 		}
 
-		const edgeCircles = board.rootElement.findChildrenByClass(getGrCircleClass())
-			.filter((c: any) => c.getLayer() === 'Edge.Cuts');
-		for (const circle of edgeCircles) {
+		const graphicCircles = board.rootElement.findChildrenByClass(getGrCircleClass());
+		for (const circle of graphicCircles) {
 			pushItem(this.buildGrCircle(circle));
+		}
+
+		const graphicPolygons = board.rootElement.findChildrenByClass(getGrPolyClass());
+		for (const polygon of graphicPolygons) {
+			const item = this.buildGrPoly(polygon);
+			if (item) pushItem(item);
+		}
+
+		const graphicCurves = board.rootElement.findChildrenByClass(getGrCurveClass());
+		for (const curve of graphicCurves) {
+			const item = this.buildGrCurve(curve);
+			if (item) pushItem(item);
 		}
 
 		if (getDimensionClass()) {
@@ -203,6 +241,13 @@ export class BoardPainter {
 				}
 			}
 		}
+		if (getGrTextBoxClass()) {
+			const textBoxes = board.rootElement.findChildrenByClass(getGrTextBoxClass());
+			for (const textBox of textBoxes) {
+				const item = this.buildGrTextBox(textBox);
+				if (item) pushItem(item);
+			}
+		}
 
 		const layersPresent = layerPaintOrder.filter(l => layerBuckets.has(l));
 		const hitTestItems: PaintedItem[] = [];
@@ -214,7 +259,34 @@ export class BoardPainter {
 			}
 		}
 
-		return { layersPresent, layerBuckets, hitTestItems };
+		const copperLayerStack = globalLayers.filter(l => l.endsWith('.Cu'));
+		const zoneFills = this.buildZoneFills(zones, copperLayerStack);
+
+		return { layersPresent, layerBuckets, hitTestItems, zoneFills, copperLayerStack };
+	}
+
+	/** One ZoneFillRegion per (zone, copper layer it pours onto) — see that
+	 *  interface's doc comment for why this uses the authored outline
+	 *  (getPolygon) rather than the thermal-relief-carved fill geometry. */
+	protected buildZoneFills(zones: any[], copperLayers: string[]): ZoneFillRegion[] {
+		const regions: ZoneFillRegion[] = [];
+		for (const zone of zones) {
+			const netId = typeof zone.getNetId === 'function' ? zone.getNetId() : null;
+			if (netId === null || netId <= 0) {
+				continue;
+			}
+			const outline = typeof zone.getPolygon === 'function' ? zone.getPolygon() : [];
+			if (outline.length < 3) {
+				continue;
+			}
+			const requested: string[] = typeof zone.getLayers === 'function' ? zone.getLayers() : [];
+			const layers = requested.flatMap(layer => layer === '*.Cu' ? copperLayers : [layer])
+				.filter(layer => layer.endsWith('.Cu'));
+			for (const layer of layers) {
+				regions.push({ netId, layer, points: outline });
+			}
+		}
+		return regions;
 	}
 
 	/**
@@ -295,6 +367,14 @@ export class BoardPainter {
 		activeLayer: string | null = null,
 		zoneDisplayMode: ZoneDisplayMode = 'filled',
 		highlightedIds: Set<string> = new Set(),
+		itemDisplayModes: { pad: ItemDisplayMode; via: ItemDisplayMode; track: ItemDisplayMode } =
+			{ pad: 'filled', via: 'filled', track: 'filled' },
+		/** Pcbnew's "Highlight Net" — items on this net draw in the highlight
+		 *  color; every OTHER item that has a net (copper: pads/tracks/vias/
+		 *  zones) is dimmed instead, so the highlighted net visually pops
+		 *  without hiding board context (silkscreen/edge-cuts have no net and
+		 *  stay at full opacity either way). */
+		highlightedNetId: number | null = null,
 		/** World-space visible rect — when given, items whose bbox falls
 		 *  entirely outside it are skipped. Omit to draw everything (e.g. the
 		 *  WebGL tessellation pass, which must stay complete since it isn't
@@ -337,8 +417,22 @@ export class BoardPainter {
 					}
 					continue;
 				}
-				const color = highlighted ? '#ffcc00' : baseColor;
-				item.draw(renderer, color);
+				const netHighlighted = highlightedNetId !== null && item.netId === highlightedNetId;
+				let color: string;
+				if (highlighted || netHighlighted) {
+					color = '#ffcc00';
+				}
+				else if (highlightedNetId !== null && item.netId != null && item.netId > 0) {
+					color = withAlpha(baseColor, 0.2);
+				}
+				else {
+					color = baseColor;
+				}
+				const mode = item.kind === 'pad' ? itemDisplayModes.pad
+					: item.kind === 'via' ? itemDisplayModes.via
+					: item.kind === 'track' ? itemDisplayModes.track
+					: 'filled';
+				item.draw(renderer, color, mode);
 			}
 			renderer.endBatch?.();
 		}
@@ -363,7 +457,21 @@ export class BoardPainter {
 			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: true, element: segment,
 			netId: typeof segment.getNetId === 'function' ? segment.getNetId() : null,
 			netName: typeof segment.getNetName === 'function' ? segment.getNetName() : null,
-			draw: (renderer, color) => {
+			draw: (renderer, color, displayMode) => {
+				if (displayMode === 'outline') {
+					// "Sketch Tracks" — the track's actual copper boundary (a
+					// capsule the current fill hides), not a thin centerline.
+					const dx = end.x - start.x, dy = end.y - start.y;
+					const len = Math.hypot(dx, dy);
+					const half = width / 2;
+					const nx = len > 0 ? -dy / len * half : 0;
+					const ny = len > 0 ? dx / len * half : half;
+					renderer.polygon([
+						new Vec2(start.x + nx, start.y + ny), new Vec2(end.x + nx, end.y + ny),
+						new Vec2(end.x - nx, end.y - ny), new Vec2(start.x - nx, start.y - ny),
+					], { strokeColor: color, strokeWidth: SKETCH_STROKE_WIDTH });
+					return;
+				}
 				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: color, strokeWidth: width });
 			},
 		};
@@ -386,6 +494,8 @@ export class BoardPainter {
 
 		return {
 			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			netId: typeof arc.getNetId === 'function' ? arc.getNetId() : null,
+			netName: typeof arc.getNetName === 'function' ? arc.getNetName() : null,
 			draw: (renderer, color) => {
 				renderer.arc(new Vec2(centerX, centerY), radius, startAngle, endAngle, { strokeColor: color, strokeWidth: width });
 			},
@@ -395,6 +505,8 @@ export class BoardPainter {
 	protected buildZone(zone: any): PaintedItem[] {
 		const items: PaintedItem[] = [];
 		const zoneId = zone.getUuid() ?? 'zone';
+		const netId = typeof zone.getNetId === 'function' ? zone.getNetId() : null;
+		const netName = typeof zone.getNetName === 'function' ? zone.getNetName() : null;
 		const filledPolygons: { layer: string; points: { x: number; y: number }[] }[] =
 			typeof zone.getFilledPolygons === 'function' ? zone.getFilledPolygons() : [];
 		const outline: { x: number; y: number }[] = typeof zone.getPolygon === 'function' ? zone.getPolygon() : [];
@@ -415,15 +527,22 @@ export class BoardPainter {
 			: [];
 
 		// Outline mode displays the authored zone boundary, not the derived
-		// edge of a fill. That also keeps unfilled zones visible.
+		// edge of a fill. Real KiCad always shows a zone's hatched outline
+		// when it has no computed fill on a layer regardless of the global
+		// Filled/Outline display setting — there's nothing to show AS
+		// filled — so this only gets tagged 'outline' (i.e. hidden while
+		// the global mode is 'filled', per BoardPainter.paint's
+		// zoneDisplayMode filter) on a layer that DOES have a fill; an
+		// unfilled layer's outline item is left untagged so it always paints.
 		if (outline.length >= 3) {
+			const filledLayers = new Set(filledPolygons.map(fp => fp.layer));
 			const points = outline.map(point => new Vec2(point.x, point.y));
 			const bbox = boundsOfPoints(outline);
 			for (const layer of layers) {
 				items.push({
 					id: `${ zoneId }:${ layer }:outline`, layer, kind: 'zone',
 					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: zone,
-					zoneDisplayMode: 'outline',
+					zoneDisplayMode: filledLayers.has(layer) ? 'outline' : undefined, netId, netName,
 					draw: (renderer, color) => {
 						renderer.polygon(points, { strokeColor: color, strokeWidth: displayOutlineWidth });
 						for (const [start, end] of edgeHatches) {
@@ -451,7 +570,7 @@ export class BoardPainter {
 				// the actual components/traces on top of them.
 				hitTestable: false,
 				element: zone,
-				zoneDisplayMode: 'filled',
+				zoneDisplayMode: 'filled', netId, netName,
 				draw: (renderer, color) => {
 					// multiPolygon(), not polygon() — a zone fill (copper
 					// pour) is frequently concave (it weaves around
@@ -682,7 +801,7 @@ export class BoardPainter {
 			const worldRings = cacheRings.map(ring => ring.map(p => new Vec2(p.x, p.y)));
 			const bbox = boundsOfPoints(worldRings.flat().map(p => ({ x: p.x, y: p.y })));
 			return {
-				id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: textEl,
+				id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: textEl,
 				draw: (renderer, color) => {
 					if (knockout) {
 						const margin = 0.3;
@@ -711,7 +830,7 @@ export class BoardPainter {
 		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, angleDeg, isBack, undefined, anchor);
 
 		return {
-			id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: textEl,
+			id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: textEl,
 			draw: (renderer, color) => {
 				if (knockout) {
 					const margin = textSize * 0.4;
@@ -744,7 +863,7 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'segment', x1: worldStart.x, y1: worldStart.y, x2: worldEnd.x, y2: worldEnd.y, width };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: line,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: line,
 			draw: (renderer, color) => {
 				renderer.line([worldStart, worldEnd], { strokeColor: color, strokeWidth: width || 0.1 });
 			},
@@ -826,7 +945,7 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: radius };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
 			draw: (renderer, color) => {
 				renderer.arc(
 					worldCenter, radius,
@@ -941,7 +1060,11 @@ export class BoardPainter {
 					id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 					netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 					netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
-					draw: (renderer, color) => {
+					draw: (renderer, color, displayMode) => {
+						if (displayMode === 'outline') {
+							renderer.circle(worldCenter, size.width / 2, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
+							return;
+						}
 						if (isNpth) {
 							renderer.circle(worldCenter, size.width / 2, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
 							punchHole(renderer);
@@ -971,7 +1094,11 @@ export class BoardPainter {
 						id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 						netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 						netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
-						draw: (renderer, color) => {
+						draw: (renderer, color, displayMode) => {
+							if (displayMode === 'outline') {
+								renderer.polygon(worldCorners, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
+								return;
+							}
 							if (isNpth) {
 								renderer.polygon(worldCorners, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
 								punchHole(renderer);
@@ -993,7 +1120,11 @@ export class BoardPainter {
 							id: `${ id }:poly${ ri }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 							netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 							netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
-							draw: (renderer, color) => {
+							draw: (renderer, color, displayMode) => {
+								if (displayMode === 'outline') {
+									renderer.polygon(worldCorners, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
+									return;
+								}
 								if (isNpth) {
 									renderer.polygon(worldCorners, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
 									punchHole(renderer);
@@ -1044,7 +1175,11 @@ export class BoardPainter {
 					id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 					netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 					netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
-					draw: (renderer, color) => {
+					draw: (renderer, color, displayMode) => {
+						if (displayMode === 'outline') {
+							renderer.polygon(worldCorners, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
+							return;
+						}
 						if (isNpth) {
 							renderer.polygon(worldCorners, { fillColor: boardBackgroundColor, strokeColor: npthOutlineColor, strokeWidth: 0.05 });
 							punchHole(renderer);
@@ -1157,7 +1292,12 @@ export class BoardPainter {
 			id, layer: 'Vias', kind: 'via', shape, bbox: shapeToBBox(shape), hitTestable: true, element: via,
 			netId: typeof via.getNetId === 'function' ? via.getNetId() : null,
 			netName: typeof via.getNetName === 'function' ? via.getNetName() : null,
-			draw: (renderer, color) => {
+			draw: (renderer, color, displayMode) => {
+				if (displayMode === 'outline') {
+					renderer.circle(new Vec2(origin.x, origin.y), outerRadius, { strokeColor: color, strokeWidth: SKETCH_STROKE_WIDTH });
+					renderer.circle(new Vec2(origin.x, origin.y), holeRadius, { strokeColor: color, strokeWidth: SKETCH_STROKE_WIDTH });
+					return;
+				}
 				// Vias are drilled through-holes — draw the annular copper
 				// ring, then punch the hole by drawing the board background
 				// color on top, instead of a solid filled disc.
@@ -1212,7 +1352,7 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'rect', x, y, w, h };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shape, hitTestable: false, element: rect,
+			id, layer, kind: 'graphic', shape, bbox: shape, hitTestable: true, element: rect,
 			draw: (renderer, color) => {
 				// Edge cuts (and most gr_rect graphics) are an outline, not a
 				// filled shape — a board outline being solid-filled would
@@ -1336,12 +1476,93 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'circle', cx: center.x, cy: center.y, r: radius };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: circle,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: circle,
 			draw: (renderer, color) => {
 				renderer.circle(new Vec2(center.x, center.y), radius, { strokeColor: color, strokeWidth: width || 0.1 });
 			},
 		};
 	}
+
+	/** Pcbnew `gr_text_box`: a start/end rectangle with optional border and
+	 * multiline text laid out inside its four margins. */
+	protected buildGrTextBox(textBox: any): PaintedItem | null {
+		if (!textBox.value || typeof textBox.getStartEnd !== 'function') return null;
+		const { start, end } = textBox.getStartEnd();
+		const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
+		const width = Math.abs(end.x - start.x), height = Math.abs(end.y - start.y);
+		if (width <= 0 || height <= 0) return null;
+		const layer = typeof textBox.getLayer === 'function' ? textBox.getLayer() : 'F.SilkS';
+		const isBack = layer.startsWith('B.');
+		const font = typeof textBox.getFont === 'function' ? textBox.getFont() : { height: 1, thickness: 0.15 };
+		const textSize = font.height || 1;
+		const margins = textBox.findFirstChildByName?.('margins')?.attributes ?? [];
+		const marginLeft = Number(margins[0]?.value) || 0;
+		const marginTop = Number(margins[1]?.value) || marginLeft;
+		const marginRight = Number(margins[2]?.value) || marginLeft;
+		const marginBottom = Number(margins[3]?.value) || marginTop;
+		const contentWidth = Math.max(0, width - marginLeft - marginRight);
+		const contentHeight = Math.max(0, height - marginTop - marginBottom);
+		const justify = typeof textBox.getAnchorPoint === 'function' ? textBox.getAnchorPoint() : { x: 0, y: 0.5 };
+		const textPosition = new Vec2(x + marginLeft + contentWidth * justify.x, y + marginTop + contentHeight * justify.y);
+		const geometry = computeStrokeTextGeometry(textBox.value, textPosition, textSize, 0, isBack, font.thickness || 0.15, justify);
+		const border = textBox.getSimpleChildValue?.('border') !== false;
+		const strokeWidth = typeof textBox.getStroke === 'function' ? textBox.getStroke().width : 0.1;
+		const id = textBox.getUuid?.() ?? `gr-text-box:${ layer }:${ x },${ y }`;
+		const bbox = { x, y, w: width, h: height };
+		return {
+			id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: textBox,
+			draw: (renderer, color) => {
+				if (border) renderer.rect(new Vec2(x, y), width, height, { strokeColor: color, strokeWidth: strokeWidth || 0.1 });
+				drawStrokeTextGeometry(renderer, geometry, color);
+			},
+		};
+	}
+
+	protected buildGrPoly(polygon: any): PaintedItem | null {
+		const points: Array<{ x: number; y: number }> = typeof polygon.getPoints === 'function' ? polygon.getPoints() : [];
+		if (points.length < 3) return null;
+		const layer = polygon.getLayer();
+		const width = typeof polygon.getStroke === 'function' ? polygon.getStroke().width : 0.1;
+		const id = polygon.getUuid() ?? `gr-poly:${ layer }:${ points[0]!.x },${ points[0]!.y }`;
+		const shape: PaintedShape = { type: 'polygon', points: points.map(point => ({ x: point.x, y: point.y })) };
+		return {
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: polygon,
+			draw: (renderer, color) => renderer.line(
+				[...points.map(point => new Vec2(point.x, point.y)), new Vec2(points[0]!.x, points[0]!.y)],
+				{ strokeColor: color, strokeWidth: width || 0.1 }),
+		};
+	}
+
+	protected buildGrCurve(curve: any): PaintedItem | null {
+		const points: Array<{ x: number; y: number }> = typeof curve.getPoints === 'function' ? curve.getPoints() : [];
+		if (points.length !== 4) return null;
+		const layer = curve.getLayer();
+		const width = typeof curve.getStroke === 'function' ? curve.getStroke().width : 0.1;
+		const id = curve.getUuid() ?? `gr-curve:${ layer }:${ points[0]!.x },${ points[0]!.y }`;
+		const shapePoints = cubicBezierToPolyline(points.map(point => new Vec2(point.x, point.y)) as [Vec2, Vec2, Vec2, Vec2]);
+		const shape: PaintedShape = { type: 'polygon', points: shapePoints.map(point => ({ x: point.x, y: point.y })) };
+		return {
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: curve,
+			draw: (renderer, color) => renderer.line(shapePoints, { strokeColor: color, strokeWidth: width || 0.1 }),
+		};
+	}
+}
+
+/** Approximate a KiCad cubic graphic (`gr_curve`) using the same control
+ * points stored in its native S-expression.  Renderer has no cubic primitive,
+ * so a short fixed tessellation keeps Canvas2D/WebGL output consistent. */
+function cubicBezierToPolyline(points: [Vec2, Vec2, Vec2, Vec2], steps = 32): Vec2[] {
+	const [p0, p1, p2, p3] = points;
+	const result: Vec2[] = [];
+	for (let i = 0; i <= steps; i++) {
+		const t = i / steps;
+		const u = 1 - t;
+		result.push(new Vec2(
+			u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+			u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
+		));
+	}
+	return result;
 }
 
 /**
@@ -1590,12 +1811,12 @@ function convexHull(points: { x: number; y: number }[]): { x: number; y: number 
 // (which has the @kicad-io/* path alias configured) passes real instances
 // in; these helpers only need the *classes* for findChildrenByClass()
 // lookups, resolved from the same module the caller already imported.
-let _Footprint: any, _Segment: any, _Via: any, _Pad: any, _Zone: any, _Layers: any, _GrLine: any, _GrArc: any, _GrRect: any, _GrCircle: any;
-let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _FpPoly: any, _Dimension: any, _GrText: any, _FpText: any, _TrackArc: any;
+let _Footprint: any, _Segment: any, _Via: any, _Pad: any, _Zone: any, _Layers: any, _GrLine: any, _GrArc: any, _GrRect: any, _GrCircle: any, _GrPoly: any, _GrCurve: any;
+let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _FpPoly: any, _Dimension: any, _GrText: any, _GrTextBox: any, _FpText: any, _TrackArc: any;
 export function registerKicadIoClasses(classes: {
 	Footprint: any; Segment: any; Via: any; Pad: any; Zone: any;
-	Layers: any; GrLine: any; GrArc: any; GrRect: any; GrCircle: any;
-	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; FpPoly?: any; Dimension?: any; GrText?: any; FpText?: any;
+	Layers: any; GrLine: any; GrArc: any; GrRect: any; GrCircle: any; GrPoly: any; GrCurve: any;
+	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; FpPoly?: any; Dimension?: any; GrText?: any; GrTextBox?: any; FpText?: any;
 	TrackArc?: any;
 }): void {
 	_Footprint = classes.Footprint;
@@ -1608,6 +1829,8 @@ export function registerKicadIoClasses(classes: {
 	_GrArc = classes.GrArc;
 	_GrRect = classes.GrRect;
 	_GrCircle = classes.GrCircle;
+	_GrPoly = classes.GrPoly;
+	_GrCurve = classes.GrCurve;
 	_FpLine = classes.FpLine;
 	_FpRect = classes.FpRect;
 	_FpCircle = classes.FpCircle;
@@ -1615,6 +1838,7 @@ export function registerKicadIoClasses(classes: {
 	_FpPoly = classes.FpPoly;
 	_Dimension = classes.Dimension;
 	_GrText = classes.GrText;
+	_GrTextBox = classes.GrTextBox;
 	_FpText = classes.FpText;
 	_TrackArc = classes.TrackArc;
 }
@@ -1628,6 +1852,8 @@ function getGrLineClass() { return _GrLine; }
 function getGrArcClass() { return _GrArc; }
 function getGrRectClass() { return _GrRect; }
 function getGrCircleClass() { return _GrCircle; }
+function getGrPolyClass() { return _GrPoly; }
+function getGrCurveClass() { return _GrCurve; }
 function getFpLineClass() { return _FpLine; }
 function getFpRectClass() { return _FpRect; }
 function getFpCircleClass() { return _FpCircle; }
@@ -1635,6 +1861,7 @@ function getFpArcClass() { return _FpArc; }
 function getFpPolyClass() { return _FpPoly; }
 function getDimensionClass() { return _Dimension; }
 function getGrTextClass() { return _GrText; }
+function getGrTextBoxClass() { return _GrTextBox; }
 function getFpTextClass() { return _FpText; }
 function getTrackArcClass() { return _TrackArc; }
 

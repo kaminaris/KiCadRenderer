@@ -13,18 +13,20 @@ import { KicadElementWire }            from '@kicad-io/KicadElementWire';
 import { KicadElementBus, KicadElementBusEntry } from '@kicad-io/KicadElementBus';
 import { KicadElementJunction }        from '@kicad-io/KicadElementJunction';
 import { KicadElementNoConnect }       from '@kicad-io/KicadElementNoConnect';
-import { KicadElementRectangle }       from '@kicad-io/KicadElementStartEnd';
-import { KicadElementCircle }          from '@kicad-io/KicadElementCircle';
-import { KicadElementArc }             from '@kicad-io/KicadElementArc';
-import { KicadElementPolyline, KicadElementBezier } from '@kicad-io/KicadElementPolyline';
+import { KicadElementRectangle, KicadElementGrLine, KicadElementGrRect } from '@kicad-io/KicadElementStartEnd';
+import { KicadElementCircle, KicadElementGrCircle } from '@kicad-io/KicadElementCircle';
+import { KicadElementArc, KicadElementGrArc }       from '@kicad-io/KicadElementArc';
+import { KicadElementPolyline, KicadElementBezier, KicadElementGrCurve } from '@kicad-io/KicadElementPolyline';
+import { KicadElementGrPoly }          from '@kicad-io/KicadElementPolygon';
 import { KicadElementAt }         from '@kicad-io/KicadElementAt';
+import { KicadElement }           from '@kicad-io/KicadElement';
 import { KicadElementSize }       from '@kicad-io/KicadElementSize';
 import { KicadElementTable, KicadElementTableCell } from '@kicad-io/KicadElementTable';
 import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
 import { KicadElementGroup } from '@kicad-io/KicadElementGroup';
 import { KicadElementData } from '@kicad-io/KicadElementData';
 import { KicadElementImage } from '@kicad-io/KicadElementImage';
-import { KicadElementText, KicadElementTextBox, KicadElementLabel } from '@kicad-io/KicadElementText';
+import { KicadElementText, KicadElementTextBox, KicadElementLabel, KicadElementGrText, KicadElementGrTextBox } from '@kicad-io/KicadElementText';
 import { KicadElementGlobalLabel, type KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
 import { KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
 import { KicadElementNetclassFlag, type KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
@@ -32,6 +34,7 @@ import { KicadElementSymbol }          from '@kicad-io/KicadElementSymbol';
 import { KicadElementFootprint }       from '@kicad-io/KicadElementFootprint';
 import { KicadElementSegment }         from '@kicad-io/KicadElementStartEnd';
 import { KicadElementVia }             from '@kicad-io/KicadElementVia';
+import { KicadElementZone }            from '@kicad-io/KicadElementZone';
 import { KicadElementSheet }           from '@kicad-io/KicadElementSheet';
 import { KicadElementPin }             from '@kicad-io/KicadElementPin';
 import { KicadElementLibSymbols }      from '@kicad-io/KicadElementLibSymbols';
@@ -44,6 +47,10 @@ import { buildPowerSymbolInstance }    from '@kicad-io/Builder/PowerSymbolInstan
 
 export type { KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
 export type { KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
+/** Pcbnew's 3 crosshair styles (CROSS_HAIR_MODE in KiCad's own
+ *  gal_display_options.h) — 'small' relies on the browser's own cursor and
+ *  draws nothing extra; 'full'/'diagonal' are drawn by drawBoardCrosshair. */
+export type CrosshairMode = 'small' | 'full' | 'diagonal';
 import { Vec2 }                        from './math/Vec2';
 import { Matrix3 }                     from './math/Matrix3';
 import { Camera2 }                     from './math/Camera2';
@@ -52,7 +59,7 @@ import { Canvas2dRenderer }            from './render/Canvas2dRenderer';
 import { WebGLRenderer }               from './render/WebGLRenderer';
 import {
 	BoardPainter, boardPaintOrder, defaultLayerState,
-	LayeredBoardScene, LayerVisibilityState, PaintedItem, ZoneDisplayMode
+	LayeredBoardScene, LayerVisibilityState, PaintedItem, ZoneDisplayMode, ItemDisplayMode
 }                                      from './paint/BoardPainter';
 import {
 	SchematicPainter, defaultSchLayerState,
@@ -61,6 +68,55 @@ import {
 import { boardBackgroundColor, styleForLayer } from './paint/LayerColors';
 import { layerPaintRank } from './paint/LayerOrder';
 import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/BoardRatsnest';
+import { buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath, resolveCopperLayers, ZoneFillJob } from './paint/BoardZoneFill';
+
+/** Off-main-thread runner for zone-fill jobs, injected by the app (a Web
+ *  Worker wrapper — see apps/kicad-viewer/src/worker/zoneFillClient.ts) so
+ *  this shared package stays decoupled from the app's own worker/bundler
+ *  setup, same reasoning as registerKicadIoClasses for @kicad-io. */
+export type ZoneFillExecutor = (
+	jobs: ZoneFillJob[],
+	onProgress?: (done: number, total: number) => void,
+) => Promise<{ zoneUuid: string; layer: string; points: MmPath }[]>;
+
+/**
+ * Real per-project design-rule values a caller can source from the board's
+ * `.kicad_pro` (KicadProjectFile.getMinClearanceMm() /
+ * getCopperEdgeClearanceMm() / getDefaultNetClassClearanceMm()) rather than
+ * this app guessing a single hardcoded number. kicad-render itself has no
+ * Project-level type (KicadRenderSession only ever sees the board's own
+ * AST), so this stays a plain optional data bag the caller fills in — same
+ * decoupling shape as ZoneFillExecutor. Omitted/absent fields fall back to
+ * BoardZoneFill's own real-KiCad-stock-default edge clearance, or to the
+ * zone's own local override alone for pad/track clearance — exactly
+ * matching this feature's pre-existing behavior for a board with no project.
+ */
+export interface ZoneFillDesignSettings {
+	/** Board Setup > Design Rules > Constraints > "Clearance" — floors the
+	 *  pad/track/via exclusion gap alongside the zone's own connect_pads
+	 *  override and the Default net class's clearance. */
+	minClearanceMm?: number;
+	/** Board Setup > Design Rules > Constraints > "Copper to edge
+	 *  clearance" — passed straight to buildEdgeExclusionsByLayer. */
+	copperEdgeClearanceMm?: number;
+	/** The "Default" net class's own clearance — real KiCad implicitly
+	 *  derives CLEARANCE_CONSTRAINT per net class this way; this app has no
+	 *  per-net netclass-assignment model yet, so this is applied board-wide
+	 *  rather than per pad/track. */
+	defaultNetClassClearanceMm?: number;
+}
+
+/** The pad/track/via exclusion clearance actually used for a zone fill: the
+ *  larger of the zone's own local override and whatever real project-level
+ *  floors are available — never just one guessed number. */
+function resolveZoneClearanceMm(zone: KicadElementZone, designSettings?: ZoneFillDesignSettings): number {
+	return Math.max(
+		zone.getClearance(),
+		designSettings?.minClearanceMm ?? 0,
+		designSettings?.defaultNetClassClearanceMm ?? 0,
+	);
+}
+
 import { schematicBackgroundColor, schematicGridColor }  from './paint/SchematicColors';
 import { hitTest }                     from './paint/HitTest';
 import { distanceToSegment }           from './paint/PaintedShape';
@@ -74,6 +130,13 @@ export interface LoadResult {
 	parseMs: number;
 	buildMs: number;
 	layersPresent: string[];
+}
+
+function readBoardOrigin(setup: any, name: 'grid_origin' | 'aux_axis_origin'): Vec2 {
+	const origin = setup?.findFirstChildByName?.(name);
+	const x = Number(origin?.attributes?.[0]?.value);
+	const y = Number(origin?.attributes?.[1]?.value);
+	return Number.isFinite(x) && Number.isFinite(y) ? new Vec2(x, y) : new Vec2(0, 0);
 }
 
 export interface HitResult {
@@ -114,6 +177,27 @@ export interface SelectionCurveAnchors {
 	id: string;
 	kind: 'circle' | 'arc' | 'bezier' | 'polygon';
 	anchors: { kind: CurveAnchor; x: number; y: number }[];
+}
+
+/**
+ * Real KiCad's default wire/bus line mode is "90 degree": when the two
+ * endpoints of a segment being drawn aren't already axis-aligned, it
+ * auto-inserts a bend so the drawn path is always two orthogonal
+ * (horizontal + vertical) segments rather than one diagonal one — never
+ * arbitrary angles. The bend point follows whichever axis the cursor has
+ * moved further along from `from` (the same "dominant axis" heuristic real
+ * KiCad's own line tool uses while dragging, so the preview always matches
+ * where the click will actually land). Returns null when `from`/`to` are
+ * already aligned — no bend needed, a single straight segment is already
+ * orthogonal.
+ */
+export function orthogonalWireBend(from: Vec2, to: Vec2): Vec2 | null {
+	if (from.x === to.x || from.y === to.y) {
+		return null;
+	}
+	return Math.abs(to.x - from.x) >= Math.abs(to.y - from.y)
+		? new Vec2(to.x, from.y)
+		: new Vec2(from.x, to.y);
 }
 
 /**
@@ -204,6 +288,11 @@ export class KicadRenderSession {
 	/** Hover-driven net highlight IDs — painted in the same highlight color as selection. */
 	protected highlightedNetIds: Set<string> = new Set();
 	protected highlightedNetName: string | null = null;
+	/** Board's own net-highlight state — a numeric netId (boards have no
+	 *  paint-id-set equivalent; matching is done live, per-item, by
+	 *  BoardPainter.paint() — see highlightBoardNetAtScreen). */
+	protected highlightedBoardNetId: number | null = null;
+	protected highlightedBoardNetName: string | null = null;
 	protected connectivityService = new SchematicConnectivityService();
 	protected connectivityCacheText: string | null = null;
 	protected connectivityCache: SchematicConnectivitySummary | null = null;
@@ -211,6 +300,9 @@ export class KicadRenderSession {
 	 *  means "use the built-in default" (1.27mm schematic / 0.5mm board). */
 	protected gridSpacingMm: number | null = null;
 	protected gridVisible = true;
+	/** Pcbnew's independently persisted grid and drill/place-file origins. */
+	protected boardGridOrigin = new Vec2(0, 0);
+	protected boardDrillPlaceOrigin = new Vec2(0, 0);
 	/** Hand-drawn editor's in-progress tool state — see drawEditPreview(). */
 	protected editPreview: EditPreviewState | null = null;
 	/** Board-side "outline this footprint" cue — see setFootprintHighlight()/
@@ -222,6 +314,17 @@ export class KicadRenderSession {
 	protected ratsnestLines: BoardRatsnestLine[] = [];
 	protected ratsnestVisible = true;
 	protected zoneDisplayMode: ZoneDisplayMode = 'filled';
+	protected padDisplayMode: ItemDisplayMode = 'filled';
+	protected viaDisplayMode: ItemDisplayMode = 'filled';
+	protected trackDisplayMode: ItemDisplayMode = 'filled';
+	/** Pcbnew's left-toolbar crosshair style — see drawBoardCrosshair(). 'small'
+	 *  relies on the browser's own cursor, so nothing extra is drawn for it. */
+	protected crosshairMode: CrosshairMode = 'small';
+	/** Last known pointer position in screen (CSS pixel) space, updated by the
+	 *  board pointer controller on every mousemove regardless of gesture state
+	 *  — needed to draw the full-window/diagonal crosshair styles, which have
+	 *  no browser-native equivalent. */
+	protected boardPointerScreen: Vec2 | null = null;
 	/**
 	 * Snapshot-based undo/redo: full schematic text before each mutation, not
 	 * hand-written inverse commands. Chosen because rewireSchematic (circuit
@@ -285,6 +388,21 @@ export class KicadRenderSession {
 	protected pendingFitItems: { bbox: { x: number; y: number; w: number; h: number } }[] | null = null;
 	/** Below this buffer size (device px), defer camera fit. */
 	protected static readonly minFitViewportPx = 32;
+	/**
+	 * True once resize() has actually stamped real dimensions into the canvas
+	 * at least once. A fresh `<canvas>` with no width/height attribute
+	 * defaults to 300×150 — comfortably above minFitViewportPx — so
+	 * fitToItems()'s size check alone doesn't catch "this session's canvas
+	 * has never been through a real resize() yet" (e.g. a document loaded
+	 * while the editor screen is still `display:none`, before the first
+	 * resize() call ever fires). Without this flag fitToItems() computes a
+	 * real zoom/pan against that bogus 300×150 backing store, and the later
+	 * resize() to the real size has nothing queued in pendingFitItems to
+	 * retry — the camera stays fit for a viewport that never existed, and
+	 * the schematic looks blank until something else (e.g. switching to the
+	 * PCB view and back) happens to trigger another fit.
+	 */
+	protected hasResized = false;
 	/** Real KiCad's own click-tolerance radius, in SCREEN pixels — a constant
 	 * regardless of zoom (eeschema/tools/sch_selection_tool.cpp's
 	 * `HITTEST_THRESHOLD_PIXELS`, confirmed in the user's local checkout).
@@ -437,6 +555,7 @@ export class KicadRenderSession {
 			this.canvasGl.width = w;
 			this.canvasGl.height = h;
 		}
+		this.hasResized = true;
 		this.camera.viewportSize.set(w, h);
 		// Retry a fit that was deferred while the canvas was still ~0-wide.
 		if (this.pendingFitItems) {
@@ -675,6 +794,51 @@ export class KicadRenderSession {
 		}
 		this.highlightedNetName = null;
 		this.highlightedNetIds.clear();
+		this.scheduleRender();
+	}
+
+	get currentHighlightedBoardNetName(): string | null { return this.highlightedBoardNetName; }
+
+	/** Board counterpart of highlightNetAtScreen — clicking a pad/track/via/
+	 *  zone highlights every other item on that net and dims the rest of the
+	 *  board's copper. WebGL bakes item color into its static vertex buffer
+	 *  (same as selectMultiple's own highlight color), so this needs the same
+	 *  geometryDirty rebuild that method uses, not just scheduleRender(). */
+	highlightBoardNetAtScreen(screenPos: Vec2): boolean {
+		if (this.documentType !== 'board' || !this.scene) {
+			this.clearBoardNetHighlight();
+			return false;
+		}
+		const hit = this.hitTestAtScreen(screenPos);
+		const item = hit ? this.scene.hitTestItems.find(candidate => candidate.id === hit.id) : null;
+		const netId = item?.netId ?? null;
+		if (netId === null || netId <= 0) {
+			this.clearBoardNetHighlight();
+			return false;
+		}
+		if (this.highlightedBoardNetId === netId) {
+			return true;
+		}
+		this.highlightedBoardNetId = netId;
+		// Tracks/vias reference a net by ID only ("(net 5)") — the name lives
+		// on whichever item actually carries it (pads write "(net 5 "GND")"),
+		// so a bare-ID hit falls back to scanning for that name instead of
+		// showing a blank one.
+		this.highlightedBoardNetName = item?.netName
+			|| this.scene.hitTestItems.find(candidate => candidate.netId === netId && candidate.netName)?.netName
+			|| null;
+		this.geometryDirty = true;
+		this.scheduleRender();
+		return true;
+	}
+
+	clearBoardNetHighlight(): void {
+		if (this.highlightedBoardNetId === null) {
+			return;
+		}
+		this.highlightedBoardNetId = null;
+		this.highlightedBoardNetName = null;
+		this.geometryDirty = true;
 		this.scheduleRender();
 	}
 
@@ -944,6 +1108,10 @@ export class KicadRenderSession {
 
 	get currentZoneDisplayMode(): ZoneDisplayMode { return this.zoneDisplayMode; }
 
+	get currentBoardGridOrigin(): Readonly<Vec2> { return this.boardGridOrigin; }
+
+	get currentBoardDrillPlaceOrigin(): Readonly<Vec2> { return this.boardDrillPlaceOrigin; }
+
 	setRatsnestVisible(visible: boolean): void {
 		this.ratsnestVisible = visible;
 		this.scheduleRender();
@@ -959,6 +1127,107 @@ export class KicadRenderSession {
 		// geometry requires a rebuild. Canvas2D honors the new mode next frame.
 		this.geometryDirty = true;
 		this.scheduleRender();
+	}
+
+	/** Persists one of Pcbnew's setup-level origins and redraws its marker. */
+	setBoardOrigin(kind: 'grid' | 'drill-place', x: number, y: number): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !Number.isFinite(x) || !Number.isFinite(y)) {
+			return false;
+		}
+		this.pushUndoSnapshot(kind === 'grid' ? 'Set Grid Origin' : 'Set Drill/Place File Origin');
+		const setup = this.boardRoot.rootElement.findFirstChildByName?.('setup') as any;
+		if (!setup) {
+			return false;
+		}
+		const name = kind === 'grid' ? 'grid_origin' : 'aux_axis_origin';
+		let origin = setup.findFirstChildByName?.(name) as any;
+		if (!origin) {
+			origin = new KicadElement();
+			origin.name = name;
+			setup.addChild(origin);
+		}
+		origin.attributes = [
+			{ value: x, format: 'literal' },
+			{ value: y, format: 'literal' },
+		];
+		if (kind === 'grid') {
+			this.boardGridOrigin = new Vec2(x, y);
+		}
+		else {
+			this.boardDrillPlaceOrigin = new Vec2(x, y);
+		}
+		this.scheduleRender();
+		return true;
+	}
+
+	/** KiCad omits a zero origin from its board writer; do the same here. */
+	resetBoardOrigin(kind: 'grid' | 'drill-place'): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return false;
+		}
+		this.pushUndoSnapshot(kind === 'grid' ? 'Reset Grid Origin' : 'Reset Drill/Place File Origin');
+		const setup = this.boardRoot.rootElement.findFirstChildByName?.('setup') as any;
+		const name = kind === 'grid' ? 'grid_origin' : 'aux_axis_origin';
+		const origin = setup?.findFirstChildByName?.(name) as any;
+		if (origin) {
+			const index = setup.children.indexOf(origin);
+			if (index >= 0) {
+				setup.children.splice(index, 1);
+			}
+		}
+		if (kind === 'grid') {
+			this.boardGridOrigin = new Vec2(0, 0);
+		}
+		else {
+			this.boardDrillPlaceOrigin = new Vec2(0, 0);
+		}
+		this.scheduleRender();
+		return true;
+	}
+
+	get currentPadDisplayMode(): ItemDisplayMode { return this.padDisplayMode; }
+	get currentViaDisplayMode(): ItemDisplayMode { return this.viaDisplayMode; }
+	get currentTrackDisplayMode(): ItemDisplayMode { return this.trackDisplayMode; }
+
+	/** Pcbnew's "Sketch Pads/Vias/Tracks" — same rebuild requirement as
+	 *  setZoneDisplayMode above, for the same static-buffer reason. */
+	setPadDisplayMode(mode: ItemDisplayMode): void {
+		if (this.padDisplayMode === mode) return;
+		this.padDisplayMode = mode;
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	setViaDisplayMode(mode: ItemDisplayMode): void {
+		if (this.viaDisplayMode === mode) return;
+		this.viaDisplayMode = mode;
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	setTrackDisplayMode(mode: ItemDisplayMode): void {
+		if (this.trackDisplayMode === mode) return;
+		this.trackDisplayMode = mode;
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	get currentCrosshairMode(): CrosshairMode { return this.crosshairMode; }
+
+	setCrosshairMode(mode: CrosshairMode): void {
+		if (this.crosshairMode === mode) return;
+		this.crosshairMode = mode;
+		this.scheduleRender();
+	}
+
+	/** Called by the board pointer controller on every mousemove regardless
+	 *  of gesture state — the 'full'/'diagonal' crosshair styles have no
+	 *  browser-native equivalent and must be redrawn as the pointer moves. */
+	updateBoardPointerScreen(pos: Vec2 | null): void {
+		this.boardPointerScreen = pos;
+		if (this.crosshairMode !== 'small') {
+			this.scheduleRender();
+		}
 	}
 
 	/** Matches KiCad's non-warping wheel-zoom branch: the world point under
@@ -1041,6 +1310,134 @@ export class KicadRenderSession {
 		this.boardRoot.rootElement.addChild(via);
 		this.commitAstMutation();
 		return via.getUuid() ?? null;
+	}
+
+	/** Pcbnew's default board-graphic width (board_design_settings.h's
+	 * DEFAULT_LINE_WIDTH) is 0.10 mm.  These helpers intentionally construct
+	 * the board-native `gr_*` records rather than reusing schematic graphics. */
+	addBoardGraphicLine(x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) return null;
+		this.pushUndoSnapshot('Draw line');
+		const line = new KicadElementGrLine();
+		line.setStartEnd(x1, y1, x2, y2);
+		line.setStroke(strokeWidth, 'default');
+		line.setLayer(layer);
+		line.setUuid();
+		this.boardRoot!.rootElement.addChild(line);
+		this.commitAstMutation();
+		return line.getUuid() ?? null;
+	}
+
+	addBoardGraphicRect(x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) return null;
+		this.pushUndoSnapshot('Draw rectangle');
+		const rect = new KicadElementGrRect();
+		rect.setStartEnd(x1, y1, x2, y2);
+		rect.setStroke(strokeWidth, 'default');
+		rect.setLayer(layer);
+		rect.setUuid();
+		this.boardRoot!.rootElement.addChild(rect);
+		this.commitAstMutation();
+		return rect.getUuid() ?? null;
+	}
+
+	addBoardGraphicCircle(cx: number, cy: number, radius: number, layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || radius <= 0) return null;
+		this.pushUndoSnapshot('Draw circle');
+		const circle = new KicadElementGrCircle();
+		circle.setCenter(cx, cy);
+		circle.setEnd(cx + radius, cy);
+		circle.setStroke(strokeWidth, 'default');
+		circle.setLayer(layer);
+		circle.setUuid();
+		this.boardRoot!.rootElement.addChild(circle);
+		this.commitAstMutation();
+		return circle.getUuid() ?? null;
+	}
+
+	addBoardGraphicArc(sx: number, sy: number, mx: number, my: number, ex: number, ey: number, layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || (sx === ex && sy === ey)) return null;
+		this.pushUndoSnapshot('Draw arc');
+		const arc = new KicadElementGrArc();
+		arc.setStartMidEnd(sx, sy, mx, my, ex, ey);
+		arc.setStroke(strokeWidth, 'default');
+		arc.setLayer(layer);
+		arc.setUuid();
+		this.boardRoot!.rootElement.addChild(arc);
+		this.commitAstMutation();
+		return arc.getUuid() ?? null;
+	}
+
+	addBoardGraphicPolygon(points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || points.length < 3) return null;
+		this.pushUndoSnapshot('Draw polygon');
+		const polygon = new KicadElementGrPoly();
+		polygon.setPoints(points.map(point => ({ x: point.x, y: point.y })));
+		polygon.setStroke(strokeWidth, 'default');
+		polygon.setLayer(layer);
+		polygon.setUuid();
+		this.boardRoot!.rootElement.addChild(polygon);
+		this.commitAstMutation();
+		return polygon.getUuid() ?? null;
+	}
+
+	addBoardGraphicBezier(points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || points.length !== 4) return null;
+		this.pushUndoSnapshot('Draw Bezier');
+		const curve = new KicadElementGrCurve();
+		curve.setPoints(points.map(point => ({ x: point.x, y: point.y })));
+		curve.setStroke(strokeWidth, 'default');
+		curve.setLayer(layer);
+		curve.setUuid();
+		this.boardRoot!.rootElement.addChild(curve);
+		this.commitAstMutation();
+		return curve.getUuid() ?? null;
+	}
+
+	/** Pcbnew's board defaults from board_design_settings.h: 1.0 mm text with
+	 * 0.15 mm text stroke.  It anchors newly placed text left/bottom and mirrors
+	 * it when placed on a back layer. */
+	addBoardGraphicText(x: number, y: number, value: string, layer: string): string | null {
+		if (!this.canAddBoardGraphic() || !value.trim()) return null;
+		this.pushUndoSnapshot('Draw text');
+		const text = new KicadElementGrText(value);
+		text.setOrigin(x, y, 0);
+		text.setLayer(layer);
+		text.setFont(1, 1, false, false, 0.15);
+		text.setJustify('left', 'bottom', layer.startsWith('B.'));
+		text.setUuid();
+		this.boardRoot!.rootElement.addChild(text);
+		this.commitAstMutation();
+		return text.getUuid() ?? null;
+	}
+
+	/** Native Pcbnew `gr_text_box`: the default legacy margin is
+	 * stroke/2 + text-height*0.75 = 0.825 mm for the default board style.
+	 * A text box is border-enabled by default and uses the ordinary 0.10 mm
+	 * graphic stroke while its text itself uses the 0.15 mm text stroke. */
+	addBoardGraphicTextBox(x1: number, y1: number, x2: number, y2: number, value: string, layer: string): string | null {
+		if (!this.canAddBoardGraphic() || !value.trim() || x1 === x2 || y1 === y2) return null;
+		this.pushUndoSnapshot('Draw text box');
+		const textBox = new KicadElementGrTextBox(value);
+		textBox.setStartEnd(Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2));
+		textBox.setSimpleChild('margins', 0.825, 'numeric').setAttribute({ value: 0.825, format: 'numeric' }, 1);
+		const margins = textBox.findFirstChildByName('margins')!;
+		margins.setAttribute({ value: 0.825, format: 'numeric' }, 2);
+		margins.setAttribute({ value: 0.825, format: 'numeric' }, 3);
+		textBox.setLayer(layer);
+		textBox.setFont(1, 1, false, false, 0.15);
+		textBox.setJustify('left', 'middle', layer.startsWith('B.'));
+		textBox.setSimpleChild('border', true, 'boolean');
+		textBox.setSimpleChild('knockout', false, 'boolean');
+		textBox.setStroke(0.1, 'default');
+		textBox.setUuid();
+		this.boardRoot!.rootElement.addChild(textBox);
+		this.commitAstMutation();
+		return textBox.getUuid() ?? null;
+	}
+
+	private canAddBoardGraphic(): boolean {
+		return this.documentType === 'board' && !!this.boardRoot?.rootElement;
 	}
 
 	/** Reads a pad/track/via net directly from the painted item's AST node.
@@ -1562,10 +1959,15 @@ export class KicadRenderSession {
 		// Canvas may still be 0×N (or 1×N after Math.max clamp) before CSS
 		// layout. Fitting into that viewport makes zoom ≈ 0; a later resize
 		// then keeps that zoom and the preview looks blank. Defer instead.
+		// !hasResized also catches a canvas that's never been through a real
+		// resize() at all — its HTML default (300×150) is comfortably above
+		// minFitViewportPx, so the size check alone would miss it (see
+		// hasResized's doc comment).
 		const viewW = this.canvas2d.width;
 		const viewH = this.canvas2d.height;
 		if (
-			viewW < KicadRenderSession.minFitViewportPx
+			!this.hasResized
+			|| viewW < KicadRenderSession.minFitViewportPx
 			|| viewH < KicadRenderSession.minFitViewportPx
 		) {
 			this.pendingFitItems = items;
@@ -1698,6 +2100,9 @@ export class KicadRenderSession {
 		const parseMs = performance.now() - t0;
 		const boardRoot = { rootElement };
 		this.boardRoot = boardRoot;
+		const setup = rootElement.findFirstChildByName?.('setup') as any;
+		this.boardGridOrigin = readBoardOrigin(setup, 'grid_origin');
+		this.boardDrillPlaceOrigin = readBoardOrigin(setup, 'aux_axis_origin');
 
 		const t1 = performance.now();
 		this.scene = this.painter.build(boardRoot);
@@ -1713,6 +2118,8 @@ export class KicadRenderSession {
 		this.boardDirtyFootprints.clear();
 		this.dragPreviewFootprints.clear();
 		this.dragPreviewRatsnestEdges = [];
+		this.highlightedBoardNetId = null;
+		this.highlightedBoardNetName = null;
 
 		if (!options?.preserveView) {
 			this.fitToItems(this.scene.hitTestItems);
@@ -2130,6 +2537,195 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	/** Per-zone fill provenance — purely session/UI bookkeeping (e.g. a
+	 *  future "modified" indicator or gating "Clear Fill"); BoardPainter
+	 *  needs none of this, since a live-computed fill is written straight
+	 *  into the zone's own `filled_polygons` AST field (via
+	 *  KicadElementZone.setFilledPolygons — see KicadElementZone.ts's Phase
+	 *  3 setters), the exact field BoardPainter.buildZone already reads for
+	 *  an imported fill. Keyed by zone uuid; a zone never appearing here
+	 *  reads as 'imported' (whatever the file itself carried). */
+	protected zoneFillState = new Map<string, 'imported' | 'live' | 'cleared'>();
+
+	protected findZoneByUuid(uuid: string): KicadElementZone | null {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return null;
+		}
+		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
+		return zones.find(zone => zone.getUuid() === uuid) ?? null;
+	}
+
+	/** Every board-wide rule area whose `(keepout (copperpour not_allowed))`
+	 *  forbids other zones from pouring into it — the plain-data shape
+	 *  BoardZoneFill's buildEdgeExclusionsByLayer needs, gathered here
+	 *  (rather than inside BoardZoneFill.ts) since it's the one place that
+	 *  already has live KicadElementZone access. Applies board-wide: even a
+	 *  keepout that isn't itself being (re)filled still excludes other
+	 *  zones' pours (real KiCad: "the exclusion is by outline rather than
+	 *  filled area", zone_filler.cpp), so callers pass every zone on the
+	 *  board, not just the ones being filled this call. */
+	private keepoutZoneInputs(allZones?: readonly KicadElementZone[]): KeepoutZoneInput[] {
+		const zones = allZones ?? (this.boardRoot?.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[] ?? []);
+		return zones
+			.filter(zone => zone.isRuleArea() && zone.getDoNotAllowZoneFills() && zone.getPolygon().length >= 3)
+			.map(zone => ({ outlinePoints: zone.getPolygon(), layers: zone.getLayers() }));
+	}
+
+	/**
+	 * Computes and writes a zone's fill for every copper layer it pours
+	 * onto — BoardZoneFill's ported zone_filler.cpp pipeline against
+	 * `this.scene`'s already-built pad/via/track geometry, so this only
+	 * needs a scene that's already up to date (no special build-order
+	 * requirement: the fill computation runs AFTER a full scene exists, not
+	 * interleaved with building one).
+	 *
+	 * The actual Clipper2 boolean-op work is genuinely slow enough to
+	 * freeze the UI for several seconds on a board with a few zones and a
+	 * lot of copper to route around, so it doesn't run on this thread —
+	 * `runJobs` is the caller's off-main-thread executor (apps/kicad-viewer's
+	 * zoneFillClient.ts, a Web Worker wrapper); this method only gathers the
+	 * plain job data and applies the results, exactly mirroring how
+	 * BoardZoneFill.ts itself splits "read the live scene" (main-thread-only)
+	 * from "run Clipper2" (worker-safe) — kicad-render stays decoupled from
+	 * the app's own worker/bundler setup, matching how e.g.
+	 * registerKicadIoClasses keeps this package decoupled from @kicad-io.
+	 */
+	async fillZone(
+		zoneUuid: string, runJobs: ZoneFillExecutor, onProgress?: (done: number, total: number) => void,
+		designSettings?: ZoneFillDesignSettings,
+	): Promise<boolean> {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
+			return false;
+		}
+		const zone = this.findZoneByUuid(zoneUuid);
+		// Rule areas ("keepouts") are never filled — real KiCad's own
+		// zone_filler.cpp skips them before ever building a fill job for
+		// them ("Rule areas are not filled").
+		if (!zone || zone.isRuleArea()) {
+			return false;
+		}
+		const outline = zone.getPolygon();
+		if (outline.length < 3) {
+			return false;
+		}
+		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardRoot);
+		const copperLayers = resolveCopperLayers(this.scene);
+		const extraExclusionsByLayer = buildEdgeExclusionsByLayer(
+			this.boardRoot, copperLayers, this.keepoutZoneInputs(), designSettings?.copperEdgeClearanceMm,
+		);
+		const jobs = buildZoneFillJobs(
+			[{ uuid: zoneUuid, outlinePoints: outline, netId: zone.getNetId(), layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings) }],
+			this.scene, boardOutlineNm, extraExclusionsByLayer,
+		);
+		const results = await runJobs(jobs, onProgress);
+
+		// Re-validate after the await — the board could have been closed or
+		// swapped out for a different one while the worker was running.
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || this.findZoneByUuid(zoneUuid) !== zone) {
+			return false;
+		}
+		const fill = results.filter(r => r.zoneUuid === zoneUuid).map(r => ({ layer: r.layer, points: r.points }));
+		this.pushUndoSnapshot('Fill zone');
+		zone.setFilledPolygons(fill);
+		zone.setFilled(fill.length > 0);
+		this.zoneFillState.set(zoneUuid, 'live');
+		this.commitAstMutation();
+		return true;
+	}
+
+	clearZoneFill(zoneUuid: string): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return false;
+		}
+		const zone = this.findZoneByUuid(zoneUuid);
+		if (!zone) {
+			return false;
+		}
+		this.pushUndoSnapshot('Clear zone fill');
+		zone.setFilledPolygons([]);
+		zone.setFilled(false);
+		this.zoneFillState.set(zoneUuid, 'cleared');
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Fills every zone on the board in one undo step (one worker run
+	 *  covering every zone's jobs, so progress reflects the whole board, not
+	 *  one zone at a time). Returns the count actually filled (zones with
+	 *  fewer than 3 outline points are skipped, same guard as fillZone). */
+	async fillAllZones(
+		runJobs: ZoneFillExecutor, onProgress?: (done: number, total: number) => void,
+		designSettings?: ZoneFillDesignSettings,
+	): Promise<number> {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
+			return 0;
+		}
+		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
+		// Rule areas ("keepouts") are never filled themselves — see fillZone's
+		// comment — they only ever act as exclusions for OTHER zones' fills.
+		const fillable = zones.filter(zone => !zone.isRuleArea() && zone.getPolygon().length >= 3);
+		if (fillable.length === 0) {
+			return 0;
+		}
+		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardRoot);
+		const copperLayers = resolveCopperLayers(this.scene);
+		const extraExclusionsByLayer = buildEdgeExclusionsByLayer(
+			this.boardRoot, copperLayers, this.keepoutZoneInputs(zones), designSettings?.copperEdgeClearanceMm,
+		);
+		const zoneInputs = fillable.map(zone => ({
+			uuid: zone.getUuid() ?? '', outlinePoints: zone.getPolygon(), netId: zone.getNetId(),
+			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings),
+		})).filter(z => z.uuid);
+		const jobs = buildZoneFillJobs(zoneInputs, this.scene, boardOutlineNm, extraExclusionsByLayer);
+		const results = await runJobs(jobs, onProgress);
+
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return 0;
+		}
+		const resultsByZone = new Map<string, { layer: string; points: MmPath }[]>();
+		for (const r of results) {
+			if (!resultsByZone.has(r.zoneUuid)) resultsByZone.set(r.zoneUuid, []);
+			resultsByZone.get(r.zoneUuid)!.push({ layer: r.layer, points: r.points });
+		}
+
+		this.pushUndoSnapshot('Fill all zones');
+		let filledCount = 0;
+		for (const zone of fillable) {
+			const uuid = zone.getUuid();
+			if (!uuid) continue;
+			const fill = resultsByZone.get(uuid) ?? [];
+			zone.setFilledPolygons(fill);
+			zone.setFilled(fill.length > 0);
+			this.zoneFillState.set(uuid, 'live');
+			filledCount++;
+		}
+		this.commitAstMutation();
+		return filledCount;
+	}
+
+	/** Clears every zone's fill in one undo step (real KiCad's "Clear All
+	 *  Zone Fills" Edit-menu action). */
+	clearAllZoneFills(): number {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return 0;
+		}
+		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
+		if (zones.length === 0) {
+			return 0;
+		}
+		this.pushUndoSnapshot('Clear all zone fills');
+		for (const zone of zones) {
+			zone.setFilledPolygons([]);
+			zone.setFilled(false);
+			const uuid = zone.getUuid();
+			if (uuid) {
+				this.zoneFillState.set(uuid, 'cleared');
+			}
+		}
+		this.commitAstMutation();
+		return zones.length;
+	}
+
 	/** Defers commitAstMutation()'s scene rebuild (a full re-paint of every
 	 *  item, confirmed non-trivial for anything but a tiny schematic) until
 	 *  the matching endBatch() — wrap several mutation calls (e.g.
@@ -2345,10 +2941,18 @@ export class KicadRenderSession {
 	 * across wire/shape/text/label worth checking against.
 	 */
 	mutateElementByPaintId(paintId: string, mutate: (element: any) => void): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+		const isSchematic = this.documentType === 'schematic';
+		if (isSchematic && (!this.schematicRoot || !this.schScene)) {
 			return false;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		if (!isSchematic && this.documentType !== 'board') {
+			return false;
+		}
+		if (!isSchematic && (!this.boardRoot || !this.scene)) {
+			return false;
+		}
+		const hitTestItems = isSchematic ? this.schScene!.hitTestItems : this.scene!.hitTestItems;
+		const item = hitTestItems.find(it => it.id === paintId);
 		if (!item?.element) {
 			return false;
 		}
@@ -4436,7 +5040,8 @@ export class KicadRenderSession {
 				}
 				else {
 					this.painter.paint(this.scene!, renderer, this.layerState, this.activeBoardLayer, this.zoneDisplayMode,
-						highlighted, viewBBox);
+						highlighted, { pad: this.padDisplayMode, via: this.viaDisplayMode, track: this.trackDisplayMode },
+						this.highlightedBoardNetId, viewBBox);
 				}
 			};
 
@@ -4484,11 +5089,13 @@ export class KicadRenderSession {
 			// and flushOverlay() draws JUST that — no second static redraw to
 			// cover it back up.
 			this.drawBoardRatsnest(renderer);
+			this.drawBoardOrigins(renderer);
 			this.drawBoardDragPreview(renderer);
 			this.drawEditPreview(renderer);
 			this.drawBoardHighlight(renderer);
 			this.drawSelectionResizeHandles(renderer);
 			this.drawSelectionCurveAnchors(renderer);
+			this.drawBoardCrosshair(renderer);
 			if (renderer.flushOverlay) {
 				renderer.flushOverlay();
 			}
@@ -4555,10 +5162,11 @@ export class KicadRenderSession {
 		if (!Number.isFinite(minorDotWorld) || minorDotWorld <= 0) {
 			return;
 		}
-		const startX = Math.round(bbox.x / spacing) - 1;
-		const endX = Math.round(bbox.x2 / spacing) + 1;
-		const startY = Math.round(bbox.y / spacing) - 1;
-		const endY = Math.round(bbox.y2 / spacing) + 1;
+		const gridOrigin = schematic ? new Vec2(0, 0) : this.boardGridOrigin;
+		const startX = Math.floor((bbox.x - gridOrigin.x) / spacing) - 1;
+		const endX = Math.ceil((bbox.x2 - gridOrigin.x) / spacing) + 1;
+		const startY = Math.floor((bbox.y - gridOrigin.y) / spacing) - 1;
+		const endY = Math.ceil((bbox.y2 - gridOrigin.y) / spacing) + 1;
 		// WebGL uses premultiplied-alpha blending. The very low-opacity KiCad
 		// theme color that looked fine in the desktop renderer became almost
 		// indistinguishable from this viewer's dark background, so use a muted
@@ -4567,14 +5175,53 @@ export class KicadRenderSession {
 		renderer.beginBatch?.();
 		for (let ix = startX; ix <= endX; ix++) {
 			const width = minorDotWorld * (ix % gridTick === 0 ? 2 : 1);
-			const x = ix * spacing;
+			const x = gridOrigin.x + ix * spacing;
 			for (let iy = startY; iy <= endY; iy++) {
 				const height = minorDotWorld * (iy % gridTick === 0 ? 2 : 1);
-				const y = iy * spacing;
+				const y = gridOrigin.y + iy * spacing;
 				renderer.rect(new Vec2(x - width / 2, y - height / 2), width, height, { fillColor: gridColor });
 			}
 		}
 		renderer.endBatch?.();
+	}
+
+	/** Pcbnew keeps origin markers visible independently of grid visibility. */
+	protected drawBoardOrigins(renderer: Renderer): void {
+		if (this.documentType !== 'board' || !Number.isFinite(this.camera.zoom) || this.camera.zoom <= 0) {
+			return;
+		}
+		// ORIGIN_VIEWITEM converts its default 16-pixel size and one-pixel
+		// stroke to world coordinates on each ViewDraw call. Keep that same
+		// screen-space treatment here, so zoom changes position but not glyph
+		// dimensions.
+		const radius = 16 / this.camera.zoom;
+		const width = 1 / this.camera.zoom;
+		const drawMarker = (origin: Vec2, color: string, style: 'circle-cross' | 'circle-x') => {
+			if (origin.x === 0 && origin.y === 0) {
+				return;
+			}
+			renderer.circle(origin, radius, { strokeColor: color, strokeWidth: width });
+			if (style === 'circle-x') {
+				renderer.line([
+					new Vec2(origin.x - radius, origin.y - radius), new Vec2(origin.x + radius, origin.y + radius),
+				], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
+				renderer.line([
+					new Vec2(origin.x - radius, origin.y + radius), new Vec2(origin.x + radius, origin.y - radius),
+				], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
+				return;
+			}
+			renderer.line([
+				new Vec2(origin.x - radius, origin.y), new Vec2(origin.x + radius, origin.y),
+			], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
+			renderer.line([
+				new Vec2(origin.x, origin.y - radius), new Vec2(origin.x, origin.y + radius),
+			], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
+		};
+		// Exact Pcbnew ORIGIN_VIEWITEM styles: its default grid origin is a
+		// pale CIRCLE_X, while Board Editor Control creates a red CIRCLE_CROSS
+		// for the drill/place-file origin.
+		drawMarker(this.boardGridOrigin, '#d5e0e6', 'circle-x');
+		drawMarker(this.boardDrillPlaceOrigin, '#cc0000', 'circle-cross');
 	}
 
 	/**
@@ -4593,10 +5240,14 @@ export class KicadRenderSession {
 		}
 		const color = EDIT_PREVIEW_COLOR;
 		switch (p.kind) {
-			case 'wire':
+			case 'wire': {
+				const bend = orthogonalWireBend(p.from, p.cursor);
+				renderer.line(bend ? [p.from, bend, p.cursor] : [p.from, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
+				break;
+			}
 			case 'line':
-				renderer.line([p.kind === 'wire' ? p.from : (p.anchor ?? p.cursor), p.cursor], { strokeColor: color, strokeWidth: 0.15 });
-				if (p.kind === 'line' && !p.anchor) {
+				renderer.line([p.anchor ?? p.cursor, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
+				if (!p.anchor) {
 					drawCrosshair(renderer, p.cursor, color);
 				}
 				break;
@@ -4815,7 +5466,11 @@ export class KicadRenderSession {
 					continue;
 				}
 				const color = highlighted ? '#ffcc00' : styleForLayer(item.layer).color;
-				item.draw(renderer, color);
+				const mode = item.kind === 'pad' ? this.padDisplayMode
+					: item.kind === 'via' ? this.viaDisplayMode
+					: item.kind === 'track' ? this.trackDisplayMode
+					: 'filled';
+				item.draw(renderer, color, mode);
 			}
 		}
 	}
@@ -4835,6 +5490,44 @@ export class KicadRenderSession {
 		renderer.rect(
 			new Vec2(x - pad, y - pad), w + pad * 2, h + pad * 2,
 			{ strokeColor: BOARD_HIGHLIGHT_COLOR, strokeWidth: 0.2 });
+	}
+
+	/** Pcbnew's 'full'/'diagonal' crosshair styles — full-window lines through
+	 *  the pointer, ported from opengl_gal.cpp's blitCursor(). 'small' is
+	 *  intentionally a no-op here: the browser's own cursor already gives a
+	 *  small fixed-size cross with none of this method's per-frame cost. */
+	protected drawBoardCrosshair(renderer: Renderer): void {
+		if (this.documentType !== 'board' || this.crosshairMode === 'small' || !this.boardPointerScreen) {
+			return;
+		}
+		const zoom = this.camera.zoom;
+		if (!Number.isFinite(zoom) || zoom <= 0) {
+			return;
+		}
+		let bbox;
+		try {
+			bbox = this.camera.bbox;
+		}
+		catch {
+			return;
+		}
+		if (![bbox.x, bbox.y, bbox.w, bbox.h].every(Number.isFinite) || bbox.w <= 0 || bbox.h <= 0) {
+			return;
+		}
+		const center = this.screenToWorld(this.boardPointerScreen);
+		const deviceScale = window.devicePixelRatio || 1;
+		const lineWidth = deviceScale / zoom;
+		const style = { strokeColor: BOARD_CURSOR_COLOR, strokeWidth: lineWidth, capStyle: 'butt' as const };
+		if (this.crosshairMode === 'full') {
+			renderer.line([new Vec2(bbox.x, center.y), new Vec2(bbox.x + bbox.w, center.y)], style);
+			renderer.line([new Vec2(center.x, bbox.y), new Vec2(center.x, bbox.y + bbox.h)], style);
+			return;
+		}
+		// 'diagonal': ±45° lines through the pointer, long enough to clear
+		// the viewport at any pan/rotation of the aspect ratio.
+		const reach = Math.hypot(bbox.w, bbox.h);
+		renderer.line([new Vec2(center.x - reach, center.y - reach), new Vec2(center.x + reach, center.y + reach)], style);
+		renderer.line([new Vec2(center.x - reach, center.y + reach), new Vec2(center.x + reach, center.y - reach)], style);
 	}
 
 	/** KiCad-style 3×3 resize affordance for the two selected root shapes that
@@ -4963,6 +5656,10 @@ const EDIT_PREVIEW_COLOR = 'rgba(255, 255, 255, 0.6)';
  *  colors at any zoom, and doesn't collide with any of them (see
  *  setFootprintHighlight). */
 const BOARD_HIGHLIGHT_COLOR = '#ffcc00';
+
+/** wdark.json's board.cursor value (the user's actual active PCB color
+ *  theme) — see kicad-wdark-theme-reference memory; not guessed. */
+const BOARD_CURSOR_COLOR = 'rgb(255, 255, 255)';
 
 /** Real KiCad's own drag-select box colors (dark color scheme), ported from
  *  common/preview_items/selection_area.cpp's 0-1 float RGB — confirmed

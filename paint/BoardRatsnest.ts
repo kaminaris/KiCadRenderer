@@ -1,5 +1,5 @@
 import { Vec2 } from '../math/Vec2';
-import { distanceToSegment } from './PaintedShape';
+import { distanceToSegment, pointInPolygon } from './PaintedShape';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 
 export interface BoardRatsnestLine {
@@ -56,9 +56,17 @@ export function buildBoardRatsnest(scene: LayeredBoardScene, netFilter?: Readonl
 		if (ra !== rb) parent[rb] = ra;
 	};
 
-	const copperLayers = scene.layersPresent.filter(layer => layer.endsWith('.Cu'));
+	const copperLayers = scene.copperLayerStack.length > 0
+		? scene.copperLayerStack
+		: scene.layersPresent.filter(layer => layer.endsWith('.Cu'));
 	const padNodes = new Map<any, number[]>();
-	for (const item of scene.hitTestItems) {
+	// Iterates every layer-bucket item, not just scene.hitTestItems — track
+	// ARCS (length-tuning/meander rounded corners) are deliberately not
+	// hit-testable (see buildTrackArc's doc comment) but still need to
+	// participate in connectivity, so hitTestItems alone would silently
+	// treat every meander as a chain of disconnected islands.
+	for (const items of scene.layerBuckets.values()) {
+	for (const item of items) {
 		const netId = item.netId ?? null;
 		if (netId === null || netId <= 0) continue;
 		if (netFilter && !netFilter.has(netId)) continue;
@@ -67,6 +75,18 @@ export function buildBoardRatsnest(scene: LayeredBoardScene, netFilter?: Readonl
 			const b = addNode(new Vec2(item.shape.x2, item.shape.y2), item.layer, netId);
 			union(a, b);
 			segments.push({ a, b, layer: item.layer, netId, width: item.shape.width });
+		}
+		else if (item.kind === 'track' && item.shape.type === 'circle'
+			&& typeof item.element?.getStartMidEnd === 'function') {
+			// A track arc's endpoints are its real connection points (the
+			// rendered shape is a full-circle placeholder — see buildTrackArc)
+			// — getStartMidEnd() gives those directly, no trig round-trip.
+			const { start, end } = item.element.getStartMidEnd();
+			const width = typeof item.element.getWidth === 'function' ? item.element.getWidth() : 0.25;
+			const a = addNode(new Vec2(start.x, start.y), item.layer, netId);
+			const b = addNode(new Vec2(end.x, end.y), item.layer, netId);
+			union(a, b);
+			segments.push({ a, b, layer: item.layer, netId, width });
 		}
 		else if (item.kind === 'pad' && item.layer.endsWith('.Cu')) {
 			const index = addNode(centerOf(item), item.layer, netId);
@@ -78,11 +98,24 @@ export function buildBoardRatsnest(scene: LayeredBoardScene, netFilter?: Readonl
 		else if (item.kind === 'via') {
 			const requested: string[] = typeof item.element?.getLayers === 'function'
 				? item.element.getLayers() : ['F.Cu', 'B.Cu'];
-			const layers = requested.flatMap(layer => layer === '*.Cu' ? copperLayers : [layer])
-				.filter(layer => layer.endsWith('.Cu'));
+			// A via's plated barrel physically touches every copper layer
+			// between its two named layers, not just those two — a normal
+			// through via names only "F.Cu"/"B.Cu" yet still bridges every
+			// internal plane in between (this was the root cause of an
+			// internal power plane like In3.Cu looking entirely unconnected:
+			// through-vias never got a node on it). Blind/buried vias name
+			// their real (non-F/B) endpoints, so this still correctly limits
+			// them to just the layers they actually span.
+			const explicit = requested.flatMap(layer => layer === '*.Cu' ? copperLayers : [layer])
+				.filter(layer => copperLayers.includes(layer));
+			const indices = explicit.map(layer => copperLayers.indexOf(layer)).filter(i => i >= 0);
+			const layers = indices.length >= 2
+				? copperLayers.slice(Math.min(...indices), Math.max(...indices) + 1)
+				: explicit;
 			const viaNodes = layers.map(layer => addNode(centerOf(item), layer, netId));
 			for (let i = 1; i < viaNodes.length; i++) union(viaNodes[0]!, viaNodes[i]!);
 		}
+	}
 	}
 
 	// Join touching copper on the same layer, including T-branches whose
@@ -119,6 +152,27 @@ export function buildBoardRatsnest(scene: LayeredBoardScene, netFilter?: Readonl
 					union(nodeIndex, segment.a);
 				}
 			}
+		}
+	}
+
+	// Zone-fill connectivity: a copper pour joins every same-net pad/via/
+	// track on the layer(s) it pours onto, exactly like touching copper —
+	// this is the dominant connection for a GND/power plane, which is
+	// usually poured rather than individually traced to every pad. Tested
+	// against the zone's own bucket-matched nodes only (cheap: nodeBuckets
+	// is already keyed by net+layer), using its authored outline rather
+	// than the fractured fill geometry — see ZoneFillRegion's doc comment.
+	for (const fill of scene.zoneFills) {
+		if (netFilter && !netFilter.has(fill.netId)) continue;
+		const key = `${ fill.netId }\u0000${ fill.layer }`;
+		const bucketNodes = nodeBuckets.get(key);
+		if (!bucketNodes) continue;
+		let first: number | null = null;
+		for (const nodeIndex of bucketNodes) {
+			const point = nodes[nodeIndex]!.point;
+			if (!pointInPolygon(fill.points, point.x, point.y)) continue;
+			if (first === null) first = nodeIndex;
+			else union(first, nodeIndex);
 		}
 	}
 
