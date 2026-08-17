@@ -2,10 +2,11 @@ import { Vec2 } from '../math/Vec2';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
 import { Renderer } from '../render/Renderer';
-import { styleForLayer, colorForLayer, boardBackgroundColor, viaHoleWallColor, viaHoleColor, zoneFillAlpha, withAlpha } from './LayerColors';
+import { styleForLayer, colorForLayer, boardBackgroundColor, boardOutlineAreaColor, viaHoleWallColor, viaHoleColor, zoneFillAlpha, withAlpha } from './LayerColors';
 import { layerPaintOrder } from './LayerOrder';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, type StrokeTextGeometry } from './TextPaint';
 import { PaintedShape, shapeToBBox, bboxesIntersect } from './PaintedShape';
+import { buildBoardOutlineRingsMm } from './BoardZoneFill';
 
 // KicadBoard/KicadElementFootprint/etc. are only available once the
 // @kicad-io submodule is resolved via the @kicad-io/* path alias in the
@@ -52,6 +53,10 @@ export interface LayeredBoardScene {
 	hitTestItems: PaintedItem[];
 	/** One entry per (zone, expanded copper layer) — see ZoneFillRegion. */
 	zoneFills: ZoneFillRegion[];
+	/** Closed Edge.Cuts geometry, normalized to body rings.  This is painted
+	 * as KiCad's low-opacity "Board Area Shadow" before every regular board
+	 * layer; even-odd rendering preserves slots and internal cutouts. */
+	boardBodyRings: Vec2[][];
 	/** Copper layers in PHYSICAL stack order (F.Cu first, B.Cu last, exactly
 	 *  as declared in the board's own `(layers ...)` table — KiCad writes
 	 *  that table in stack order, not the render/paint order layersPresent
@@ -198,14 +203,15 @@ export class BoardPainter {
 
 		const segments = board.rootElement.findChildrenByClass(getSegmentClass());
 		for (const segment of segments) {
-			pushItem(this.buildTrack(segment));
+			for (const item of this.buildTrack(segment, board)) {
+				pushItem(item);
+			}
 		}
 
 		if (getTrackArcClass()) {
 			const trackArcs = board.rootElement.findChildrenByClass(getTrackArcClass());
 			for (const arc of trackArcs) {
-				const item = this.buildTrackArc(arc);
-				if (item) {
+				for (const item of this.buildTrackArc(arc, board)) {
 					pushItem(item);
 				}
 			}
@@ -220,14 +226,14 @@ export class BoardPainter {
 
 		const footprints = board.rootElement.findChildrenByClass(getFootprintClass());
 		for (const footprint of footprints) {
-			for (const item of this.buildFootprint(footprint, globalLayers)) {
+			for (const item of this.buildFootprint(footprint, globalLayers, board)) {
 				pushItem(item);
 			}
 		}
 
 		const vias = board.rootElement.findChildrenByClass(getViaClass());
 		for (const via of vias) {
-			for (const item of this.buildVia(via)) {
+			for (const item of this.buildVia(via, board)) {
 				pushItem(item);
 			}
 		}
@@ -316,7 +322,15 @@ export class BoardPainter {
 		const copperLayerStack = globalLayers.filter(l => l.endsWith('.Cu'));
 		const zoneFills = this.buildZoneFills(zones, copperLayerStack);
 
-		return { layersPresent, layerBuckets, hitTestItems, zoneFills, copperLayerStack, declaredLayers: globalLayers };
+		const boardBodyRings = this.buildBoardBodyRings(board);
+
+		return { layersPresent, layerBuckets, hitTestItems, zoneFills, boardBodyRings, copperLayerStack, declaredLayers: globalLayers };
+	}
+
+	protected buildBoardBodyRings(board: any): Vec2[][] {
+		return buildBoardOutlineRingsMm(board)
+			.filter(ring => ring.length >= 3)
+			.map(ring => ring.map(point => new Vec2(point.x, point.y)));
 	}
 
 	/** One ZoneFillRegion per (zone, copper layer it pours onto) — see that
@@ -358,7 +372,7 @@ export class BoardPainter {
 		this.removeFootprintItems(scene, footprint);
 
 		const globalLayers = this.getGlobalLayerNames(board);
-		for (const item of this.buildFootprint(footprint, globalLayers)) {
+		for (const item of this.buildFootprint(footprint, globalLayers, board)) {
 			const bucket = scene.layerBuckets.get(item.layer);
 			if (bucket) {
 				bucket.push(item);
@@ -377,6 +391,10 @@ export class BoardPainter {
 		// declared layer stays listed instead of disappearing from the
 		// Appearance panel.
 		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0 || scene.declaredLayers.includes(l));
+		// A footprint may own Edge.Cuts geometry (for example a connector
+		// footprint defining a notch).  Keep the body shadow in lockstep while
+		// that footprint is moved, rotated, or flipped.
+		scene.boardBodyRings = this.buildBoardBodyRings(board);
 	}
 
 	/**
@@ -409,7 +427,7 @@ export class BoardPainter {
 	 * per-frame dynamic buffer instead of baking it into the static one.
 	 */
 	buildFootprintPreviewItems(board: any, footprint: any): PaintedItem[] {
-		return this.buildFootprint(footprint, this.getGlobalLayerNames(board));
+		return this.buildFootprint(footprint, this.getGlobalLayerNames(board), board);
 	}
 
 	/**
@@ -468,6 +486,15 @@ export class BoardPainter {
 		viewBBox?: { x: number; y: number; w: number; h: number }
 	): void {
 		this.activePaintLayer = activeLayer;
+		// Pcbnew renders the special LAYER_BOARD_OUTLINE_AREA first, below all
+		// real layers.  Use one even-odd multi-polygon so nested Edge.Cuts
+		// rings remain transparent cutouts instead of becoming filled islands.
+		if (scene.boardBodyRings.length > 0) {
+			renderer.setOpacity?.(1);
+			renderer.beginBatch?.();
+			renderer.multiPolygon(scene.boardBodyRings, { fillColor: boardOutlineAreaColor });
+			renderer.endBatch?.();
+		}
 		// Collected during the main per-layer pass below, then redrawn once
 		// more at the very end (see after the loop) — a highlighted/selected
 		// track needs to visually sit above EVERY other item on its copper
@@ -577,14 +604,14 @@ export class BoardPainter {
 		return (layersEl.layers ?? []).map((l: any) => l.name);
 	}
 
-	protected buildTrack(segment: any): PaintedItem {
+	protected buildTrack(segment: any, board: any): PaintedItem[] {
 		const { start, end } = segment.getStartEnd();
-		const layer = segment.getLayer();
+		const layer = getCopperItemLayer(segment);
 		const width = segment.getWidth ? segment.getWidth() : 0.25;
 		const id = segment.getUuid() ?? `track:${ start.x },${ start.y }-${ end.x },${ end.y }`;
 		const shape: PaintedShape = { type: 'segment', x1: start.x, y1: start.y, x2: end.x, y2: end.y, width };
 
-		return {
+		const items: PaintedItem[] = [{
 			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: true, element: segment,
 			netId: typeof segment.getNetId === 'function' ? segment.getNetId() : null,
 			netName: typeof segment.getNetName === 'function' ? segment.getNetName() : null,
@@ -605,6 +632,26 @@ export class BoardPainter {
 				}
 				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: color, strokeWidth: width });
 			},
+		}];
+		const maskLayer = getSolderMaskLayer(segment, layer);
+		if (maskLayer) {
+			const maskWidth = Math.max(0, width + getTrackMaskExpansion(segment, board) * 2);
+			items.push(this.buildTrackMaskItem(id, maskLayer, start, end, maskWidth, segment));
+		}
+		return items;
+	}
+
+	protected buildTrackMaskItem(
+		id: string, layer: string, start: { x: number; y: number }, end: { x: number; y: number },
+		width: number, element: any,
+	): PaintedItem {
+		const shape: PaintedShape = { type: 'segment', x1: start.x, y1: start.y, x2: end.x, y2: end.y, width };
+		return {
+			id: `${ id }:${ layer }`, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape),
+			hitTestable: false, element,
+			draw: (renderer, color) => renderer.line(
+				[new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: color, strokeWidth: width },
+			),
 		};
 	}
 
@@ -613,24 +660,37 @@ export class BoardPainter {
 	 *  same limitation buildGrArc already has — PaintedShape has no
 	 *  sweep-aware arc variant, so a 'circle' hit-shape would wrongly accept
 	 *  clicks anywhere on the full ring, not just the drawn arc. */
-	protected buildTrackArc(arc: any): PaintedItem | null {
+	protected buildTrackArc(arc: any, board: any): PaintedItem[] {
 		if (typeof arc.getArcCenterRadiusAngles !== 'function') {
-			return null;
+			return [];
 		}
 		const { centerX, centerY, radius, startAngle, endAngle } = arc.getArcCenterRadiusAngles();
-		const layer = arc.getLayer();
+		const layer = getCopperItemLayer(arc);
 		const width = typeof arc.getWidth === 'function' ? arc.getWidth() : 0.25;
 		const id = arc.getUuid() ?? `track-arc:${ layer }:${ centerX },${ centerY }`;
 		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius };
 
-		return {
+		const items: PaintedItem[] = [{
 			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
 			netId: typeof arc.getNetId === 'function' ? arc.getNetId() : null,
 			netName: typeof arc.getNetName === 'function' ? arc.getNetName() : null,
 			draw: (renderer, color) => {
 				renderer.arc(new Vec2(centerX, centerY), radius, startAngle, endAngle, { strokeColor: color, strokeWidth: width });
 			},
-		};
+		}];
+		const maskLayer = getSolderMaskLayer(arc, layer);
+		if (maskLayer) {
+			const maskWidth = Math.max(0, width + getTrackMaskExpansion(arc, board) * 2);
+			items.push({
+				id: `${ id }:${ maskLayer }`, layer: maskLayer, kind: 'graphic', shape,
+				bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+				draw: (renderer, color) => renderer.arc(
+					new Vec2(centerX, centerY), radius, startAngle, endAngle,
+					{ strokeColor: color, strokeWidth: maskWidth },
+				),
+			});
+		}
+		return items;
 	}
 
 	protected buildZone(zone: any): PaintedItem[] {
@@ -755,7 +815,7 @@ export class BoardPainter {
 		return items;
 	}
 
-	protected buildFootprint(footprint: any, globalLayers: string[]): PaintedItem[] {
+	protected buildFootprint(footprint: any, globalLayers: string[], board: any): PaintedItem[] {
 		const items: PaintedItem[] = [];
 		const origin = footprint.getOrigin();
 		const footprintId = footprint.getUuid() ?? `fp:${ origin.x },${ origin.y }`;
@@ -792,7 +852,7 @@ export class BoardPainter {
 			return (sizeB.width * sizeB.height) - (sizeA.width * sizeA.height);
 		});
 		for (const pad of padsBySizeDesc) {
-			for (const item of this.buildPad(pad, footprintMatrix, origin.rotation ?? 0, footprint, footprintId, globalLayers)) {
+			for (const item of this.buildPad(pad, footprintMatrix, origin.rotation ?? 0, footprint, footprintId, globalLayers, board)) {
 				items.push(item);
 			}
 		}
@@ -1153,7 +1213,7 @@ export class BoardPainter {
 
 	protected buildPad(
 		pad: any, footprintMatrix: Matrix3, footprintRotationDeg: number,
-		footprint: any, footprintId: string, globalLayers: string[]
+		footprint: any, footprintId: string, globalLayers: string[], board: any
 	): PaintedItem[] {
 		const padOrigin = pad.getOrigin();
 		const size = pad.getSize();
@@ -1175,11 +1235,10 @@ export class BoardPainter {
 		const fullMatrix = footprintMatrix.multiply(padMatrix);
 		const worldCenter = fullMatrix.transform(new Vec2(0, 0));
 
-		// Pads are part of their copper layer in real KiCad (no separate
-		// "Pads" layer exists — see the screenshot the layer list came
-		// from), so route into F.Cu/B.Cu directly. build() appends
-		// footprints (and their pads) after tracks/zones for the same
-		// layer, so pads still paint on top within that bucket.
+		// Copper pad flashes share their copper-layer buckets.  The same pad
+		// can additionally flash on solder mask, paste, and the other
+		// technical layers; those are emitted separately below using their
+		// own aperture margins, just as PAD::ViewGetLayers() does in Pcbnew.
 		const padLayers: string[] = typeof pad.getLayers === 'function' ? pad.getLayers(globalLayers) : ['F.Cu'];
 		const buckets: string[] = [];
 		if (padLayers.includes('F.Cu')) {
@@ -1188,10 +1247,6 @@ export class BoardPainter {
 		if (padLayers.includes('B.Cu')) {
 			buckets.push('B.Cu');
 		}
-		if (buckets.length === 0) {
-			buckets.push('F.Cu');
-		}
-
 		const items: PaintedItem[] = [];
 
 		// NPTH pads have no copper at all — they're a bare mechanical hole,
@@ -1362,6 +1417,10 @@ export class BoardPainter {
 			}
 		}
 
+		items.push(...this.buildPadTechnicalItems(
+			pad, footprint, board, fullMatrix, id, size, padLayers,
+		));
+
 		if (this.options.showPadNumbers || this.options.showNetNames) {
 			const labelItem = this.buildPadNumber(
 				pad, worldCenter, size, footprintRotationDeg, padRotationDeg, id,
@@ -1371,6 +1430,82 @@ export class BoardPainter {
 			}
 		}
 
+		return items;
+	}
+
+	/**
+	 * Emits a pad's non-copper flashes.  Copper is represented by the normal
+	 * pad items above; Pcbnew gives each of these technical layers its own
+	 * aperture, including the mask/paste expansion selected by the board,
+	 * footprint, or pad settings.
+	 */
+	protected buildPadTechnicalItems(
+		pad: any, footprint: any, board: any, fullMatrix: Matrix3,
+		padId: string, size: { width: number; height: number }, padLayers: string[],
+	): PaintedItem[] {
+		const items: PaintedItem[] = [];
+		const technicalLayers = [...new Set(padLayers.filter(isPadTechnicalLayer))];
+		for (const layer of technicalLayers) {
+			const margin = getPadTechnicalMargin(pad, footprint, board, padLayers, size, layer);
+			const apertureWidth = Math.max(0, size.width + margin.x * 2);
+			const apertureHeight = Math.max(0, size.height + margin.y * 2);
+			if (apertureWidth <= 0 || apertureHeight <= 0) {
+				continue;
+			}
+
+			const id = `${ padId }:${ layer }`;
+			const common = { id, layer, kind: 'graphic' as const, hitTestable: false, element: pad };
+			if (pad.shape === 'custom') {
+				// PAD::TransformShapeToPolygon offsets custom primitives too. The
+				// renderer currently has only their polygon subset, so retain that
+				// exact base shape here; their offset is the remaining custom-pad
+				// parity item rather than silently replacing it with a rectangle.
+				const rings = getCustomPadLocalRings(pad)
+					.map(ring => ring.map(point => fullMatrix.transform(point)));
+				if (rings.length === 0) {
+					continue;
+				}
+				const shape: PaintedShape = { type: 'polygon', points: rings[0]!.map(point => ({ x: point.x, y: point.y })) };
+				items.push({
+					...common, shape, bbox: shapeToBBox(shape),
+					draw: (renderer, color) => renderer.multiPolygon(rings, { fillColor: color }),
+				});
+				continue;
+			}
+
+			if (pad.shape === 'circle' && Math.abs(apertureWidth - apertureHeight) < 1e-9) {
+				const center = fullMatrix.transform(new Vec2(0, 0));
+				const shape: PaintedShape = { type: 'circle', cx: center.x, cy: center.y, r: apertureWidth / 2 };
+				items.push({
+					...common, shape, bbox: shapeToBBox(shape),
+					draw: (renderer, color) => renderer.circle(center, apertureWidth / 2, { fillColor: color }),
+				});
+				continue;
+			}
+
+			let radius = 0;
+			if (pad.shape === 'oval') {
+				radius = Math.min(apertureWidth, apertureHeight) / 2;
+			}
+			else if (pad.shape === 'roundrect') {
+				const ratio = Number(readChildValue(pad, 'roundrect_rratio') ?? 0);
+				radius = Math.max(0, Math.min(apertureWidth, apertureHeight) * ratio);
+			}
+			const localPoints = radius > 0
+				? roundedRectLocalPoints(apertureWidth, apertureHeight, radius)
+				: [
+					new Vec2(-apertureWidth / 2, -apertureHeight / 2),
+					new Vec2(apertureWidth / 2, -apertureHeight / 2),
+					new Vec2(apertureWidth / 2, apertureHeight / 2),
+					new Vec2(-apertureWidth / 2, apertureHeight / 2),
+				];
+			const worldPoints = localPoints.map(point => fullMatrix.transform(point));
+			const shape: PaintedShape = { type: 'polygon', points: worldPoints.map(point => ({ x: point.x, y: point.y })) };
+			items.push({
+				...common, shape, bbox: shapeToBBox(shape),
+				draw: (renderer, color) => renderer.polygon(worldPoints, { fillColor: color }),
+			});
+		}
 		return items;
 	}
 
@@ -1524,7 +1659,7 @@ export class BoardPainter {
 		};
 	}
 
-	protected buildVia(via: any): PaintedItem[] {
+	protected buildVia(via: any, board: any): PaintedItem[] {
 		const origin = via.getOrigin();
 		const size = via.getSize();
 		const drill = typeof via.getDrill === 'function' ? via.getDrill() : { width: 0 };
@@ -1582,6 +1717,20 @@ export class BoardPainter {
 		const label = this.buildViaLabel(via, new Vec2(origin.x, origin.y), size.width, id);
 		if (label) {
 			items.push(label);
+		}
+		const viaLayers = getElementLayers(via);
+		const maskMargin = getBoardMaskExpansion(board);
+		for (const layer of getViaMaskLayers(viaLayers)) {
+			const radius = Math.max(0, outerRadius + maskMargin);
+			if (radius <= 0) {
+				continue;
+			}
+			const maskShape: PaintedShape = { type: 'circle', cx: origin.x, cy: origin.y, r: radius };
+			items.push({
+				id: `${ id }:${ layer }`, layer, kind: 'graphic', shape: maskShape, bbox: shapeToBBox(maskShape),
+				hitTestable: false, element: via,
+				draw: (renderer, color) => renderer.circle(new Vec2(origin.x, origin.y), radius, { fillColor: color }),
+			});
 		}
 		return items;
 	}
@@ -2166,6 +2315,105 @@ function convexHull(points: { x: number; y: number }[]): { x: number; y: number 
 	lower.pop();
 	upper.pop();
 	return lower.concat(upper);
+}
+
+const PAD_TECHNICAL_LAYERS = new Set([
+	'F.Mask', 'B.Mask', 'F.Paste', 'B.Paste', 'F.Adhes', 'B.Adhes',
+	'F.SilkS', 'B.SilkS', 'Dwgs.User', 'Eco1.User', 'Eco2.User',
+]);
+
+function isPadTechnicalLayer(layer: string): boolean {
+	return PAD_TECHNICAL_LAYERS.has(layer);
+}
+
+/** Reads simple S-expression children that do not need their own parser
+ * mixin: e.g. `(solder_mask_margin 0.1)` and `(layers "F.Cu" "F.Mask")`. */
+function readChildValue(element: any, name: string): unknown {
+	const child = typeof element?.findFirstChildByName === 'function'
+		? element.findFirstChildByName(name)
+		: undefined;
+	return child?.value ?? child?.attributes?.[0]?.value;
+}
+
+function readChildNumber(element: any, name: string): number | undefined {
+	const value = readChildValue(element, name);
+	const numeric = typeof value === 'number' ? value : Number(value);
+	return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function getElementLayers(element: any): string[] {
+	const child = typeof element?.findFirstChildByName === 'function'
+		? element.findFirstChildByName('layers')
+		: undefined;
+	return child?.attributes?.map((attribute: any) => String(attribute.value)) ?? [];
+}
+
+function getCopperItemLayer(element: any): string {
+	const layer = typeof element?.getLayer === 'function' ? element.getLayer() : '';
+	return layer || getElementLayers(element).find(candidate => candidate.endsWith('.Cu')) || 'F.Cu';
+}
+
+function getSolderMaskLayer(element: any, copperLayer: string): 'F.Mask' | 'B.Mask' | null {
+	const layers = getElementLayers(element);
+	if (layers.includes('F.Mask') && copperLayer === 'F.Cu') return 'F.Mask';
+	if (layers.includes('B.Mask') && copperLayer === 'B.Cu') return 'B.Mask';
+	return null;
+}
+
+function getTrackMaskExpansion(track: any, board: any): number {
+	const width = typeof track?.getWidth === 'function' ? track.getWidth() : 0;
+	const margin = readChildNumber(track, 'solder_mask_margin') ?? getBoardMaskExpansion(board);
+	return Math.max(-width / 2, margin);
+}
+
+function getBoardMaskExpansion(board: any): number {
+	const setup = typeof board?.rootElement?.findFirstChildByName === 'function'
+		? board.rootElement.findFirstChildByName('setup')
+		: undefined;
+	return readChildNumber(setup, 'pad_to_mask_clearance') ?? 0;
+}
+
+function getPadTechnicalMargin(
+	pad: any, footprint: any, board: any, padLayers: readonly string[], size: { width: number; height: number }, layer: string,
+): { x: number; y: number } {
+	const hasCopper = padLayers.some(candidate => candidate.endsWith('.Cu'));
+	if (!hasCopper || (!layer.endsWith('.Mask') && !layer.endsWith('.Paste'))) {
+		return { x: 0, y: 0 };
+	}
+	const setup = typeof board?.rootElement?.findFirstChildByName === 'function'
+		? board.rootElement.findFirstChildByName('setup')
+		: undefined;
+	if (layer.endsWith('.Mask')) {
+		const margin = readChildNumber(pad, 'solder_mask_margin')
+			?? readChildNumber(footprint, 'solder_mask_margin')
+			?? readChildNumber(setup, 'pad_to_mask_clearance')
+			?? 0;
+		const clamped = Math.max(-Math.min(size.width, size.height) / 2, margin);
+		return { x: clamped, y: clamped };
+	}
+	const absolute = readChildNumber(pad, 'solder_paste_margin')
+		?? readChildNumber(footprint, 'solder_paste_margin')
+		?? readChildNumber(setup, 'pad_to_paste_clearance')
+		?? 0;
+	const ratio = readChildNumber(pad, 'solder_paste_margin_ratio')
+		?? readChildNumber(footprint, 'solder_paste_margin_ratio')
+		?? readChildNumber(setup, 'pad_to_paste_clearance_ratio')
+		?? 0;
+	return {
+		x: Math.max(-size.width / 2, absolute + size.width * ratio),
+		y: Math.max(-size.height / 2, absolute + size.height * ratio),
+	};
+}
+
+function getViaMaskLayers(layers: readonly string[]): Array<'F.Mask' | 'B.Mask'> {
+	const result: Array<'F.Mask' | 'B.Mask'> = [];
+	// A normal through via is exposed unless its board setup tents that side.
+	// This lightweight model does not yet parse the tenting flags, so explicit
+	// mask layers take precedence and the ordinary external-copper pair uses
+	// KiCad's default exposed-via behavior.
+	if (layers.includes('F.Mask') || (!layers.includes('B.Mask') && layers.includes('F.Cu'))) result.push('F.Mask');
+	if (layers.includes('B.Mask') || (!layers.includes('F.Mask') && layers.includes('B.Cu'))) result.push('B.Mask');
+	return result;
 }
 
 // Lazily require the @kicad-io classes so this module doesn't need a

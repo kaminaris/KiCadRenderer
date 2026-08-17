@@ -108,6 +108,13 @@ const defaultStyle: LayerStyle = { color: 'rgb(144, 144, 144)', opacity: 0.7 };
 // visually matches whatever's actually behind it.
 export const boardBackgroundColor = 'rgb(0, 16, 35)';
 
+// KiCad's built-in dark board theme assigns the special display-only
+// LAYER_BOARD_OUTLINE_AREA ("Board Area Shadow") this exact translucent
+// gray.  It is painted inside a closed Edge.Cuts outline, underneath the
+// normal board layers, so a board has the subtle physical-body tint visible
+// in Pcbnew without affecting the Edge.Cuts stroke itself.
+export const boardOutlineAreaColor = 'rgba(100, 100, 100, 0.35)';
+
 // colors/user.json board.via_hole_walls / board.via_hole — the plated
 // barrel and the drilled bore itself, both fixed (never net-colored),
 // unlike the via's own outer annular ring which takes the color of

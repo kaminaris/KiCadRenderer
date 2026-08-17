@@ -1,10 +1,10 @@
 import { ClipType } from '@clipper2-ts/engine';
-import { FillRule, Path, Paths, Point64Of, PointInPolygon, PointInPolygonResult } from '@clipper2-ts/core';
+import { FillRule, Path, Paths, Point, Point64Of, PointInPolygon, PointInPolygonResult } from '@clipper2-ts/core';
 import { EndType, JoinType } from '@clipper2-ts/offset';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
 import { Vec2 } from '../math/Vec2';
-import { LayeredBoardScene, PaintedItem } from './BoardPainter';
+import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 import { getClipperEngine } from './ClipperEngine';
 import { PaintedShape } from './PaintedShape';
 
@@ -80,8 +80,6 @@ import { PaintedShape } from './PaintedShape';
  *
  * Deliberately deferred (each needs infrastructure this pass doesn't have —
  * not simplified approximations, just not attempted yet):
- *  - Thermal-relief spokes (needs spoke-polygon generation + a hit-test
- *    reconnect step against the exclusion holes).
  *  - Same-net multi-zone priority interaction (needs whole-board zone
  *    iteration + a priority field).
  *  - Island removal (needs board connectivity data — BoardRatsnest.ts's
@@ -93,6 +91,43 @@ import { PaintedShape } from './PaintedShape';
  *    own stock default (DEFAULT_COPPEREDGECLEARANCE), not an invented one,
  *    and every entry point accepts an override so wiring up the real
  *    project value later doesn't change this module's shape.
+ *
+ * Pad Connections ("Pad connection" field on the Copper Zone Properties
+ * dialog — Thermal reliefs / Solid / Thru-hole only / None): confirmed
+ * against real KiCad source, not assumed —
+ *  - `PCB_IO_KICAD_SEXPR`/`ZONE_CONNECTION`: 'full' = FULL (no knockout at
+ *    all — this is the pre-existing baseline behavior below, since a
+ *    same-net obstacle was already simply skipped), 'thermal' = THERMAL
+ *    (knock out `pad-shape + thermalGap`, then bridge back in with spokes —
+ *    see padThermalSpokesMm), 'none' = NONE (knock out with the zone's own
+ *    flat clearance, exactly like a different-net obstacle), 'thru_hole_only'
+ *    = ZONE_CONNECTION::THT_THERMAL, which `DRC_ENGINE::EvalZoneConnection`
+ *    (drc_engine.cpp) resolves PER PAD: a PTH pad becomes THERMAL, anything
+ *    else (SMD, NPTH) becomes FULL — see resolvePadConnectionMode.
+ *  - Only PADS branch on this — real KiCad's own knockoutThermalReliefs
+ *    (zone_filler.cpp) only ever gives same-net TRACKS/VIAS/GRAPHICS a
+ *    thermal/none treatment inside `ZONE_FILL_MODE::HATCH_PATTERN`, which
+ *    this app's fill pipeline doesn't implement (solid fill only) — so for
+ *    every fill this app produces, a same-net track/via/graphic always
+ *    connects directly, matching the pre-existing baseline unconditionally.
+ *  - Spoke geometry (padThermalSpokesMm) is a deliberately scoped-down
+ *    version of real KiCad's buildThermalSpokes: always board-axis-aligned
+ *    cardinal ("+") spokes, built from the pad's own PaintedItem.bbox
+ *    (already-rotated world-space AABB, so a rotated pad's spoke reach is
+ *    still geometrically correct without needing the pad's own rotation
+ *    angle) rather than real KiCad's pad-local-axis spokes (which rotate
+ *    with the pad and default to a 45°/"X" pattern for round pads). This
+ *    means a pad rotated by a non-90°-multiple angle gets a slightly
+ *    larger-than-necessary spoke on its diagonal, and round pads get a "+"
+ *    instead of real KiCad's default "X" — both cosmetic-only deviations
+ *    from a still-correct, still-connected thermal relief, not a broken
+ *    approximation. Also omitted: real KiCad's spoke/zone-connectivity hit
+ *    test (a spoke that doesn't actually reach filled copper gets dropped) —
+ *    every candidate spoke here is unconditionally unioned in and the whole
+ *    result is clipped back to the zone's own outline, so the only
+ *    difference from the full algorithm is a spoke stub very rarely
+ *    persisting into a small isolated island that the real algorithm would
+ *    have pruned.
  */
 
 // KiCad's own internal unit is integer nanometers (confirmed via this app's
@@ -104,11 +139,11 @@ const NM_PER_MM = 1_000_000;
 export type MmPoint = { x: number; y: number };
 export type MmPath = MmPoint[];
 
-function toClipperPath(points: MmPath): Path {
+export function toClipperPath(points: MmPath): Path {
 	return points.map(p => Point64Of(p.x * NM_PER_MM, p.y * NM_PER_MM));
 }
 
-function fromClipperPath(path: Path): MmPath {
+export function fromClipperPath(path: Path): MmPath {
 	return path.map(p => ({ x: p.x / NM_PER_MM, y: p.y / NM_PER_MM }));
 }
 
@@ -211,6 +246,113 @@ function shapeToRingMm(shape: PaintedShape): MmPath | null {
  */
 function isObstacleKind(kind: PaintedItem['kind']): boolean {
 	return kind === 'pad' || kind === 'via' || kind === 'track' || kind === 'graphic';
+}
+
+// ---------------------------------------------------------------------------
+// Pad Connections (Thermal reliefs / Solid / Thru-hole only / None) — see
+// this file's header comment for the real-KiCad source this mirrors.
+// ---------------------------------------------------------------------------
+
+/** Mirrors KicadElementZone's own ZonePadConnectionType — duck-typed rather
+ *  than imported, matching this whole file's existing no-@kicad-io-dependency
+ *  convention (see the header comment on why: worker-portability). */
+export type ZoneFillPadConnectionMode = 'thermal' | 'full' | 'thru_hole_only' | 'none';
+
+export interface ZoneFillPadConnectionSettings {
+	mode: ZoneFillPadConnectionMode;
+	thermalGapMm: number;
+	thermalSpokeWidthMm: number;
+	minThicknessMm: number;
+}
+
+/** Resolves a zone's pad-connection MODE down to what a single pad actually
+ *  gets — only 'thru_hole_only' branches per pad (DRC_ENGINE::
+ *  EvalZoneConnection, drc_engine.cpp: PTH → THERMAL, everything else →
+ *  FULL); 'thermal'/'full'/'none' apply to every pad uniformly. */
+function resolvePadConnectionMode(mode: ZoneFillPadConnectionMode, pad: any): 'thermal' | 'full' | 'none' {
+	if (mode === 'thru_hole_only') {
+		return pad?.padType === 'thru_hole' ? 'thermal' : 'full';
+	}
+	return mode;
+}
+
+/** Inflates an already-closed polygon ring by `amountMm` (round joins) —
+ *  the same ClipperOffset technique polylineCapsuleRingMm uses for an open
+ *  polyline, here for a pad's own closed copper outline (its thermal-relief
+ *  "moat": pad shape + thermalGap). Pre-sized on return, so the caller feeds
+ *  it in alongside extraExclusionRingsMm rather than exclusionRingsMm — it
+ *  must NOT go through computeFillFromRings' separate clearanceMm inflate. */
+function inflateClosedRingMm(ring: MmPath, amountMm: number): MmPath | null {
+	if (amountMm <= 0) return ring;
+	const inflated = getClipperEngine().inflatePaths(
+		[toClipperPath(ring)], amountMm * NM_PER_MM, JoinType.Round, EndType.Polygon);
+	return inflated[0] ? fromClipperPath(inflated[0]) : null;
+}
+
+/** One thermal-relief spoke candidate — the ring to (conditionally) union
+ *  into the fill, plus the far-edge midpoint real KiCad calls the spoke's
+ *  "test point" (SHAPE_LINE_CHAIN index 3 in buildThermalSpokes) — the point
+ *  computeFillFromRings' connectivity hit-test samples to decide whether
+ *  this leg actually reaches copper or gets dropped. */
+export interface ThermalSpokeCandidateMm {
+	ring: MmPath;
+	testPoint: MmPoint;
+}
+
+/** Thermal-relief spokes for one pad, in the pad's OWN true orientation —
+ *  ported from real KiCad's buildThermalSpokes (zone_filler.cpp) closely
+ *  enough to rotate correctly with a rotated pad and to default to the same
+ *  45°/"X" pattern real KiCad itself defaults to for round pads (everything
+ *  else defaults to a cardinal "+", matching real KiCad's own 90°-vs-45°
+ *  default rule — see this file's header comment). `rotationDeg` needs no
+ *  footprint-rotation composition: BoardPainter.buildPad's own doc comment
+ *  confirms a pad's `(at x y rotation)` is already the pad's ABSOLUTE world
+ *  rotation (KiCad stores it that way in the file, not relative to the
+ *  parent footprint's own rotation). Real KiCad's own clamp/skip rules,
+ *  applied here too: spoke width never exceeds the pad's own local size in
+ *  either axis, and a pad gets NO spokes at all (fully isolated, moat with
+ *  no bridge) if the clamped width still can't meet the zone's min
+ *  thickness. Connectivity pruning (dropping a candidate whose test point
+ *  doesn't actually reach filled copper) happens later, in
+ *  computeFillFromRings — this function only builds candidates. */
+function padThermalSpokesMm(
+	worldCenter: MmPoint, localSizeMm: { width: number; height: number }, rotationDeg: number, isCircular: boolean,
+	gapMm: number, spokeWidthMm: number, minThicknessMm: number,
+): ThermalSpokeCandidateMm[] {
+	const spokeWidth = Math.min(spokeWidthMm, localSizeMm.width, localSizeMm.height);
+	if (spokeWidth <= 0 || spokeWidth < minThicknessMm) return [];
+
+	const halfW = localSizeMm.width / 2, halfH = localSizeMm.height / 2;
+	const hw = spokeWidth / 2;
+	const outerW = halfW + gapMm, outerH = halfH + gapMm;
+	// Real KiCad defaults a round (or round-anchor custom) pad's thermal
+	// spoke angle to 45° (an "X"), and every other shape to a cardinal "+" —
+	// see pad.h's own GetThermalSpokeAngle doc comment. This app doesn't
+	// model a per-pad spoke-angle override, so this IS the whole rule here.
+	const spokeAngleDeg = isCircular ? 45 : 0;
+	const matrix = Matrix3.translation(worldCenter.x, worldCenter.y)
+		.rotateSelf(Angle.fromDegrees(rotationDeg + spokeAngleDeg));
+	const toWorld = (p: Vec2): MmPoint => { const w = matrix.transform(p); return { x: w.x, y: w.y }; };
+
+	// Each ring must wind the SAME direction as every other exclusion/fill
+	// ring in this pipeline (computeFillFromRings unions them together under
+	// FillRule.NonZero) — mirroring East's point order across an axis to get
+	// West (or North to get South) flips that ring's winding, which makes a
+	// NonZero union cancel copper instead of adding it. West/South are
+	// therefore written with their own point order REVERSED relative to the
+	// naive mirror, so every spoke's signed area comes out with the same
+	// sign (verified against a real board: a wrong-signed West spoke was
+	// silently voiding an otherwise-correct union for any pad where it
+	// survived connectivity pruning — see kicad-viewer-zone-pad-connections
+	// memory for the failure this was caught from).
+	const localSpokes: { ring: Vec2[]; testPoint: Vec2 }[] = [
+		{ ring: [new Vec2(0, -hw), new Vec2(outerW, -hw), new Vec2(outerW, hw), new Vec2(0, hw)], testPoint: new Vec2(outerW, 0) }, // East
+		{ ring: [new Vec2(0, -hw), new Vec2(0, hw), new Vec2(-outerW, hw), new Vec2(-outerW, -hw)], testPoint: new Vec2(-outerW, 0) }, // West
+		{ ring: [new Vec2(-hw, 0), new Vec2(-hw, -outerH), new Vec2(hw, -outerH), new Vec2(hw, 0)], testPoint: new Vec2(0, -outerH) }, // North
+		{ ring: [new Vec2(-hw, 0), new Vec2(hw, 0), new Vec2(hw, outerH), new Vec2(-hw, outerH)], testPoint: new Vec2(0, outerH) }, // South
+	];
+
+	return localSpokes.map(({ ring, testPoint }) => ({ ring: ring.map(toWorld), testPoint: toWorld(testPoint) }));
 }
 
 // ---------------------------------------------------------------------------
@@ -381,12 +523,26 @@ function collectEdgeCutsGeometry(board: any): { closedLoops: MmPath[]; openEdges
  * hole" semantics regardless of each individual loop's own winding
  * direction, which chained line/arc segments don't reliably carry.
  */
-export function buildBoardOutlineRegionNm(board: any): Paths | null {
+function buildBoardOutlineRegion(board: any): Paths | null {
 	const { closedLoops, openEdges } = collectEdgeCutsGeometry(board);
 	const chained = assembleClosedLoops(openEdges);
 	const allLoops = [...closedLoops, ...chained].filter(l => l.length >= 3);
 	if (allLoops.length === 0) return null;
 	return getClipperEngine().booleanOp(ClipType.Union, FillRule.EvenOdd, allLoops.map(toClipperPath), []);
+}
+
+/**
+ * The board's physical body, as world-mm rings suitable for a renderer's
+ * even-odd multi-polygon fill.  This is deliberately shared with the zone
+ * filler: the shaded board area and the region zones are clipped to must be
+ * assembled from precisely the same Edge.Cuts geometry.
+ */
+export function buildBoardOutlineRingsMm(board: any): MmPath[] {
+	return buildBoardOutlineRegion(board)?.map(fromClipperPath) ?? [];
+}
+
+export function buildBoardOutlineRegionNm(board: any): Paths | null {
+	return buildBoardOutlineRegion(board);
 }
 
 // Real KiCad's own stock default (DEFAULT_COPPEREDGECLEARANCE,
@@ -474,6 +630,57 @@ export function resolveCopperLayers(scene: LayeredBoardScene): string[] {
  * else in this file exists to gather these plain inputs from a live app
  * session on the main thread.
  */
+/** Whether `pt` falls inside the filled region a (possibly holed) Clipper2
+ *  ring set represents — counts how many rings contain `pt` and treats an
+ *  ODD count as "inside". This is the standard nesting-parity rule for a
+ *  well-formed hierarchical boundary representation (each hole directly
+ *  inside exactly one outer, an island inside a hole inside 2 rings, etc.),
+ *  and deliberately does NOT trust each ring's own winding sign — this
+ *  file's own fractureFillResult already made that same call for the same
+ *  reason (see its doc comment): Clipper2's boolean-op output usually signs
+ *  outer/hole rings consistently, but nesting parity is the sign-independent
+ *  ground truth, which matters more for a point landing exactly on the
+ *  knife-edge between an intermediate chain of boolean ops. */
+export function isPointInsideRings(pt: Point, rings: Paths): boolean {
+	let count = 0;
+	for (const ring of rings) {
+		if (PointInPolygon(pt, ring) !== PointInPolygonResult.IsOutside) count++;
+	}
+	return count % 2 === 1;
+}
+
+/**
+ * Prunes thermal-spoke candidates down to the ones real KiCad would actually
+ * draw — a direct port of zone_filler.cpp's own post-knockout spoke loop
+ * (right after buildThermalSpokes): a spoke survives if its far-edge test
+ * point lands in the ALREADY-EXCLUSION-SUBTRACTED fill (`fillNm` — the same
+ * role real KiCad's own `testAreas` plays), OR if it mutually overlaps
+ * another candidate spoke (each one's test point falls inside the other's
+ * ring) — real KiCad's own fallback for two adjacent pads' spokes bridging
+ * each other even when neither alone reaches the main pour. A spoke that
+ * fails both checks is exactly what real KiCad calls a leg that "would not
+ * connect to anywhere" and simply isn't drawn. */
+export function pruneThermalSpokes(candidates: ThermalSpokeCandidateMm[], fillNm: Paths): Path[] {
+	if (candidates.length === 0) return [];
+	const candidatesNm = candidates.map(c => ({
+		ring: toClipperPath(c.ring),
+		testPoint: Point64Of(c.testPoint.x * NM_PER_MM, c.testPoint.y * NM_PER_MM),
+	}));
+
+	const accepted: Path[] = [];
+	for (const candidate of candidatesNm) {
+		if (isPointInsideRings(candidate.testPoint, fillNm)) {
+			accepted.push(candidate.ring);
+			continue;
+		}
+		const bridgesAnother = candidatesNm.some(other => other !== candidate
+			&& PointInPolygon(candidate.testPoint, other.ring) !== PointInPolygonResult.IsOutside
+			&& PointInPolygon(other.testPoint, candidate.ring) !== PointInPolygonResult.IsOutside);
+		if (bridgesAnother) accepted.push(candidate.ring);
+	}
+	return accepted;
+}
+
 export function computeFillFromRings(
 	outlinePoints: MmPath,
 	exclusionRingsMm: MmPath[],
@@ -484,6 +691,11 @@ export function computeFillFromRings(
 	// through the clearanceMm inflate below a second time: that inflate is
 	// only for step-3's pad/track/via same-pass electrical clearance.
 	extraExclusionRingsMm?: MmPath[],
+	// Thermal-relief spoke candidates (padThermalSpokesMm) — pruned by
+	// pruneThermalSpokes (real-connectivity hit-test) before being unioned
+	// back into the fill, then the whole result is clipped back to the
+	// zone's own outline.
+	spokeCandidates?: ThermalSpokeCandidateMm[],
 ): Paths /* world-mm point rings — always simple (hole-free) polygons after
 	fracture, one per disjoint fill region */ {
 	if (outlinePoints.length < 3) return [];
@@ -513,6 +725,15 @@ export function computeFillFromRings(
 		const unionExclusionsNm = engine.booleanOp(ClipType.Union, FillRule.NonZero, [...inflatedNm, ...preformedNm], []);
 		fillNm = engine.booleanOp(ClipType.Difference, FillRule.NonZero, outlineRingsNm, unionExclusionsNm);
 	}
+
+	if (spokeCandidates && spokeCandidates.length > 0) {
+		const acceptedSpokesNm = pruneThermalSpokes(spokeCandidates, fillNm);
+		if (acceptedSpokesNm.length > 0) {
+			const withSpokesNm = engine.booleanOp(ClipType.Union, FillRule.NonZero, [...fillNm, ...acceptedSpokesNm], []);
+			fillNm = engine.booleanOp(ClipType.Intersection, FillRule.NonZero, withSpokesNm, outlineRingsNm);
+		}
+	}
+
 	return fractureFillResult(fillNm).map(fromClipperPath);
 }
 
@@ -525,20 +746,50 @@ export function computeFillFromRings(
  * it off the main thread — see this file's header comment on the
  * main-thread/worker split.
  */
-export function collectExclusionRingsMm(scene: LayeredBoardScene, layer: string, zoneNetId: number | null): MmPath[] {
+export function collectExclusionRingsMm(
+	scene: LayeredBoardScene, layer: string, zoneNetId: number | null,
+	// See this file's header comment ("Pad Connections") for exactly what
+	// this changes and why it's PAD-only.
+	padConnection?: ZoneFillPadConnectionSettings,
+): { exclusionRingsMm: MmPath[]; preInflatedExclusionRingsMm: MmPath[]; spokeCandidates: ThermalSpokeCandidateMm[] } {
 	const bucket = scene.layerBuckets.get(layer) ?? [];
 	const exclusionRingsMm: MmPath[] = [];
+	const preInflatedExclusionRingsMm: MmPath[] = [];
+	const spokeCandidates: ThermalSpokeCandidateMm[] = [];
 	for (const item of bucket) {
 		if (!isObstacleKind(item.kind)) continue;
 		// Same-net copper flows together with the pour — only a DIFFERENT
-		// (or absent) net is an obstacle the fill must clear around.
-		if (item.netId != null && zoneNetId != null && item.netId === zoneNetId) continue;
+		// (or absent) net is an obstacle the fill must clear around, UNLESS
+		// this is a same-net pad under a non-'full' Pad Connections mode.
+		if (item.netId != null && zoneNetId != null && item.netId === zoneNetId) {
+			if (item.kind !== 'pad' || !padConnection) continue;
+			const mode = resolvePadConnectionMode(padConnection.mode, item.element);
+			if (mode === 'full') continue;
+			const ring = shapeToRingMm(item.shape);
+			if (!ring || ring.length < 3) continue;
+			if (mode === 'none') {
+				exclusionRingsMm.push(ring); // gets the normal clearanceMm inflate below
+				continue;
+			}
+			// mode === 'thermal'
+			const moat = inflateClosedRingMm(ring, padConnection.thermalGapMm);
+			if (moat && moat.length >= 3) preInflatedExclusionRingsMm.push(moat);
+			const pad = item.element;
+			const size = typeof pad?.getSize === 'function' ? pad.getSize() : { width: item.bbox.w, height: item.bbox.h };
+			const rotationDeg = typeof pad?.getOrigin === 'function' ? (pad.getOrigin().rotation ?? 0) : 0;
+			const isCircular = pad?.shape === 'circle' || (pad?.shape === 'oval' && size.width === size.height);
+			const worldCenter = { x: item.bbox.x + item.bbox.w / 2, y: item.bbox.y + item.bbox.h / 2 };
+			spokeCandidates.push(...padThermalSpokesMm(
+				worldCenter, size, rotationDeg, isCircular,
+				padConnection.thermalGapMm, padConnection.thermalSpokeWidthMm, padConnection.minThicknessMm));
+			continue;
+		}
 		const ring = item.kind === 'track' && item.shape.type === 'circle'
 			? trackArcRingMm(item.element, item.shape)
 			: shapeToRingMm(item.shape);
 		if (ring && ring.length >= 3) exclusionRingsMm.push(ring);
 	}
-	return exclusionRingsMm;
+	return { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates };
 }
 
 /**
@@ -557,9 +808,13 @@ export function computeZoneFillForLayer(
 	clearanceMm: number,
 	boardOutlineNm?: Paths | null,
 	extraExclusionRingsMm?: MmPath[],
+	padConnection?: ZoneFillPadConnectionSettings,
 ): Paths {
-	const exclusionRingsMm = collectExclusionRingsMm(scene, layer, zoneNetId);
-	return computeFillFromRings(outlinePoints, exclusionRingsMm, clearanceMm, boardOutlineNm, extraExclusionRingsMm);
+	const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates } =
+		collectExclusionRingsMm(scene, layer, zoneNetId, padConnection);
+	return computeFillFromRings(
+		outlinePoints, exclusionRingsMm, clearanceMm, boardOutlineNm,
+		[...(extraExclusionRingsMm ?? []), ...preInflatedExclusionRingsMm], spokeCandidates);
 }
 
 /** One (zone, layer) unit of work for the Clipper2 pipeline — plain,
@@ -575,6 +830,7 @@ export interface ZoneFillJob {
 	clearanceMm: number;
 	boardOutlineNm: Paths | null;
 	extraExclusionRingsMm: MmPath[];
+	spokeCandidates: ThermalSpokeCandidateMm[];
 }
 
 /**
@@ -585,7 +841,10 @@ export interface ZoneFillJob {
  * instance, so a caller can pass plain objects built from one.
  */
 export function buildZoneFillJobs(
-	zones: readonly { uuid: string; outlinePoints: MmPath; netId: number | null; layers: readonly string[]; clearanceMm: number }[],
+	zones: readonly {
+		uuid: string; outlinePoints: MmPath; netId: number | null; layers: readonly string[]; clearanceMm: number;
+		padConnection?: ZoneFillPadConnectionSettings;
+	}[],
 	scene: LayeredBoardScene,
 	boardOutlineNm: Paths | null,
 	// Board-edge clearance + keepout-zone exclusions, per copper layer — see
@@ -602,14 +861,17 @@ export function buildZoneFillJobs(
 			.flatMap(layer => layer === '*.Cu' ? copperLayers : [layer])
 			.filter(layer => layer.endsWith('.Cu'));
 		for (const layer of layers) {
+			const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates } =
+				collectExclusionRingsMm(scene, layer, zone.netId, zone.padConnection);
 			jobs.push({
 				zoneUuid: zone.uuid,
 				layer,
 				outlinePoints: zone.outlinePoints,
-				exclusionRingsMm: collectExclusionRingsMm(scene, layer, zone.netId),
+				exclusionRingsMm,
 				clearanceMm: zone.clearanceMm,
 				boardOutlineNm,
-				extraExclusionRingsMm: extraExclusionsByLayer?.get(layer) ?? [],
+				extraExclusionRingsMm: [...(extraExclusionsByLayer?.get(layer) ?? []), ...preInflatedExclusionRingsMm],
+				spokeCandidates,
 			});
 		}
 	}
@@ -619,7 +881,9 @@ export function buildZoneFillJobs(
 /** Runs one job's pipeline — the worker's per-message entry point, exported
  *  here so the worker file itself stays a thin postMessage/onmessage shim. */
 export function runZoneFillJob(job: ZoneFillJob): { zoneUuid: string; layer: string; points: MmPath }[] {
-	const fills = computeFillFromRings(job.outlinePoints, job.exclusionRingsMm, job.clearanceMm, job.boardOutlineNm, job.extraExclusionRingsMm);
+	const fills = computeFillFromRings(
+		job.outlinePoints, job.exclusionRingsMm, job.clearanceMm, job.boardOutlineNm,
+		job.extraExclusionRingsMm, job.spokeCandidates);
 	return fills.filter(ring => ring.length >= 3).map(points => ({ zoneUuid: job.zoneUuid, layer: job.layer, points }));
 }
 
@@ -757,6 +1021,7 @@ export function computeZoneFill(
 	clearanceMm: number,
 	boardOutlineNm?: Paths | null,
 	extraExclusionRingsMm?: MmPath[],
+	padConnection?: ZoneFillPadConnectionSettings,
 ): { layer: string; points: MmPath }[] {
 	const copperLayers = resolveCopperLayers(scene);
 	const layers = requestedLayers
@@ -765,7 +1030,8 @@ export function computeZoneFill(
 
 	const result: { layer: string; points: MmPath }[] = [];
 	for (const layer of layers) {
-		for (const ring of computeZoneFillForLayer(outlinePoints, zoneNetId, layer, scene, clearanceMm, boardOutlineNm, extraExclusionRingsMm)) {
+		for (const ring of computeZoneFillForLayer(
+			outlinePoints, zoneNetId, layer, scene, clearanceMm, boardOutlineNm, extraExclusionRingsMm, padConnection)) {
 			if (ring.length >= 3) result.push({ layer, points: ring });
 		}
 	}

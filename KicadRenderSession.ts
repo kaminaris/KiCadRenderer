@@ -34,8 +34,11 @@ import {
 	KicadElementPolyline, KicadElementBezier, KicadElementGrCurve
 }                      from '@kicad-io/KicadElementPolyline';
 import {
-	KicadElementGrPoly, KicadElementPolygon
+	KicadElementGrPoly, KicadElementPolygon, type GrShapeFillMode
 }                      from '@kicad-io/KicadElementPolygon';
+import {
+	type KicadStrokeType
+}                      from '@kicad-io/KicadElementStroke';
 import {
 	KicadElementAt
 }                      from '@kicad-io/KicadElementAt';
@@ -375,6 +378,25 @@ export interface RuleAreaDraft {
 	hatchStyle: ZoneHatchStyle;
 	hatchPitchMm: number;
 	keepout: RuleAreaKeepoutSettings;
+}
+
+/** Every field real KiCad's DIALOG_SHAPE_PROPERTIES exposes for a plain
+ *  graphic polygon (SHAPE_T::POLY) — pcbnew/dialogs/dialog_shape_properties
+ *  .cpp hides that dialog's geometry notebook entirely for a polygon ("Nothing
+ *  to do here...yet" — vertex editing is the point editor's job, same as
+ *  this app's shared corner/edge-drag handles), leaving just: line width/
+ *  style, fill, locked, net (enabled only on a copper layer) and layer.
+ *  Solder mask override is deliberately out of scope here, same call as
+ *  RuleAreaDraft's Placement tab — it's gated on an external-copper-layer
+ *  selection in real KiCad too, a narrow edge case for a shape that's
+ *  normally drawn on silkscreen/courtyard/etc. */
+export interface PolygonDraft {
+	layer: string;
+	lineWidthMm: number;
+	lineStyle: KicadStrokeType;
+	fillMode: GrShapeFillMode;
+	locked: boolean;
+	netName: string;
 }
 
 export interface HitResult {
@@ -2678,22 +2700,6 @@ export class KicadRenderSession {
 		return arc.getUuid() ?? null;
 	}
 
-	addBoardGraphicPolygon(
-		points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || points.length < 3) {
-			return null;
-		}
-		this.pushUndoSnapshot('Draw polygon');
-		const polygon = new KicadElementGrPoly();
-		polygon.setPoints(points.map(point => ({ x: point.x, y: point.y })));
-		polygon.setStroke(strokeWidth, 'default');
-		polygon.setLayer(layer);
-		polygon.setUuid();
-		this.boardRoot!.rootElement.addChild(polygon);
-		this.commitAstMutation();
-		return polygon.getUuid() ?? null;
-	}
-
 	addBoardGraphicBezier(
 		points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
 		if (!this.canAddBoardGraphic() || points.length !== 4) {
@@ -3635,19 +3641,23 @@ export class KicadRenderSession {
 		}
 		this.documentType = 'board';
 		this.boardRoot = fakeBoard;
-		this.scene = {
+		const previewScene: LayeredBoardScene = {
 			layersPresent: [...layerBuckets.keys()],
 			layerBuckets,
 			hitTestItems: items,
 			zoneFills: [],
+			// A footprint-preview document has no board-level Edge.Cuts, so it
+			// intentionally carries no physical-board body shadow.
+			boardBodyRings: [],
 			copperLayerStack: ['F.Cu', 'B.Cu'],
 			declaredLayers: [...layerBuckets.keys()]
 		};
+		this.scene = previewScene;
 		this.ratsnestLines = [];
-		this.layerState = defaultLayerState(this.scene.layersPresent);
+		this.layerState = defaultLayerState(previewScene.layersPresent);
 		this.geometryDirty = true;
 		this.selectedIds = new Set();
-		this.fitToItems(this.scene.hitTestItems);
+		this.fitToItems(previewScene.hitTestItems);
 		return true;
 	}
 
@@ -4257,6 +4267,81 @@ export class KicadRenderSession {
 		return { id: polygon.getUuid() ?? paintId, points: polygon.getPoints(), setPoints: points => polygon.setPoints(points) };
 	}
 
+	/** Mirrors findZoneByUuid's bare-uuid recovery — buildGrPoly's own paint
+	 *  id is already bare (no composite `:layer:part` suffix, unlike a
+	 *  zone's), but stripping defensively costs nothing and keeps this
+	 *  resolver consistent with every other paint-id lookup in this file. */
+	protected findGrPolyByUuid(uuid: string): KicadElementGrPoly | null {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return null;
+		}
+		const bareUuid = uuid.includes(':') ? uuid.slice(0, uuid.indexOf(':')) : uuid;
+		const polygons = this.boardRoot.rootElement.findChildrenByClass(KicadElementGrPoly) as KicadElementGrPoly[];
+		return polygons.find(polygon => polygon.getUuid() === bareUuid) ?? null;
+	}
+
+	/** Reads an existing graphic polygon into the Polygon Properties dialog's
+	 *  draft shape — see PolygonDraft's own doc comment for what's covered. */
+	getPolygonDraft(paintId: string): PolygonDraft | null {
+		const polygon = this.findGrPolyByUuid(paintId);
+		if (!polygon) {
+			return null;
+		}
+		const stroke = polygon.getStroke();
+		return {
+			layer: polygon.getLayer(),
+			lineWidthMm: stroke.width,
+			lineStyle: stroke.type,
+			fillMode: polygon.getFillMode(),
+			locked: polygon.isLocked(),
+			netName: polygon.getNetName() ?? ''
+		};
+	}
+
+	private applyPolygonDraft(polygon: KicadElementGrPoly, draft: PolygonDraft): void {
+		polygon.setStroke(draft.lineWidthMm, draft.lineStyle);
+		polygon.setFillMode(draft.fillMode);
+		polygon.setLocked(draft.locked);
+		polygon.setLayer(draft.layer);
+		polygon.setNetName(draft.netName || null);
+	}
+
+	/** Commits a freshly click-drawn outline as a new graphic polygon — the
+	 *  polygon-tool gesture's points, plus whatever the Polygon Properties
+	 *  dialog's OK button gathered. Field order matches real KiCad's own
+	 *  writer (pts, stroke, fill, locked, layer, net, uuid — see
+	 *  PolygonDraft's doc comment), so setPoints/setStroke/applyPolygonDraft
+	 *  run before setUuid deliberately. */
+	createPolygonFromOutline(points: readonly { x: number; y: number }[], draft: PolygonDraft): string | null {
+		if (!this.canAddBoardGraphic() || points.length < 3) {
+			return null;
+		}
+		this.pushUndoSnapshot('Draw polygon');
+		const polygon = new KicadElementGrPoly();
+		polygon.setPoints(points.map(point => ({ x: point.x, y: point.y })));
+		this.applyPolygonDraft(polygon, draft);
+		polygon.setUuid();
+		this.boardRoot!.rootElement.addChild(polygon);
+		this.commitAstMutation();
+		return polygon.getUuid() ?? null;
+	}
+
+	/** Re-applies every Polygon Properties field to an already-placed graphic
+	 *  polygon (double-click edit) — outline geometry is untouched. */
+	updatePolygonProperties(paintId: string, draft: PolygonDraft): boolean {
+		const polygon = this.findGrPolyByUuid(paintId);
+		if (!polygon) {
+			return false;
+		}
+		this.pushUndoSnapshot('Edit polygon properties');
+		this.applyPolygonDraft(polygon, draft);
+		if (!polygon.getUuid()) {
+			polygon.setUuid();
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
 	/** Every board-wide rule area whose `(keepout (copperpour not_allowed))`
 	 *  forbids other zones from pouring into it — the plain-data shape
 	 *  BoardZoneFill's buildEdgeExclusionsByLayer needs, gathered here
@@ -4272,6 +4357,20 @@ export class KicadRenderSession {
 		return zones
 			.filter(zone => zone.isRuleArea() && zone.getDoNotAllowZoneFills() && zone.getPolygon().length >= 3)
 			.map(zone => ({ outlinePoints: zone.getPolygon(), layers: zone.getLayers() }));
+	}
+
+	/** A copper zone's Pad Connections field (Thermal reliefs/Solid/Thru-hole
+	 *  only/None), plus the thermal-relief sizing BoardZoneFill's
+	 *  collectExclusionRingsMm needs to act on it — see that file's "Pad
+	 *  Connections" header comment for the real-KiCad source this mirrors. */
+	private zonePadConnectionSettings(zone: KicadElementZone) {
+		const thermal = zone.getThermalRelief();
+		return {
+			mode: zone.getPadConnectionType(),
+			thermalGapMm: thermal.gapMm,
+			thermalSpokeWidthMm: thermal.spokeWidthMm,
+			minThicknessMm: zone.getMinThickness(),
+		};
 	}
 
 	/**
@@ -4323,7 +4422,8 @@ export class KicadRenderSession {
 					outlinePoints: outline,
 					netId: zone.getNetId(),
 					layers: zone.getLayers(),
-					clearanceMm: resolveZoneClearanceMm(zone, designSettings)
+					clearanceMm: resolveZoneClearanceMm(zone, designSettings),
+					padConnection: this.zonePadConnectionSettings(zone)
 				}
 			],
 			this.scene, boardOutlineNm, extraExclusionsByLayer
@@ -4576,8 +4676,10 @@ export class KicadRenderSession {
 	 *  is the delta from the edge's current position (this frame's move
 	 *  minus last frame's, not from the drag's original start point), so
 	 *  repeated calls across one drag gesture accumulate correctly —
-	 *  matches moveBoardPolygonPoint/translateBoardSelection's identical
-	 *  per-frame-delta convention. `edgeIndex` is the edge between
+	 *  matches translateBoardSelection's identical per-frame-delta
+	 *  convention (moveBoardPolygonPoint instead takes an absolute
+	 *  position, since a corner just snaps straight to the cursor).
+	 *  `edgeIndex` is the edge between
 	 *  points[edgeIndex] and points[(edgeIndex+1) % length]. */
 	moveBoardPolygonEdge(paintId: string, edgeIndex: number, dx: number, dy: number): boolean {
 		const polygon = this.findBoardPolygonByPaintId(paintId);
@@ -4672,7 +4774,8 @@ export class KicadRenderSession {
 		const jobIds = fillable.map((zone, i) => zone.getUuid() ?? `__zonefill_${ i }`);
 		const zoneInputs = fillable.map((zone, i) => ({
 			uuid: jobIds[i], outlinePoints: zone.getPolygon(), netId: zone.getNetId(),
-			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings)
+			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings),
+			padConnection: this.zonePadConnectionSettings(zone)
 		}));
 		const jobs = buildZoneFillJobs(zoneInputs, this.scene, boardOutlineNm, extraExclusionsByLayer);
 		const results = await runJobs(jobs, onProgress);
