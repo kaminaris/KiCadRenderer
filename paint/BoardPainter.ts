@@ -2,9 +2,9 @@ import { Vec2 } from '../math/Vec2';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
 import { Renderer } from '../render/Renderer';
-import { styleForLayer, boardBackgroundColor, zoneFillAlpha, withAlpha } from './LayerColors';
+import { styleForLayer, colorForLayer, boardBackgroundColor, viaHoleWallColor, viaHoleColor, zoneFillAlpha, withAlpha } from './LayerColors';
 import { layerPaintOrder } from './LayerOrder';
-import { computeStrokeTextGeometry, drawStrokeTextGeometry } from './TextPaint';
+import { computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, type StrokeTextGeometry } from './TextPaint';
 import { PaintedShape, shapeToBBox, bboxesIntersect } from './PaintedShape';
 
 // KicadBoard/KicadElementFootprint/etc. are only available once the
@@ -58,6 +58,16 @@ export interface LayeredBoardScene {
 	 *  uses). BoardRatsnest needs this to know which internal layers a
 	 *  through/blind/buried via's plated barrel actually spans. */
 	copperLayerStack: string[];
+	/** Every layer name declared in the board's own `(layers ...)` table
+	 *  (any type — copper or technical), regardless of whether anything is
+	 *  drawn on it yet. layersPresent is unioned with this (see build()) so
+	 *  a freshly created/blank board's Appearance panel lists its full
+	 *  enabled layer set immediately, matching real KiCad, instead of only
+	 *  the handful of layers that happen to already have content — kept
+	 *  here so the incremental per-footprint update paths
+	 *  (updateFootprintItems/removeFootprintItems) can recompute
+	 *  layersPresent without re-deriving this from the board AST each time. */
+	declaredLayers: string[];
 }
 
 /** A copper pour's authored OUTLINE (not the thermal-relief-carved fill
@@ -96,20 +106,46 @@ const SKETCH_STROKE_WIDTH = 0.05;
  * this derives the transient draw order needed for the active view.
  */
 export function boardPaintOrder(layersPresent: readonly string[], activeLayer: string | null): string[] {
-	if (!activeLayer || !layersPresent.includes(activeLayer)) {
-		return [...layersPresent];
-	}
-	return [...layersPresent.filter(layer => layer !== activeLayer), activeLayer];
+	// PadNumbers must stay the topmost layer unconditionally (see
+	// BoardPainter.paint()'s dedicated always-on-top handling for it) — the
+	// active-layer promotion below exists to bring copper/silkscreen to the
+	// front for highlighting, and without this exclusion it would instead
+	// promote the active layer ABOVE PadNumbers, burying every pad number/
+	// net name under that layer's own fills whenever a layer is selected
+	// (i.e. always, since some layer is always active).
+	//
+	// Vias get the identical treatment, for the identical reason: real
+	// KiCad's PCB_DRAW_PANEL_GAL::SetTopLayer (pcb_draw_panel_gal.cpp)
+	// unconditionally calls view->SetTopLayer(LAYER_VIA_THROUGH) — vias sit
+	// in the view's permanent "always on top" set, completely independent
+	// of the SAME function's separate "bring the active F.*/B.* layer to
+	// the front" step for tracks/pads. Letting the active-layer promotion
+	// below carry 'Vias' along with it (its previous behavior) meant
+	// switching your active layer to F.Cu or B.Cu — which is normally true
+	// almost the entire time you're editing a board — silently buried every
+	// via under that layer's own tracks, a real reported bug ("tracks
+	// render over vias"), not a stated simplification.
+	const hasLabels = layersPresent.includes('PadNumbers');
+	const hasVias = layersPresent.includes('Vias');
+	const rest = layersPresent.filter(layer => layer !== 'PadNumbers' && layer !== 'Vias');
+	const ordered = (!activeLayer || !rest.includes(activeLayer))
+		? [...rest]
+		: [...rest.filter(layer => layer !== activeLayer), activeLayer];
+	const withVias = hasVias ? [...ordered, 'Vias'] : ordered;
+	return hasLabels ? [...withVias, 'PadNumbers'] : withVias;
 }
 
 /** Options for BoardPainter.build() — kept off the hot paint() path. */
 export interface BoardPaintOptions {
 	/**
 	 * When true, draw each pad's number centered on the pad (KiCad
-	 * footprint-editor / pad-netname overlay style). Default false so the
-	 * board viewer stays uncluttered; Footprint Generator opts in.
+	 * footprint-editor / pad-netname overlay style). Defaults to true,
+	 * matching real KiCad's own default board-view behavior.
 	 */
 	showPadNumbers?: boolean;
+	/** When true, draw each pad's net name alongside its number (stacked
+	 *  as a 2-line block when both are on). Defaults to true. */
+	showNetNames?: boolean;
 }
 
 export function defaultLayerState(layersPresent: string[]): Map<string, LayerVisibilityState> {
@@ -128,7 +164,23 @@ export function defaultLayerState(layersPresent: string[]): Map<string, LayerVis
  * closures already built here.
  */
 export class BoardPainter {
-	options: BoardPaintOptions = { showPadNumbers: false };
+	options: BoardPaintOptions = { showPadNumbers: true, showNetNames: true };
+
+	/** The `activeLayer` argument of the CURRENT/most recent paint() call —
+	 *  stashed here so buildVia's draw closure (built once, well before any
+	 *  particular paint() call, at build() time) can read whichever layer
+	 *  is active AT DRAW TIME. Real KiCad's own via rendering isn't a
+	 *  single fixed-color draw either: PCB_PAINTER::draw(PCB_VIA*, aLayer)
+	 *  runs once per copper layer the via spans, each pass using THAT
+	 *  layer's own color, and whichever pass ends up on top visually
+	 *  depends on the SAME active-layer promotion tracks/pads get (see
+	 *  boardPaintOrder's doc comment) — switching your active layer to
+	 *  B.Cu is what makes a real KiCad via's ring flip to B.Cu's blue. This
+	 *  app draws each via as a single circle rather than a stack of
+	 *  per-layer passes, so this field is the simplification that gets the
+	 *  same user-visible result (ring color follows the active layer, when
+	 *  the via actually touches it) without the full multi-pass machinery. */
+	protected activePaintLayer: string | null = null;
 
 	build(board: any): LayeredBoardScene {
 		const layerBuckets = new Map<string, PaintedItem[]>();
@@ -249,10 +301,12 @@ export class BoardPainter {
 			}
 		}
 
-		const layersPresent = layerPaintOrder.filter(l => layerBuckets.has(l));
+		// Union with the board's own declared layer table (not just layers
+		// that happen to have content yet) — see declaredLayers' doc comment.
+		const layersPresent = layerPaintOrder.filter(l => layerBuckets.has(l) || globalLayers.includes(l));
 		const hitTestItems: PaintedItem[] = [];
 		for (const layer of layersPresent) {
-			for (const item of layerBuckets.get(layer)!) {
+			for (const item of layerBuckets.get(layer) ?? []) {
 				if (item.hitTestable) {
 					hitTestItems.push(item);
 				}
@@ -262,7 +316,7 @@ export class BoardPainter {
 		const copperLayerStack = globalLayers.filter(l => l.endsWith('.Cu'));
 		const zoneFills = this.buildZoneFills(zones, copperLayerStack);
 
-		return { layersPresent, layerBuckets, hitTestItems, zoneFills, copperLayerStack };
+		return { layersPresent, layerBuckets, hitTestItems, zoneFills, copperLayerStack, declaredLayers: globalLayers };
 	}
 
 	/** One ZoneFillRegion per (zone, copper layer it pours onto) — see that
@@ -318,8 +372,11 @@ export class BoardPainter {
 		}
 
 		// Cheap (a few dozen possible layers, not board-size-dependent) —
-		// covers the rare case a flip empties or (re)populates a layer.
-		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0);
+		// covers the rare case a flip empties or (re)populates a layer. Also
+		// unioned with declaredLayers (see its doc comment) so an emptied-out
+		// declared layer stays listed instead of disappearing from the
+		// Appearance panel.
+		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0 || scene.declaredLayers.includes(l));
 	}
 
 	/**
@@ -342,7 +399,7 @@ export class BoardPainter {
 			}
 		}
 		scene.hitTestItems = scene.hitTestItems.filter(it => !belongsToFootprint(it.id));
-		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0);
+		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0 || scene.declaredLayers.includes(l));
 	}
 
 	/**
@@ -353,6 +410,35 @@ export class BoardPainter {
 	 */
 	buildFootprintPreviewItems(board: any, footprint: any): PaintedItem[] {
 		return this.buildFootprint(footprint, this.getGlobalLayerNames(board));
+	}
+
+	/**
+	 * removeFootprintItems' generic sibling for a plain id set — used by a
+	 * track-body drag (KicadRenderSession.beginTrackDragPreview) to pull the
+	 * original assembled line's segments out of the static scene for the
+	 * duration of the drag, exactly like removeFootprintItems does for a
+	 * footprint: the live shape is already drawn separately (there, a
+	 * per-frame preview path; here, the route-style editPreview overlay
+	 * BoardPointerController already builds from dragSegment45's result), so
+	 * leaving the untouched, still-selected originals in the static scene
+	 * would draw two copies of the same track — the stationary highlighted
+	 * original underneath the moving preview. No footprint-prefix matching
+	 * needed here (unlike removeFootprintItems, a segment id never owns
+	 * child items), so this is exact-id membership only. Mutates
+	 * scene.layerBuckets/hitTestItems/layersPresent in place, same contract
+	 * as removeFootprintItems.
+	 */
+	removeItemsByIds(scene: LayeredBoardScene, ids: ReadonlySet<string>): void {
+		if (ids.size === 0) {
+			return;
+		}
+		for (const [layer, items] of scene.layerBuckets) {
+			if (items.some(it => ids.has(it.id))) {
+				scene.layerBuckets.set(layer, items.filter(it => !ids.has(it.id)));
+			}
+		}
+		scene.hitTestItems = scene.hitTestItems.filter(it => !ids.has(it.id));
+		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0 || scene.declaredLayers.includes(l));
 	}
 
 	/**
@@ -381,15 +467,42 @@ export class BoardPainter {
 		 *  redone on every pan/zoom — see KicadRenderSession.render). */
 		viewBBox?: { x: number; y: number; w: number; h: number }
 	): void {
+		this.activePaintLayer = activeLayer;
+		// Collected during the main per-layer pass below, then redrawn once
+		// more at the very end (see after the loop) — a highlighted/selected
+		// track needs to visually sit above EVERY other item on its copper
+		// layer, including a pad, not just other tracks. build() pushes
+		// tracks before footprints/pads into each layer's bucket, so in
+		// submission order a pad always wins over a track on the same spot;
+		// that's the right default (pads should normally read as the more
+		// prominent feature), but it also means a selected track can vanish
+		// under an overlapping pad with no visual feedback at all. Real
+		// KiCad's own GAL view solves this the same way: selected items
+		// render in their own top-most Z pass, independent of their normal
+		// item-type ordering.
+		const highlightOverlay: { item: PaintedItem; color: string; mode: ItemDisplayMode }[] = [];
 		for (const layer of boardPaintOrder(scene.layersPresent, activeLayer)) {
+			// Pad number/net name overlays aren't a real KiCad layer — they
+			// track their own pad's visibility (gated by showPadNumbers/
+			// showNetNames at build time, see BoardPainter.options) and must
+			// stay fully readable no matter which layer is active or
+			// dimmed/hidden by high-contrast mode, exactly like real KiCad's
+			// own pad-text painting. Skip the normal per-layer
+			// visible/opacity gate for this one synthetic bucket only.
+			const isPadLabelLayer = layer === 'PadNumbers';
 			const state = layerState.get(layer);
-			if (!state || !state.visible) {
+			if (!isPadLabelLayer && (!state || !state.visible)) {
 				continue;
 			}
-			const items = scene.layerBuckets.get(layer)!;
+			// A declared-but-empty layer (see declaredLayers' doc comment) has
+			// no bucket at all yet — nothing to draw, just move on.
+			const items = scene.layerBuckets.get(layer);
+			if (!items) {
+				continue;
+			}
 			const baseColor = styleForLayer(layer).color;
 
-			renderer.setOpacity?.(state.opacity);
+			renderer.setOpacity?.(isPadLabelLayer ? 1 : state!.opacity);
 			// Batched per-layer purely to match the existing call structure —
 			// what "batch" actually means is backend-specific now:
 			// Canvas2dRenderer still commits per-layer (opacity is baked into
@@ -432,6 +545,24 @@ export class BoardPainter {
 					: item.kind === 'via' ? itemDisplayModes.via
 					: item.kind === 'track' ? itemDisplayModes.track
 					: 'filled';
+				item.draw(renderer, color, mode);
+				if (highlighted) {
+					highlightOverlay.push({ item, color, mode });
+				}
+			}
+			renderer.endBatch?.();
+		}
+		// Redraw every explicitly-highlighted item once more, after every
+		// normal layer has already been submitted — see highlightOverlay's
+		// doc comment above. Submission order is what determines on-top-ness
+		// for both backends here (Canvas2D commits per-layer as it goes;
+		// WebGL accumulates every layer's vertices into one buffer and only
+		// actually draws on the caller's later flush() — either way, later
+		// submission wins), so this final pass is enough on its own, no
+		// separate depth/z mechanism needed.
+		if (highlightOverlay.length > 0) {
+			renderer.beginBatch?.();
+			for (const { item, color, mode } of highlightOverlay) {
 				item.draw(renderer, color, mode);
 			}
 			renderer.endBatch?.();
@@ -538,11 +669,19 @@ export class BoardPainter {
 			const filledLayers = new Set(filledPolygons.map(fp => fp.layer));
 			const points = outline.map(point => new Vec2(point.x, point.y));
 			const bbox = boundsOfPoints(outline);
+			// hitTestable:true with an UNFILLED closed polygon shape — same
+			// edge-only pattern as buildRuleArea (PaintedShape's `filled ===
+			// false` branch) — so a zone is selectable by clicking near its
+			// border without its (often board-spanning) bbox swallowing every
+			// click over the components/traces it encloses. The fill items
+			// below stay hitTestable:false per their own doc comment.
 			for (const layer of layers) {
+				const isFilled = filledLayers.has(layer);
 				items.push({
 					id: `${ zoneId }:${ layer }:outline`, layer, kind: 'zone',
-					shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: zone,
-					zoneDisplayMode: filledLayers.has(layer) ? 'outline' : undefined, netId, netName,
+					shape: { type: 'polygon', points: outline, filled: false, closed: true, strokeWidth: displayOutlineWidth },
+					bbox, hitTestable: true, element: zone,
+					zoneDisplayMode: isFilled ? 'outline' : undefined, netId, netName,
 					draw: (renderer, color) => {
 						renderer.polygon(points, { strokeColor: color, strokeWidth: displayOutlineWidth });
 						for (const [start, end] of edgeHatches) {
@@ -550,6 +689,27 @@ export class BoardPainter {
 						}
 					},
 				});
+				// Real KiCad ALSO strokes the zone's own authored boundary at
+				// FULL opacity on top of a filled layer — PCB_PAINTER::draw
+				// (ZONE*) runs the outline as a separate pass from the fill,
+				// same net/layer color but with alpha forced to 1.0
+				// (`color.WithAlpha(1.0)`), independent of the fill pass's own
+				// zone-opacity multiplier (`color.a *= m_zoneOpacity`). So a
+				// filled zone's border reads as a crisp, undimmed line even
+				// though its copper pour is translucent. Untagged (unlike the
+				// hatched item above) so it always paints regardless of
+				// zoneDisplayMode — real KiCad's Filled/Outline toggle only
+				// ever gates the FILL polygon, never this border.
+				if (isFilled) {
+					items.push({
+						id: `${ zoneId }:${ layer }:border`, layer, kind: 'zone',
+						shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: zone,
+						netId, netName,
+						draw: (renderer, color) => {
+							renderer.polygon(points, { strokeColor: color, strokeWidth: displayOutlineWidth });
+						},
+					});
+				}
 			}
 		}
 
@@ -654,10 +814,7 @@ export class BoardPainter {
 				const font = typeof prop.getFont === 'function' ? prop.getFont() : { height: 1 };
 				const textSize = font.height || 1;
 				const textWorld = footprintMatrix.transform(new Vec2(propOrigin.x, propOrigin.y));
-				// Absolute-angle-in-file convention applies to property text
-				// too (same reasoning as pads) — the rendered angle is the
-				// property's own angle, not footprint rotation + property angle.
-				const textAngle = propOrigin.rotation ?? 0;
+				const textAngle = footprintTextDrawAngle(prop, origin.rotation ?? 0);
 				// KiCad's real default (no explicit justify element) is
 				// center/middle-anchored, not left/top — getAnchorPoint()
 				// (via WithJustify) already encodes that default.
@@ -724,7 +881,7 @@ export class BoardPainter {
 			// was entirely unrendered before this.
 			if (getFpTextClass()) {
 				for (const text of footprint.findChildrenByClass(getFpTextClass())) {
-					const item = this.buildTextElement(text, footprintMatrix, footprintId);
+					const item = this.buildTextElement(text, footprintMatrix, footprintId, origin.rotation ?? 0);
 					if (item) {
 						items.push(item);
 					}
@@ -779,7 +936,7 @@ export class BoardPainter {
 	 *    color — not KiCad's exact rounded-margin swatch, but visibly
 	 *    correct (readable light text on a filled patch) rather than absent.
 	 */
-	protected buildTextElement(textEl: any, footprintMatrix: Matrix3 | null, footprintId?: string): PaintedItem | null {
+	protected buildTextElement(textEl: any, footprintMatrix: Matrix3 | null, footprintId?: string, footprintRotation = 0): PaintedItem | null {
 		if (!textEl.value) {
 			return null;
 		}
@@ -821,13 +978,15 @@ export class BoardPainter {
 		// No render_cache — plain Newstroke-renderable text.
 		const origin = typeof textEl.getOrigin === 'function' ? textEl.getOrigin() : { x: 0, y: 0, rotation: 0 };
 		const worldPos = footprintMatrix ? footprintMatrix.transform(new Vec2(origin.x, origin.y)) : new Vec2(origin.x, origin.y);
-		const angleDeg = origin.rotation ?? 0;
+		const angleDeg = footprintMatrix
+			? footprintTextDrawAngle(textEl, footprintRotation)
+			: origin.rotation ?? 0;
 		const font = typeof textEl.getFont === 'function' ? textEl.getFont() : { height: 1 };
 		const textSize = font.height || 1;
 		const value = textEl.value;
-		const bbox = { x: worldPos.x - textSize, y: worldPos.y - textSize, w: textSize * 2, h: textSize * 2 };
 		const anchor = typeof textEl.getAnchorPoint === 'function' ? textEl.getAnchorPoint() : { x: 0, y: 0 };
 		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, angleDeg, isBack, undefined, anchor);
+		const bbox = getStrokeTextBounds(geometry);
 
 		return {
 			id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: textEl,
@@ -863,7 +1022,15 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'segment', x1: worldStart.x, y1: worldStart.y, x2: worldEnd.x, y2: worldEnd.y, width };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: line,
+			// Not selectable outside the footprint editor, same as
+			// buildFpRect/buildFpCircle/buildFpPoly below — real KiCad's
+			// PCB_SELECTION_TOOL::Selectable() rejects every footprint-owned
+			// PCB_SHAPE_T (line/rect/circle/arc/poly) when
+			// !m_isFootprintEditor (pcb_selection_tool.cpp), only pads/fields/
+			// text stay individually pickable. Clicking silkscreen/fab
+			// graphics should resolve to the whole-footprint synthetic hit
+			// item instead, matching real KiCad.
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: line,
 			draw: (renderer, color) => {
 				renderer.line([worldStart, worldEnd], { strokeColor: color, strokeWidth: width || 0.1 });
 			},
@@ -945,7 +1112,9 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: radius };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
+			// Not selectable outside the footprint editor — see buildFpLine's
+			// doc comment.
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
 			draw: (renderer, color) => {
 				renderer.arc(
 					worldCenter, radius,
@@ -1193,23 +1362,32 @@ export class BoardPainter {
 			}
 		}
 
-		if (this.options.showPadNumbers) {
-			const numberItem = this.buildPadNumber(
+		if (this.options.showPadNumbers || this.options.showNetNames) {
+			const labelItem = this.buildPadNumber(
 				pad, worldCenter, size, footprintRotationDeg, padRotationDeg, id,
 			);
-			if (numberItem) {
-				items.push(numberItem);
+			if (labelItem) {
+				items.push(labelItem);
 			}
 		}
 
 		return items;
 	}
 
+	/** PCB_RENDER_SETTINGS::MAX_FONT_SIZE (pcb_painter.cpp) — 10mm, a hard
+	 *  cap regardless of how large the pad is. */
+	protected static readonly MAX_PAD_LABEL_FONT_SIZE = 10;
+
 	/**
-	 * Pad number overlay — ports kicanvas/KiCad pcb_painter pad-netname
-	 * sizing: fit font to the pad's shorter axis (cap 10mm), rotate 90° when
-	 * the pad is taller than wide, then keep the label upright. Drawn on the
-	 * synthetic PadNumbers layer above copper.
+	 * Pad number / net name overlay — a direct port of real KiCad's
+	 * PCB_PAINTER::draw(const PAD*, int) netname-layer branch
+	 * (pcbnew/pcb_painter.cpp), not an approximation, so sizing/fit matches
+	 * KiCad exactly instead of drifting off on oddly-shaped or rotated
+	 * pads. Skips the CUSTOM-shape "number box" and the 45°-rotation bloat
+	 * clamp (both rare edge cases this app's pad model doesn't need) but
+	 * otherwise follows the same math line-for-line. Drawn on the synthetic
+	 * PadNumbers layer, which BoardPainter.paint() always renders at full
+	 * opacity regardless of the active/high-contrast layer.
 	 */
 	protected buildPadNumber(
 		pad: any,
@@ -1219,23 +1397,28 @@ export class BoardPainter {
 		padRotationDeg: number,
 		padId: string,
 	): PaintedItem | null {
-		const number = String(pad.padNumber ?? '');
-		if (!number || number === '~') {
+		const padNumber = this.options.showPadNumbers ? String(pad.padNumber ?? '') : '';
+		const netName: string = this.options.showNetNames && typeof pad.getNetName === 'function'
+			? (pad.getNetName() ?? '') : '';
+		const showNumber = !!padNumber && padNumber !== '~';
+		const showNet = !!netName;
+		if (!showNumber && !showNet) {
 			return null;
 		}
 
-		// Orth size / orientation — same rules as kicanvas PadPainter.
-		let maxWidth = size.width;
-		let maxFontSize = size.height;
+		// padsize.x/y below is pcb_painter.cpp's `padsize` (the pad's own
+		// bounding box) — real KiCad also swaps to the local X axis and
+		// rotates -90° when the pad is taller than wide ("Keep the size
+		// ratio for the font, but make it smaller"); textRotated captures
+		// that plus undoing the footprint's own rotation so the label stays
+		// upright in world space, same as this function did before.
+		let padsizeX = size.width;
+		let padsizeY = size.height;
 		let textRotated = -footprintRotationDeg;
-		if (size.width < size.height * 0.95) {
+		if (padsizeX < padsizeY * 0.95) {
 			textRotated += 90;
-			maxWidth = size.height;
-			maxFontSize = size.width;
+			[padsizeX, padsizeY] = [padsizeY, padsizeX];
 		}
-		maxFontSize = Math.min(maxFontSize, 10);
-
-		// Keep label upright in world space (worldAngle = padRot + textRotated).
 		while (padRotationDeg + textRotated > 90) {
 			textRotated -= 180;
 		}
@@ -1243,22 +1426,86 @@ export class BoardPainter {
 			textRotated += 180;
 		}
 
-		// Shrink to fit character count along the long axis (KiCad: width/max(len,3)).
-		const fitWidth = maxWidth / Math.max(number.length, 3);
-		let fontSize = Math.min(maxFontSize, fitWidth) * 0.95;
-		// Tiny pads (e.g. 0402) — keep a readable floor without exploding past the pad.
-		const minReadable = Math.min(0.25, Math.max(maxFontSize, maxWidth) * 0.55);
-		fontSize = Math.max(fontSize, minReadable);
-		if (fontSize <= 0) {
+		// double maxSize = PCB_RENDER_SETTINGS::MAX_FONT_SIZE; double size = padsize.y; if (size > maxSize) size = maxSize;
+		let boxSize = Math.min(padsizeY, BoardPainter.MAX_PAD_LABEL_FONT_SIZE);
+
+		// "Divide the space... The magic numbers are defined experimentally
+		// for a better look." (both number AND net name shown at once).
+		let numberY = 0, netY = 0;
+		if (showNumber && showNet) {
+			boxSize = boxSize / 2.5;
+			netY = boxSize / 1.4;
+			numberY = boxSize / 1.7;
+		}
+
+		// Xscale_for_stroked_font — this renderer's stroke text has no
+		// separate x/y glyph scale (unlike KiCad's GAL SetGlyphSize), so
+		// applied uniformly here as the closest equivalent: KiCad's own
+		// comment already calls this "a smaller text size to handle
+		// interline, pen size" as much as the per-engine font metric.
+		const STROKE_XSCALE = 0.9;
+
+		let netFontSize = 0;
+		if (showNet) {
+			// double tsize = 1.5 * padsize.x / max(PrintableCharCount(netname)+1, 5);
+			let tsize = 1.5 * padsizeX / Math.max(netName.length + 1, 5);
+			tsize = Math.min(tsize, boxSize);
+			tsize *= 0.85;
+			if (pad.shape === 'circle' || pad.shape === 'oval') {
+				tsize *= 0.9;
+			}
+			netFontSize = tsize * STROKE_XSCALE;
+			netY = showNumber ? Math.min(tsize * 1.4, netY) : 0;
+		}
+
+		let numberFontSize = 0;
+		if (showNumber) {
+			// double tsize = 1.5 * padsize.x / max(PrintableCharCount(padNumber), 3);
+			let tsize = 1.5 * padsizeX / Math.max(padNumber.length, 3);
+			tsize = Math.min(tsize, boxSize);
+			tsize *= 0.85;
+			tsize = Math.min(tsize, boxSize);
+			numberFontSize = tsize * STROKE_XSCALE;
+			numberY = showNet ? -numberY : 0;
+		}
+
+		if (numberFontSize <= 0 && netFontSize <= 0) {
 			return null;
 		}
 
+		// KiCad draws each line via GAL Translate(position)+Rotate(worldAngle)
+		// then a local (0, Y) text offset — StrokeGlyph.transform()'s own
+		// rotation (x=y0*sin+x0*cos, y=y0*cos-x0*sin, see TextPaint.ts) is
+		// the same convention, so replicate it here to place each line's
+		// world-space anchor before handing off to computeStrokeTextGeometry.
 		const worldAngle = padRotationDeg + textRotated;
-		const strokeWidth = fontSize / 8;
-		const geometry = computeStrokeTextGeometry(
-			number, worldCenter, fontSize, worldAngle, false, strokeWidth, { x: 0.5, y: 0.5 },
-		);
-		const half = fontSize;
+		const angleRad = worldAngle * Math.PI / 180;
+		const sin = Math.sin(angleRad), cos = Math.cos(angleRad);
+		const offsetPoint = (localY: number): Vec2 =>
+			new Vec2(worldCenter.x + localY * sin, worldCenter.y + localY * cos);
+
+		const parts: { geometry: StrokeTextGeometry }[] = [];
+		let half = 0;
+		if (showNumber && numberFontSize > 0) {
+			const strokeWidth = numberFontSize / 6;
+			const geometry = computeStrokeTextGeometry(
+				padNumber, offsetPoint(numberY), numberFontSize, worldAngle, false, strokeWidth, { x: 0.5, y: 0.5 },
+			);
+			parts.push({ geometry });
+			half = Math.max(half, numberFontSize);
+		}
+		if (showNet && netFontSize > 0) {
+			const strokeWidth = netFontSize / 6;
+			const geometry = computeStrokeTextGeometry(
+				netName, offsetPoint(netY), netFontSize, worldAngle, false, strokeWidth, { x: 0.5, y: 0.5 },
+			);
+			parts.push({ geometry });
+			half = Math.max(half, netFontSize);
+		}
+		if (parts.length === 0) {
+			return null;
+		}
+		half += Math.max(Math.abs(numberY), Math.abs(netY));
 		const bbox = { x: worldCenter.x - half, y: worldCenter.y - half, w: half * 2, h: half * 2 };
 
 		return {
@@ -1270,7 +1517,9 @@ export class BoardPainter {
 			hitTestable: false,
 			element: pad,
 			draw: (renderer, color) => {
-				drawStrokeTextGeometry(renderer, geometry, color);
+				for (const part of parts) {
+					drawStrokeTextGeometry(renderer, part.geometry, color);
+				}
 			},
 		};
 	}
@@ -1288,23 +1537,105 @@ export class BoardPainter {
 		const id = via.getUuid() ?? `via:${ origin.x },${ origin.y }`;
 		const shape: PaintedShape = { type: 'circle', cx: origin.x, cy: origin.y, r: outerRadius };
 
-		return [{
+		const items: PaintedItem[] = [{
 			id, layer: 'Vias', kind: 'via', shape, bbox: shapeToBBox(shape), hitTestable: true, element: via,
 			netId: typeof via.getNetId === 'function' ? via.getNetId() : null,
 			netName: typeof via.getNetName === 'function' ? via.getNetName() : null,
 			draw: (renderer, color, displayMode) => {
+				// The outer ring is normally colored by the via's own (front)
+				// copper layer, matching real KiCad's PCB_RENDER_SETTINGS::
+				// GetColor — IsViaCopperLayer resolves straight to the
+				// underlying copper layer's own color, same as a track or pad
+				// on that layer, NOT a flat "via" swatch. But when the
+				// per-item pass in paint() above has already overridden
+				// `color` for a selection/net highlight (the
+				// `highlighted || netHighlighted` branch), that override has
+				// to win instead, exactly like every other item kind — this
+				// is that case, detected by comparing against the plain
+				// 'Vias' bucket color nothing else ever produces.
+				const viaLayers = typeof via.getLayers === 'function' ? via.getLayers() : [];
+				const isOverridden = color !== styleForLayer('Vias').color;
+				const normalLayer = this.activePaintLayer && viaLayers.includes(this.activePaintLayer)
+					? this.activePaintLayer
+					: (viaLayers[0] ?? 'F.Cu');
+				const ringColor = isOverridden ? color : colorForLayer(normalLayer);
 				if (displayMode === 'outline') {
-					renderer.circle(new Vec2(origin.x, origin.y), outerRadius, { strokeColor: color, strokeWidth: SKETCH_STROKE_WIDTH });
-					renderer.circle(new Vec2(origin.x, origin.y), holeRadius, { strokeColor: color, strokeWidth: SKETCH_STROKE_WIDTH });
+					renderer.circle(new Vec2(origin.x, origin.y), outerRadius, { strokeColor: ringColor, strokeWidth: SKETCH_STROKE_WIDTH });
+					renderer.circle(new Vec2(origin.x, origin.y), holeRadius, { strokeColor: ringColor, strokeWidth: SKETCH_STROKE_WIDTH });
 					return;
 				}
-				// Vias are drilled through-holes — draw the annular copper
-				// ring, then punch the hole by drawing the board background
-				// color on top, instead of a solid filled disc.
-				renderer.circle(new Vec2(origin.x, origin.y), outerRadius, { fillColor: color });
-				renderer.circle(new Vec2(origin.x, origin.y), holeRadius, { fillColor: boardBackgroundColor });
+				// A real via is 3 concentric layers, not a plain punched disc:
+				// the copper annular ring (colored per copper layer, above), a
+				// thin plated barrel wall, then the drilled bore itself — see
+				// LayerColors' viaHoleWallColor/viaHoleColor doc comment for
+				// where these fixed (never net-colored) values come from. The
+				// wall ring's thickness is a cosmetic fraction of the annular
+				// ring's own width (real KiCad scales its actual copper-
+				// plating thickness by an internal visibility multiplier this
+				// app has no equivalent board-stackup value for).
+				const wallRadius = holeRadius + (outerRadius - holeRadius) * 0.25;
+				renderer.circle(new Vec2(origin.x, origin.y), outerRadius, { fillColor: ringColor });
+				renderer.circle(new Vec2(origin.x, origin.y), wallRadius, { fillColor: viaHoleWallColor });
+				renderer.circle(new Vec2(origin.x, origin.y), holeRadius, { fillColor: viaHoleColor });
 			},
 		}];
+		const label = this.buildViaLabel(via, new Vec2(origin.x, origin.y), size.width, id);
+		if (label) {
+			items.push(label);
+		}
+		return items;
+	}
+
+	/** Via net-name overlay — real KiCad's PCB_PAINTER::draw(const PCB_VIA*,
+	 *  int) IsNetnameLayer branch, simplified to the THROUGH-via case only
+	 *  (this app's board model has no blind/buried/microvia support, so the
+	 *  showLayers/topLayer-bottomLayer half of that branch — which would
+	 *  print a "3-6" style layer-span number below the net name — never
+	 *  applies here: a via only ever shows its net name). Every other item
+	 *  kind that carries a net (pads, tracks) already surfaces it as an
+	 *  overlay; a via silently not doing the same was the one glaring
+	 *  inconsistency in an otherwise KiCad-faithful render — reported as
+	 *  "for the longest time we had simplified circle[s]". Rides the same
+	 *  always-on-top PadNumbers synthetic layer pad numbers use (see
+	 *  buildPadNumber's doc comment) — a via label is the same category of
+	 *  overlay, gated by the same showNetNames toggle. */
+	protected buildViaLabel(via: any, origin: Vec2, outerDiameter: number, viaId: string): PaintedItem | null {
+		if (!this.options.showNetNames || typeof via.getNetName !== 'function') {
+			return null;
+		}
+		const netName: string = via.getNetName() ?? '';
+		if (!netName) {
+			return null;
+		}
+		// double maxSize = PCB_RENDER_SETTINGS::MAX_FONT_SIZE; double size = aVia->GetWidth(currentLayer); if (size > maxSize) size = maxSize;
+		const size = Math.min(outerDiameter, BoardPainter.MAX_PAD_LABEL_FONT_SIZE);
+		// double tsize = 1.5 * size / std::max(PrintableCharCount(netname), minCharCnt); minCharCnt is 3 here (showLayers is always false).
+		let tsize = 1.5 * size / Math.max(netName.length, 3);
+		tsize = Math.min(tsize, size);
+		tsize *= 0.75;
+		// Same stroke-font X-scale correction buildPadNumber applies — see
+		// its own doc comment for why (this renderer's stroke text has no
+		// separate x/y glyph scale, unlike KiCad's GAL SetGlyphSize).
+		const fontSize = tsize * 0.9;
+		if (fontSize <= 0) {
+			return null;
+		}
+		const strokeWidth = fontSize / 6;
+		const geometry = computeStrokeTextGeometry(netName, origin, fontSize, 0, false, strokeWidth, { x: 0.5, y: 0.5 });
+		const half = fontSize;
+		const bbox = { x: origin.x - half, y: origin.y - half, w: half * 2, h: half * 2 };
+		return {
+			id: `${ viaId }:netname`,
+			layer: 'PadNumbers',
+			kind: 'graphic',
+			shape: { type: 'rect', ...bbox },
+			bbox,
+			hitTestable: false,
+			element: via,
+			draw: (renderer, color) => {
+				drawStrokeTextGeometry(renderer, geometry, color);
+			},
+		};
 	}
 
 	protected buildGrLine(line: any): PaintedItem {
@@ -1349,7 +1680,17 @@ export class BoardPainter {
 		const y = Math.min(start.y, end.y);
 		const w = Math.abs(end.x - start.x);
 		const h = Math.abs(end.y - start.y);
-		const shape: PaintedShape = { type: 'rect', x, y, w, h };
+		// Board-side `(fill yes|no)` is a plain attribute (unlike schematic's
+		// nested `(fill (type ...))`), so getSimpleChildValue reads it
+		// directly — mirrors buildFpPoly's own fill check. Without `filled`
+		// here PaintedShape's hit-test defaults an unfilled outline (e.g. a
+		// board edge drawn on Edge.Cuts) to whole-area hit-testing, which
+		// silently ate every click inside the outline instead of only near
+		// its border, matching the same bug fixed on the schematic side
+		// (see PaintedShape.ts's shapeContainsPoint doc comment).
+		const fill = typeof rect.getSimpleChildValue === 'function' ? rect.getSimpleChildValue('fill') : undefined;
+		const filled = fill === true || fill === 'yes' || fill === 'solid';
+		const shape: PaintedShape = { type: 'rect', x, y, w, h, filled, strokeWidth: width };
 
 		return {
 			id, layer, kind: 'graphic', shape, bbox: shape, hitTestable: true, element: rect,
@@ -1357,7 +1698,10 @@ export class BoardPainter {
 				// Edge cuts (and most gr_rect graphics) are an outline, not a
 				// filled shape — a board outline being solid-filled would
 				// paint over everything else on that layer.
-				renderer.rect(new Vec2(x, y), w, h, { strokeColor: color, strokeWidth: width || 0.1 });
+				renderer.rect(new Vec2(x, y), w, h, {
+					fillColor: filled ? color : undefined,
+					strokeColor: color, strokeWidth: width || 0.1
+				});
 			},
 		};
 	}
@@ -1473,12 +1817,18 @@ export class BoardPainter {
 		const layer = circle.getLayer();
 		const width = typeof circle.getStroke === 'function' ? circle.getStroke().width : 0.1;
 		const id = circle.getUuid() ?? `gr-circle:${ layer }:${ center.x },${ center.y }`;
-		const shape: PaintedShape = { type: 'circle', cx: center.x, cy: center.y, r: radius };
+		// See buildGrRect's doc comment — same fill-detection/hit-test fix.
+		const fill = typeof circle.getSimpleChildValue === 'function' ? circle.getSimpleChildValue('fill') : undefined;
+		const filled = fill === true || fill === 'yes' || fill === 'solid';
+		const shape: PaintedShape = { type: 'circle', cx: center.x, cy: center.y, r: radius, filled, strokeWidth: width };
 
 		return {
 			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: circle,
 			draw: (renderer, color) => {
-				renderer.circle(new Vec2(center.x, center.y), radius, { strokeColor: color, strokeWidth: width || 0.1 });
+				renderer.circle(new Vec2(center.x, center.y), radius, {
+					fillColor: filled ? color : undefined,
+					strokeColor: color, strokeWidth: width || 0.1
+				});
 			},
 		};
 	}
@@ -1524,12 +1874,20 @@ export class BoardPainter {
 		const layer = polygon.getLayer();
 		const width = typeof polygon.getStroke === 'function' ? polygon.getStroke().width : 0.1;
 		const id = polygon.getUuid() ?? `gr-poly:${ layer }:${ points[0]!.x },${ points[0]!.y }`;
-		const shape: PaintedShape = { type: 'polygon', points: points.map(point => ({ x: point.x, y: point.y })) };
+		// See buildGrRect's doc comment — same fill-detection/hit-test fix.
+		const fill = typeof polygon.getSimpleChildValue === 'function' ? polygon.getSimpleChildValue('fill') : undefined;
+		const filled = fill === true || fill === 'yes' || fill === 'solid';
+		const shape: PaintedShape = {
+			type: 'polygon', points: points.map(point => ({ x: point.x, y: point.y })),
+			filled, closed: true, strokeWidth: width
+		};
 		return {
 			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: polygon,
-			draw: (renderer, color) => renderer.line(
-				[...points.map(point => new Vec2(point.x, point.y)), new Vec2(points[0]!.x, points[0]!.y)],
-				{ strokeColor: color, strokeWidth: width || 0.1 }),
+			draw: (renderer, color) => filled
+				? renderer.multiPolygon([points.map(point => new Vec2(point.x, point.y))], { fillColor: color, strokeColor: color, strokeWidth: width || 0.1 })
+				: renderer.line(
+					[...points.map(point => new Vec2(point.x, point.y)), new Vec2(points[0]!.x, points[0]!.y)],
+					{ strokeColor: color, strokeWidth: width || 0.1 }),
 		};
 	}
 
@@ -1540,7 +1898,11 @@ export class BoardPainter {
 		const width = typeof curve.getStroke === 'function' ? curve.getStroke().width : 0.1;
 		const id = curve.getUuid() ?? `gr-curve:${ layer }:${ points[0]!.x },${ points[0]!.y }`;
 		const shapePoints = cubicBezierToPolyline(points.map(point => new Vec2(point.x, point.y)) as [Vec2, Vec2, Vec2, Vec2]);
-		const shape: PaintedShape = { type: 'polygon', points: shapePoints.map(point => ({ x: point.x, y: point.y })) };
+		// A gr_curve is an open bezier stroke, never a closed fillable area
+		// (matches buildSchBezier's identical always-unfilled treatment) —
+		// still needs `filled: false` explicit so hit-testing stays edge-only
+		// instead of PaintedShape's filled-by-default fallback.
+		const shape: PaintedShape = { type: 'polygon', points: shapePoints.map(point => ({ x: point.x, y: point.y })), filled: false, closed: false, strokeWidth: width };
 		return {
 			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: curve,
 			draw: (renderer, color) => renderer.line(shapePoints, { strokeColor: color, strokeWidth: width || 0.1 }),
@@ -1864,6 +2226,31 @@ function getGrTextClass() { return _GrText; }
 function getGrTextBoxClass() { return _GrTextBox; }
 function getFpTextClass() { return _FpText; }
 function getTrackArcClass() { return _TrackArc; }
+
+/** Matches PCB_TEXT::GetDrawRotation() for text owned by a footprint. */
+function footprintTextDrawAngle(text: any, footprintRotation: number): number {
+	const textRotation = typeof text?.getOrigin === 'function' ? text.getOrigin().rotation ?? 0 : 0;
+	let rotation = textRotation + footprintRotation;
+	const unlocked = typeof text?.findFirstChildByName === 'function'
+		? text.findFirstChildByName('unlocked')
+		: undefined;
+
+	if (unlocked?.value) {
+		return normalizeAngle(rotation);
+	}
+
+	while (rotation > 90) {
+		rotation -= 180;
+	}
+	while (rotation <= -90) {
+		rotation += 180;
+	}
+	return rotation;
+}
+
+function normalizeAngle(rotation: number): number {
+	return ((rotation + 180) % 360 + 360) % 360 - 180;
+}
 
 /**
  * KiCad custom pads store copper outline(s) under

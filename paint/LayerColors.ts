@@ -108,6 +108,13 @@ const defaultStyle: LayerStyle = { color: 'rgb(144, 144, 144)', opacity: 0.7 };
 // visually matches whatever's actually behind it.
 export const boardBackgroundColor = 'rgb(0, 16, 35)';
 
+// colors/user.json board.via_hole_walls / board.via_hole — the plated
+// barrel and the drilled bore itself, both fixed (never net-colored),
+// unlike the via's own outer annular ring which takes the color of
+// whichever copper layer it's flashed on (see BoardPainter.buildVia).
+export const viaHoleWallColor = 'rgb(236, 236, 236)';
+export const viaHoleColor = 'rgb(227, 183, 46)';
+
 export function styleForLayer(layer: string): LayerStyle {
 	return layerStyles[layer] ?? defaultStyle;
 }

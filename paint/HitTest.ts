@@ -31,11 +31,14 @@ export interface Hittable {
  * could get broad-phase-rejected before shapeContainsPoint ever runs, even
  * though the precise edge test would have accepted it.
  */
-export function hitTest<T extends Hittable>(items: T[], worldX: number, worldY: number, tolerance = 0): T | null {
+export function hitTest<T extends Hittable>(items: T[], worldX: number, worldY: number, tolerance = 0, isVisible?: (item: T) => boolean): T | null {
 	// Iterate in reverse paint order so the most recently drawn (topmost)
 	// item wins on overlap, matching normal 2D compositing expectations.
 	for (let i = items.length - 1; i >= 0; i--) {
 		const item = items[i]!;
+		if (isVisible && !isVisible(item)) {
+			continue;
+		}
 		const { x, y, w, h } = item.bbox;
 		if (worldX < x - tolerance || worldX > x + w + tolerance || worldY < y - tolerance || worldY > y + h + tolerance) {
 			continue;
@@ -45,4 +48,30 @@ export function hitTest<T extends Hittable>(items: T[], worldX: number, worldY: 
 		}
 	}
 	return null;
+}
+
+/**
+ * Sibling of hitTest that collects EVERY match instead of stopping at the
+ * first — the raw candidate pool a caller reduces (see
+ * KicadRenderSession.hitTestCandidatesAtScreen) before deciding whether a
+ * click is unambiguous, needs a KiCad-style disambiguation popup, or misses
+ * entirely. Still ordered topmost-first (reverse paint order), which the
+ * caller can use as a stable tie-break.
+ */
+export function hitTestAll<T extends Hittable>(items: T[], worldX: number, worldY: number, tolerance = 0, isVisible?: (item: T) => boolean): T[] {
+	const matches: T[] = [];
+	for (let i = items.length - 1; i >= 0; i--) {
+		const item = items[i]!;
+		if (isVisible && !isVisible(item)) {
+			continue;
+		}
+		const { x, y, w, h } = item.bbox;
+		if (worldX < x - tolerance || worldX > x + w + tolerance || worldY < y - tolerance || worldY > y + h + tolerance) {
+			continue;
+		}
+		if (shapeContainsPoint(item.shape, worldX, worldY, tolerance)) {
+			matches.push(item);
+		}
+	}
+	return matches;
 }

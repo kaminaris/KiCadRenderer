@@ -8,67 +8,269 @@
 // event wiring (pointer/wheel/click), and any UI (layer checklist, status
 // text) — this class owns camera state, scene building, and painting.
 
-import { KicadParser }                 from '@kicad-io/KicadParser';
-import { KicadElementWire }            from '@kicad-io/KicadElementWire';
-import { KicadElementBus, KicadElementBusEntry } from '@kicad-io/KicadElementBus';
-import { KicadElementJunction }        from '@kicad-io/KicadElementJunction';
-import { KicadElementNoConnect }       from '@kicad-io/KicadElementNoConnect';
-import { KicadElementRectangle, KicadElementGrLine, KicadElementGrRect } from '@kicad-io/KicadElementStartEnd';
-import { KicadElementCircle, KicadElementGrCircle } from '@kicad-io/KicadElementCircle';
-import { KicadElementArc, KicadElementGrArc }       from '@kicad-io/KicadElementArc';
-import { KicadElementPolyline, KicadElementBezier, KicadElementGrCurve } from '@kicad-io/KicadElementPolyline';
-import { KicadElementGrPoly }          from '@kicad-io/KicadElementPolygon';
-import { KicadElementAt }         from '@kicad-io/KicadElementAt';
-import { KicadElement }           from '@kicad-io/KicadElement';
-import { KicadElementSize }       from '@kicad-io/KicadElementSize';
-import { KicadElementTable, KicadElementTableCell } from '@kicad-io/KicadElementTable';
-import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
-import { KicadElementGroup } from '@kicad-io/KicadElementGroup';
-import { KicadElementData } from '@kicad-io/KicadElementData';
-import { KicadElementImage } from '@kicad-io/KicadElementImage';
-import { KicadElementText, KicadElementTextBox, KicadElementLabel, KicadElementGrText, KicadElementGrTextBox } from '@kicad-io/KicadElementText';
-import { KicadElementGlobalLabel, type KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
-import { KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
-import { KicadElementNetclassFlag, type KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
-import { KicadElementSymbol }          from '@kicad-io/KicadElementSymbol';
-import { KicadElementFootprint }       from '@kicad-io/KicadElementFootprint';
-import { KicadElementSegment }         from '@kicad-io/KicadElementStartEnd';
-import { KicadElementVia }             from '@kicad-io/KicadElementVia';
-import { KicadElementZone }            from '@kicad-io/KicadElementZone';
-import { KicadElementSheet }           from '@kicad-io/KicadElementSheet';
-import { KicadElementPin }             from '@kicad-io/KicadElementPin';
-import { KicadElementLibSymbols }      from '@kicad-io/KicadElementLibSymbols';
-import { KicadElementLibId }           from '@kicad-io/KicadElementString';
-import { SchematicConnectivityService, type SchematicConnectivitySummary } from '@kicad-layout/Connectivity';
-import { KicadElementUnit }            from '@kicad-io/KicadElementNumeric';
-import { KicadElementDnp }             from '@kicad-io/KicadElementBoolean';
-import { buildPowerFlag, buildPowerGnd, buildPowerRail } from '@kicad-io/Builder/PassiveSymbolBuilder';
-import { buildPowerSymbolInstance }    from '@kicad-io/Builder/PowerSymbolInstance';
+import { KicadParser } from '@kicad-io/KicadParser';
+import {
+	KicadElementWire
+}                      from '@kicad-io/KicadElementWire';
+import {
+	KicadElementBus, KicadElementBusEntry
+}                      from '@kicad-io/KicadElementBus';
+import {
+	KicadElementJunction
+}                      from '@kicad-io/KicadElementJunction';
+import {
+	KicadElementNoConnect
+}                      from '@kicad-io/KicadElementNoConnect';
+import {
+	KicadElementRectangle, KicadElementGrLine, KicadElementGrRect
+}                      from '@kicad-io/KicadElementStartEnd';
+import {
+	KicadElementCircle, KicadElementGrCircle
+}                      from '@kicad-io/KicadElementCircle';
+import {
+	KicadElementArc, KicadElementGrArc
+}                      from '@kicad-io/KicadElementArc';
+import {
+	KicadElementPolyline, KicadElementBezier, KicadElementGrCurve
+}                      from '@kicad-io/KicadElementPolyline';
+import {
+	KicadElementGrPoly, KicadElementPolygon
+}                      from '@kicad-io/KicadElementPolygon';
+import {
+	KicadElementAt
+}                      from '@kicad-io/KicadElementAt';
+import {
+	KicadElement
+}                      from '@kicad-io/KicadElement';
+import {
+	KicadElementSize
+}                      from '@kicad-io/KicadElementSize';
+import {
+	KicadElementTable, KicadElementTableCell
+}                      from '@kicad-io/KicadElementTable';
+import {
+	KicadElementRuleArea
+}                      from '@kicad-io/KicadElementRuleArea';
+import {
+	KicadElementGroup
+}                      from '@kicad-io/KicadElementGroup';
+import {
+	KicadElementData
+}                      from '@kicad-io/KicadElementData';
+import {
+	KicadElementImage
+}                      from '@kicad-io/KicadElementImage';
+import {
+	KicadElementText, KicadElementTextBox, KicadElementLabel, KicadElementGrText, KicadElementGrTextBox
+}                      from '@kicad-io/KicadElementText';
+import {
+	KicadElementGlobalLabel, type KicadGlobalLabelShape
+}                      from '@kicad-io/KicadElementGlobalLabel';
+import {
+	KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape
+}                      from '@kicad-io/KicadElementHierarchicalLabel';
+import {
+	KicadElementNetclassFlag, type KicadDirectiveLabelShape
+}                      from '@kicad-io/KicadElementNetclassFlag';
+import {
+	KicadElementSymbol
+}                      from '@kicad-io/KicadElementSymbol';
+import {
+	KicadElementFootprint
+}                      from '@kicad-io/KicadElementFootprint';
+import {
+	KicadElementPad
+}                      from '@kicad-io/KicadElementPad';
+import {
+	KicadElementNet
+}                      from '@kicad-io/KicadElementNet';
+import {
+	KicadElementSegment
+}                      from '@kicad-io/KicadElementStartEnd';
+import {
+	KicadElementVia
+}                      from '@kicad-io/KicadElementVia';
+import {
+	KicadElementZone,
+	type ZoneHatchStyle, type ZonePadConnectionType, type ZoneSmoothingType, type ZoneIslandRemovalMode,
+	type RuleAreaKeepoutSettings
+}                      from '@kicad-io/KicadElementZone';
+import {
+	KicadElementSheet
+}                      from '@kicad-io/KicadElementSheet';
+import {
+	KicadElementPin
+}                      from '@kicad-io/KicadElementPin';
+import {
+	KicadElementLibSymbols
+}                      from '@kicad-io/KicadElementLibSymbols';
+import {
+	KicadElementLibId
+}                      from '@kicad-io/KicadElementString';
+import {
+	SchematicConnectivityService, type SchematicConnectivitySummary
+}                      from '@kicad-layout/Connectivity';
+import {
+	KicadElementUnit
+}                      from '@kicad-io/KicadElementNumeric';
+import {
+	KicadElementDnp
+}                      from '@kicad-io/KicadElementBoolean';
+import {
+	buildPowerFlag, buildPowerGnd, buildPowerRail
+}                      from '@kicad-io/Builder/PassiveSymbolBuilder';
+import {
+	buildPowerSymbolInstance
+}                      from '@kicad-io/Builder/PowerSymbolInstance';
 
-export type { KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
-export type { KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
+export type { KicadGlobalLabelShape }                 from '@kicad-io/KicadElementGlobalLabel';
+export type { KicadDirectiveLabelShape }              from '@kicad-io/KicadElementNetclassFlag';
 /** Pcbnew's 3 crosshair styles (CROSS_HAIR_MODE in KiCad's own
  *  gal_display_options.h) — 'small' relies on the browser's own cursor and
  *  draws nothing extra; 'full'/'diagonal' are drawn by drawBoardCrosshair. */
 export type CrosshairMode = 'small' | 'full' | 'diagonal';
-import { Vec2 }                        from './math/Vec2';
-import { Matrix3 }                     from './math/Matrix3';
-import { Camera2 }                     from './math/Camera2';
-import { Renderer }                    from './render/Renderer';
-import { Canvas2dRenderer }            from './render/Canvas2dRenderer';
-import { WebGLRenderer }               from './render/WebGLRenderer';
+import { Vec2 }                                       from './math/Vec2';
+import { Matrix3 }                                    from './math/Matrix3';
+import { Camera2 }                                    from './math/Camera2';
+import { Renderer }                                   from './render/Renderer';
+import { Canvas2dRenderer }                           from './render/Canvas2dRenderer';
+import { WebGLRenderer }                              from './render/WebGLRenderer';
 import {
 	BoardPainter, boardPaintOrder, defaultLayerState,
 	LayeredBoardScene, LayerVisibilityState, PaintedItem, ZoneDisplayMode, ItemDisplayMode
-}                                      from './paint/BoardPainter';
+}                                                     from './paint/BoardPainter';
 import {
 	SchematicPainter, defaultSchLayerState,
 	SchematicScene, SchLayerVisibilityState, SchematicSheetRef, SchematicDocInfo, SchPaintedItem
-}                                      from './paint/SchematicPainter';
-import { boardBackgroundColor, styleForLayer } from './paint/LayerColors';
-import { layerPaintRank } from './paint/LayerOrder';
+}                                                     from './paint/SchematicPainter';
+import { boardBackgroundColor, styleForLayer }        from './paint/LayerColors';
+import { layerPaintRank }                             from './paint/LayerOrder';
 import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/BoardRatsnest';
-import { buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath, resolveCopperLayers, ZoneFillJob } from './paint/BoardZoneFill';
+import { buildCopperGraph, type CopperGraph } from './paint/BoardCopperGraph';
+import { buildInitialTrace } from './router/PnsDragger';
+import {
+	buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath,
+	resolveCopperLayers, ZoneFillJob
+}                                                     from './paint/BoardZoneFill';
+
+/** Migrates the broken outline syntax emitted by early zone-tool builds
+ * before the permissive app parser sees it. In `(( pts ...))`, the second
+ * opening parenthesis is misread as an element name, which made the next
+ * closing parenthesis prematurely end the zone and left its settings at the
+ * board root. The migration restores `(polygon (pts ...))` and the missing
+ * zone closing parenthesis before the next board-level item. */
+function sexprParenDelta(line: string): number {
+	let delta = 0;
+	let inQuote = false;
+	for (let index = 0; index < line.length; index++) {
+		const char = line[index]!;
+		if (char === '"' && (index === 0 || line[index - 1] !== '\\')) {
+			inQuote = !inQuote;
+		}
+		else if (!inQuote && char === '(') {
+			delta++;
+		}
+		else if (!inQuote && char === ')') {
+			delta--;
+		}
+	}
+	return delta;
+}
+
+function repairLegacyMalformedZoneText(text: string): string {
+	const newline = text.includes('\r\n') ? '\r\n' : '\n';
+	const lines = text.split(/\r?\n/);
+	const zoneChildren = new Set([
+		'net', 'net_name', 'layer', 'layers', 'property', 'tstamp', 'uuid', 'hatch', 'priority',
+		'connect_pads', 'min_thickness', 'filled_areas_thickness', 'fill', 'placement', 'keepout',
+		'polygon', 'filled_polygon', 'fill_segments', 'attr', 'locked', 'name'
+	]);
+	const result: string[] = [];
+	let repairing = false;
+	let zoneIndent = '\t';
+	let sawPolygon = false;
+	let zoneDepth = 0;
+	let changed = false;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index]!;
+		const nextLine = lines[index + 1] ?? '';
+		const lineDepthDelta = sexprParenDelta(line);
+		const zoneStart = line.match(/^(\s*)\(zone\s*$/);
+		if (zoneStart && !repairing) {
+			zoneIndent = zoneStart[1]!;
+			sawPolygon = false;
+			zoneDepth = lineDepthDelta;
+		}
+		const malformed = line.match(/^(\s*)\(\(\s+pts\s*$/);
+		if (malformed) {
+			const polygonIndent = malformed[1]!;
+			zoneIndent = polygonIndent.endsWith('\t') ? polygonIndent.slice(0, -1) : polygonIndent;
+			result.push(`${ polygonIndent }(polygon`, `${ polygonIndent }\t(pts`);
+			repairing = true;
+			sawPolygon = true;
+			zoneDepth += lineDepthDelta;
+			changed = true;
+			continue;
+		}
+		if (/^\s*\(polygon\s*$/.test(line)) sawPolygon = true;
+		// A prior compatibility pass may already have named the polygon but
+		// retained the old extra `)` that used to terminate its anonymous
+		// group. That closes the zone before its settings. Remove that close,
+		// then append the real zone close at the next board-level item below.
+		const nextZoneChild = nextLine.match(/^(\s*)\(([A-Za-z_][A-Za-z0-9_]*)/);
+		if (!repairing && sawPolygon && line === `${ zoneIndent })`
+			&& nextZoneChild?.[1] === zoneIndent && zoneChildren.has(nextZoneChild[2]!)) {
+			repairing = true;
+			changed = true;
+			continue;
+		}
+		if (repairing) {
+			const boardLevel = line.match(/^(\s*)\(([A-Za-z_][A-Za-z0-9_]*)/);
+			if (boardLevel && boardLevel[1]!.length <= zoneIndent.length && !zoneChildren.has(boardLevel[2]!)) {
+				result.push(`${ zoneIndent })`);
+				repairing = false;
+				changed = true;
+				if (boardLevel[2] === 'zone') {
+					zoneIndent = boardLevel[1]!;
+					sawPolygon = false;
+					zoneDepth = lineDepthDelta;
+				}
+				else {
+					zoneDepth = 0;
+				}
+			}
+			// A bare board close while the zone itself is still open needs an
+			// inserted zone close first. A zone child close (notably
+			// `filled_polygon`) may share the zone's visual indentation, so use
+			// structural depth rather than whitespace to tell them apart.
+			else if (line.trim() === ')' && zoneDepth === 1 && line !== `${ zoneIndent })`) {
+				result.push(`${ zoneIndent })`);
+				repairing = false;
+				zoneDepth = 0;
+				changed = true;
+			}
+			else {
+				zoneDepth += lineDepthDelta;
+				if (zoneDepth <= 0) {
+					zoneDepth = 0;
+					repairing = false;
+				}
+			}
+		}
+		else if (!zoneStart && zoneDepth > 0) {
+			zoneDepth += lineDepthDelta;
+			if (zoneDepth <= 0) {
+				zoneDepth = 0;
+			}
+		}
+		result.push(line);
+	}
+	if (repairing) {
+		result.push(`${ zoneIndent })`);
+		changed = true;
+	}
+	return changed ? result.join(newline) : text;
+}
 
 /** Off-main-thread runner for zone-fill jobs, injected by the app (a Web
  *  Worker wrapper — see apps/kicad-viewer/src/worker/zoneFillClient.ts) so
@@ -76,7 +278,7 @@ import { buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJob
  *  setup, same reasoning as registerKicadIoClasses for @kicad-io. */
 export type ZoneFillExecutor = (
 	jobs: ZoneFillJob[],
-	onProgress?: (done: number, total: number) => void,
+	onProgress?: (done: number, total: number) => void
 ) => Promise<{ zoneUuid: string; layer: string; points: MmPath }[]>;
 
 /**
@@ -113,15 +315,15 @@ function resolveZoneClearanceMm(zone: KicadElementZone, designSettings?: ZoneFil
 	return Math.max(
 		zone.getClearance(),
 		designSettings?.minClearanceMm ?? 0,
-		designSettings?.defaultNetClassClearanceMm ?? 0,
+		designSettings?.defaultNetClassClearanceMm ?? 0
 	);
 }
 
-import { schematicBackgroundColor, schematicGridColor }  from './paint/SchematicColors';
-import { hitTest }                     from './paint/HitTest';
-import { distanceToSegment }           from './paint/PaintedShape';
+import { schematicBackgroundColor, schematicGridColor }      from './paint/SchematicColors';
+import { hitTest, hitTestAll }                               from './paint/HitTest';
+import { distanceToSegment }                                 from './paint/PaintedShape';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry } from './paint/TextPaint';
-import { registerDefaultKicadClasses } from './RegisterDefaultClasses';
+import { registerDefaultKicadClasses }                       from './RegisterDefaultClasses';
 
 export type RenderBackend = 'webgl' | 'canvas2d';
 export type RenderDocumentType = 'board' | 'schematic';
@@ -139,6 +341,42 @@ function readBoardOrigin(setup: any, name: 'grid_origin' | 'aux_axis_origin'): V
 	return Number.isFinite(x) && Number.isFinite(y) ? new Vec2(x, y) : new Vec2(0, 0);
 }
 
+/** Every field the Copper Zone Properties dialog (apps/kicad-viewer's
+ *  ZonePropertiesDialog) edits, shared verbatim between the "draw a new
+ *  zone" and "edit an existing one" flows — see KicadRenderSession's
+ *  applyZoneDraft/createZoneFromOutline/updateZoneProperties. */
+export interface ZoneDraft {
+	layers: string[];
+	/** 0 = real KiCad's own "<no net>" floating-copper-pour representation. */
+	netId: number;
+	netName: string;
+	name: string;
+	locked: boolean;
+	clearanceMm: number;
+	minThicknessMm: number;
+	padConnection: ZonePadConnectionType;
+	thermalGapMm: number;
+	thermalSpokeWidthMm: number;
+	cornerSmoothing: ZoneSmoothingType;
+	cornerRadiusMm: number;
+	islandRemoval: ZoneIslandRemovalMode;
+	islandAreaMinMm: number;
+	priority: number;
+	hatchStyle: ZoneHatchStyle;
+	hatchPitchMm: number;
+}
+
+/** The subset of zone settings that real KiCad exposes for a PCB rule area.
+ * Rule areas share a zone outline but have no copper/net/fill settings. */
+export interface RuleAreaDraft {
+	layers: string[];
+	name: string;
+	locked: boolean;
+	hatchStyle: ZoneHatchStyle;
+	hatchPitchMm: number;
+	keepout: RuleAreaKeepoutSettings;
+}
+
 export interface HitResult {
 	id: string;
 	kind: string;
@@ -148,6 +386,13 @@ export interface HitResult {
 	/** kind:'label' — net/label text. */
 	labelName?: string;
 	labelKind?: string;
+	/** Board kinds only — the net this item belongs to, for disambiguation
+	 *  popup row labels (see hitTestCandidatesAtScreen). */
+	netName?: string | null;
+	/** kind:'track' with a segment shape only — world-unit length, for
+	 *  disambiguation popup row labels (mirrors real KiCad's own
+	 *  "Track [net] on layer, length X mm" wording). */
+	length?: number;
 }
 
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'w' | 'center' | 'e' | 'sw' | 's' | 'se';
@@ -171,7 +416,7 @@ export interface SelectionResizeBox {
 
 export type CurveAnchor = 'circle-center' | 'circle-radius' | 'arc-start' | 'arc-mid' | 'arc-end' | 'arc-center'
 	| 'bezier-start' | 'bezier-control-1' | 'bezier-control-2' | 'bezier-end'
-	| `polygon-vertex-${number}`;
+	| `polygon-vertex-${ number }`;
 
 export interface SelectionCurveAnchors {
 	id: string;
@@ -221,14 +466,33 @@ export type EditPreviewState =
 	| { kind: 'text-box'; x: number; y: number; width: number; height: number; text: string }
 	| { kind: 'label'; anchor: Vec2; text: string; rotation: number }
 	| {
-		kind: 'global-label' | 'hier-label'; anchor: Vec2; text: string;
-		shape: KicadGlobalLabelShape; rotation: number
-	}
+	kind: 'global-label' | 'hier-label'; anchor: Vec2; text: string;
+	shape: KicadGlobalLabelShape; rotation: number
+}
 	| {
-		kind: 'directive-label'; anchor: Vec2; text: string;
-		shape: KicadDirectiveLabelShape; rotation: number
-	}
-	| { kind: 'route'; points: Vec2[]; cursor: Vec2; width: number }
+	kind: 'directive-label'; anchor: Vec2; text: string;
+	shape: KicadDirectiveLabelShape; rotation: number
+}
+	| {
+	kind: 'route'; points: Vec2[]; cursor: Vec2; width: number;
+	/** True when the candidate path (as currently drawn) violates
+	 *  clearance against different-net copper — drawn in the collision
+	 *  color instead of the normal preview color, matching real KiCad's
+	 *  "highlight collisions" routing mode. Still placeable; this is a
+	 *  warning, not a block (see BoardPointerController.updateRoutePreview). */
+	collides?: boolean
+}
+	/** Via drag: one polyline per connected track's near-side elbow (each
+	 *  ending at `cursor`, the live-dragged position), optionally drawn
+	 *  alongside a circle at that point (omit `viaSize`, or pass 0, for a
+	 *  bare-point convergence with no via — see
+	 *  KicadRenderSession.trackCornerDragFanout's doc comment; the kind name
+	 *  predates that reuse). Multiple tracks (one per bridged copper layer,
+	 *  or one per line touching a dragged track corner) share the one
+	 *  cursor point — see KicadRenderSession.viaDragFanout's doc comment for
+	 *  why this needs its own kind instead of reusing 'route' (which only
+	 *  ever draws one width/layer at a time). */
+	| { kind: 'via-drag'; tracks: { points: Vec2[]; width: number }[]; cursor: Vec2; viaSize?: number }
 	/** Power symbols place in one click (like junction/no-connect) — no
 	 *  glyph preview needed, just a cursor-follow marker. */
 	| { kind: 'power'; cursor: Vec2 }
@@ -238,7 +502,31 @@ export type EditPreviewState =
 	 *  existing selection, both driving live color feedback — see
 	 *  SELECTION_BOX_* constants. Deliberately unsnapped (origin/cursor are
 	 *  raw world coordinates), unlike every other preview kind above. */
-	| { kind: 'selection-box'; origin: Vec2; cursor: Vec2; mode: 'contained' | 'touching'; selectMode: 'replace' | 'add' | 'subtract' };
+	| {
+	kind: 'selection-box';
+	origin: Vec2;
+	cursor: Vec2;
+	mode: 'contained' | 'touching';
+	selectMode: 'replace' | 'add' | 'subtract'
+};
+
+/** One connected track's whole assembled line, as computed once by
+ *  KicadRenderSession.viaDragFanout at via-drag gesture start —
+ *  `segmentIds`/`originPoints` stay fixed for the whole gesture (the real,
+ *  as-drawn line the via currently terminates); only the chain the caller
+ *  rebuilds each frame via dragViaChain(originPoints, cursor, ...) changes
+ *  as the mouse moves. `originPoints` is ordered far-anchor-first (index 0
+ *  = the fixed pad/junction/other via at the far end; last index = the
+ *  via's pre-drag position) and `segmentIds[k]` is the id of the segment
+ *  connecting `originPoints[k]` to `originPoints[k+1]` — see
+ *  viaDragFanout's and dragViaChain's doc comments. */
+export interface ViaDragFix {
+	segmentIds: string[];
+	originPoints: Vec2[];
+	width: number;
+	layer: string;
+	netId: number | null;
+}
 
 /** Placed schematic symbol pose for edit/drag without a circuit recipe. */
 export interface SymbolPoseInfo {
@@ -317,14 +605,27 @@ export class KicadRenderSession {
 	protected padDisplayMode: ItemDisplayMode = 'filled';
 	protected viaDisplayMode: ItemDisplayMode = 'filled';
 	protected trackDisplayMode: ItemDisplayMode = 'filled';
-	/** Pcbnew's left-toolbar crosshair style — see drawBoardCrosshair(). 'small'
-	 *  relies on the browser's own cursor, so nothing extra is drawn for it. */
+	/** Pcbnew's left-toolbar crosshair style — see drawBoardCrosshair(). All
+	 *  three actually draw something (real KiCad replaces the OS cursor with
+	 *  its own GAL-drawn crosshair for all of them — 'small' just uses a
+	 *  short fixed-length cross instead of a full-window one). */
 	protected crosshairMode: CrosshairMode = 'small';
 	/** Last known pointer position in screen (CSS pixel) space, updated by the
 	 *  board pointer controller on every mousemove regardless of gesture state
-	 *  — needed to draw the full-window/diagonal crosshair styles, which have
-	 *  no browser-native equivalent. */
+	 *  — the fallback drawBoardCrosshair() position when no snapped working
+	 *  point is available (e.g. no tool active). */
 	protected boardPointerScreen: Vec2 | null = null;
+	/** The board editor's current WORKING point in world space — where the
+	 *  next click actually lands, which is not always the same as the raw
+	 *  mouse position: grid-snapped in general, and magnetized onto a pad/
+	 *  via/track anchor while routing (see BoardPointerController.
+	 *  computeWorkingPoint). drawBoardCrosshair() draws the crosshair HERE,
+	 *  not at the raw pointer — this is what actually shows the user where a
+	 *  snap is about to happen, continuously, for every crosshair mode, not
+	 *  a one-off marker tied to a single tool (an earlier attempt at this
+	 *  drew a separate marker only inside the route preview; the user wanted
+	 *  the real crosshair cursor itself to do this, matching real KiCad). */
+	protected workingPointWorld: Vec2 | null = null;
 	/**
 	 * Snapshot-based undo/redo: full schematic text before each mutation, not
 	 * hand-written inverse commands. Chosen because rewireSchematic (circuit
@@ -486,6 +787,19 @@ export class KicadRenderSession {
 		return this.documentType === 'schematic' ? this.schLayerState : this.layerState;
 	}
 
+	/** True only if `layer` has a known, visible state — matches the check
+	 * already used at paint time (drawBoardDragPreview) so hit-testing can't
+	 * select/drag an item whose layer is hidden in the Appearance panel. */
+	protected isBoardLayerVisible(layer: string): boolean {
+		const state = this.layerState.get(layer);
+		return !!state && state.visible;
+	}
+
+	protected isSchLayerVisible(layer: string): boolean {
+		const state = this.schLayerState.get(layer);
+		return !!state && state.visible;
+	}
+
 	get currentBackend(): RenderBackend {
 		return this.backend;
 	}
@@ -513,17 +827,49 @@ export class KicadRenderSession {
 		return this.selectedIds;
 	}
 
-	/**
-	 * When true, board builds include pad-number overlays (PadNumbers layer).
-	 * Must be set before loadBoardText(); changing it does not rebuild an
-	 * already-loaded scene. Default false (board viewer stays clean).
-	 */
+	/** When true, board builds include pad-number overlays (PadNumbers
+	 *  layer). Defaults to true, matching real KiCad. Toggling forces a
+	 *  full board scene rebuild so an already-loaded board picks it up
+	 *  immediately. */
 	get showPadNumbers(): boolean {
 		return !!this.painter.options.showPadNumbers;
 	}
 
 	set showPadNumbers(value: boolean) {
+		if (this.painter.options.showPadNumbers === value) {
+			return;
+		}
 		this.painter.options.showPadNumbers = value;
+		this.rebuildBoardPaintOptions();
+	}
+
+	/** When true, board builds include each pad's net name alongside its
+	 *  number (stacked as a 2-line block when both are on). Defaults to
+	 *  true, matching real KiCad. Toggling forces a full board scene
+	 *  rebuild so an already-loaded board picks it up immediately. */
+	get showNetNames(): boolean {
+		return !!this.painter.options.showNetNames;
+	}
+
+	set showNetNames(value: boolean) {
+		if (this.painter.options.showNetNames === value) {
+			return;
+		}
+		this.painter.options.showNetNames = value;
+		this.rebuildBoardPaintOptions();
+	}
+
+	/** Common tail for showPadNumbers/showNetNames setters — a paint-option
+	 *  flip changes what buildFootprint() emits, so the static scene must
+	 *  be fully rebuilt from the AST, same as any other structural board
+	 *  edit (see rebuildActiveScene's board branch). No-ops for schematics
+	 *  or before a board is loaded. */
+	private rebuildBoardPaintOptions(): void {
+		if (this.documentType !== 'board' || !this.boardRoot) {
+			return;
+		}
+		this.boardStructureDirty = true;
+		this.scheduleRender();
 	}
 
 	/** Hierarchical sheet references in the currently-loaded schematic —
@@ -624,8 +970,14 @@ export class KicadRenderSession {
 		// each hitTest() call sees a concretely-typed array — a union of
 		// two array types doesn't let TS infer hitTest<T>'s T cleanly.
 		const hit = this.documentType === 'schematic'
-			? (this.schScene ? hitTest(this.schScene.hitTestItems, worldPos.x, worldPos.y, tolerance) : null)
-			: (this.scene ? hitTest(this.scene.hitTestItems, worldPos.x, worldPos.y, tolerance) : null);
+			? (this.schScene ? hitTest(
+				this.schScene.hitTestItems, worldPos.x, worldPos.y, tolerance,
+				item => item.kind === 'symbol' || this.isSchLayerVisible(item.layer)
+			) : null)
+			: (this.scene ? hitTest(
+				this.scene.hitTestItems, worldPos.x, worldPos.y, tolerance,
+				item => item.kind === 'footprint' || this.isBoardLayerVisible(item.layer)
+			) : null);
 		if (!hit) {
 			return null;
 		}
@@ -635,6 +987,150 @@ export class KicadRenderSession {
 		const labelName = 'labelName' in hit ? hit.labelName : undefined;
 		const labelKind = 'labelKind' in hit ? hit.labelKind : undefined;
 		return { id: hit.id, kind: hit.kind, layer: hit.layer, refDesignator, labelName, labelKind };
+	}
+
+	/** Board-only counterpart to hitTestAtScreen for ambiguous clicks —
+	 *  collects every candidate under the cursor and reduces them with a
+	 *  simplified port of real KiCad's GuessSelectionCandidates
+	 *  (pcb_selection_tool.cpp:4564): a cascading bbox-area-ratio cutoff
+	 *  (not exact polygon coverage — real KiCad's own per-type precision is
+	 *  a stated simplification here) followed by an active-layer tie-break.
+	 *  NOT ported: the silk/courtyard active-layer preference tier, the
+	 *  hit-distance "sloppiness" pre-filter (shapeContainsPoint already only
+	 *  returns genuine contains-point hits, so raw candidates here are
+	 *  already fairly tight), and the footprint-mostly-covered rescue case.
+	 *  `reduced.length` is 0 (nothing hit), 1 (unambiguous —
+	 *  BoardPointerController should behave exactly as before this feature
+	 *  existed), or >1 (caller should show a disambiguation popup). `all` is
+	 *  the unreduced list, exposed so the caller can build "Show More
+	 *  Choices…" without a second, separately-tolerance/worldPos-computed
+	 *  hit-test call. Both stay topmost-first. `activeLayer` is optional so
+	 *  callers who don't care about the tie-break can omit it. */
+	hitTestCandidatesAtScreen(screenPos: Vec2, activeLayer?: string): { reduced: HitResult[]; all: HitResult[] } {
+		if (this.documentType !== 'board' || !this.scene) {
+			return { reduced: [], all: [] };
+		}
+		const worldPos = this.screenToWorld(screenPos);
+		const tolerance = this.hitTestToleranceWorld();
+		const raw = hitTestAll(
+			this.scene.hitTestItems, worldPos.x, worldPos.y, tolerance,
+			item => item.kind === 'footprint' || this.isBoardLayerVisible(item.layer)
+		);
+		return {
+			reduced: this.reduceHitCandidates(raw, activeLayer).map(item => this.toBoardHitResult(item)),
+			all: raw.map(item => this.toBoardHitResult(item))
+		};
+	}
+
+	/** The area-ratio cascade + active-layer tie-break described on
+	 *  hitTestCandidatesAtScreen. Sorts ascending by bbox area and walks the
+	 *  list, rejecting everything from the first point where an item's area
+	 *  exceeds the PREVIOUS item's area by more than 1.5x (a chained
+	 *  threshold, not a comparison against the global smallest — matches
+	 *  GuessSelectionCandidates' own `itemsByArea[i-1] * sizeRatio` check
+	 *  exactly, pcb_selection_tool.cpp:4705-4712). */
+	protected reduceHitCandidates(candidates: PaintedItem[], activeLayer?: string): PaintedItem[] {
+		if (candidates.length <= 1) {
+			return candidates;
+		}
+		const byArea = candidates
+			.map(item => ({ item, area: this.candidateArea(item) }))
+			.sort((a, b) => a.area - b.area);
+		let cutIndex = byArea.length;
+		for (let i = 1; i < byArea.length; i++) {
+			if (byArea[i]!.area > byArea[i - 1]!.area * 1.5) {
+				cutIndex = i;
+				break;
+			}
+		}
+		let result = byArea.slice(0, cutIndex).map(entry => entry.item);
+		if (result.length > 1 && activeLayer) {
+			// A via's own `layer` is the synthetic 'Vias' bucket, not a real
+			// copper layer, so it never equals activeLayer — without this
+			// exemption, a via that survived the area cutoff above (tied with
+			// a same-spot track) got dropped right back out here, since only
+			// the track ever matches. A via conceptually belongs to every
+			// copper layer it bridges, so it should never lose this tie-break
+			// at all.
+			const onActiveLayer = result.filter(item => item.layer === activeLayer || item.kind === 'via');
+			if (onActiveLayer.length > 0) {
+				result = onActiveLayer;
+			}
+		}
+		return result;
+	}
+
+	/** Real KiCad's own GuessSelectionCandidates (pcb_selection_tool.cpp
+	 *  ~4657-4664) deliberately shrinks a via's notional area from its full
+	 *  bbox (πr²) down to just its drill hole (r²) specifically so it never
+	 *  loses a same-spot area-ratio comparison to whichever track
+	 *  segment(s) necessarily terminate exactly at its center — literally
+	 *  every via with anything wired to it has this exact ambiguity, by
+	 *  construction. Without this, which of {via, track} came out
+	 *  numerically smaller (and therefore survived reduceHitCandidates'
+	 *  cutoff) depended on the connected segment's own incidental length,
+	 *  so clicking a via was a coin flip between actually hitting the via
+	 *  and hitting its own track instead — root-caused against a real
+	 *  board where one via consistently resolved to 'via' and a second,
+	 *  otherwise identical one consistently resolved to 'track-endpoint',
+	 *  making it impossible to ever drag. */
+	protected candidateArea(item: PaintedItem): number {
+		if (item.kind === 'via' && typeof (item.element as any)?.getDrill === 'function') {
+			// getDrill() returns { width, height? } (WithDrill.ts), not a bare
+			// number — using the object itself here (always truthy) silently
+			// fell through to the old bbox-area path every time, which is
+			// exactly why this fix didn't take effect on first pass.
+			const width = (item.element as any).getDrill()?.width;
+			if (typeof width === 'number' && width > 0) {
+				return width * width;
+			}
+		}
+		return item.bbox.w * item.bbox.h;
+	}
+
+	protected toBoardHitResult(item: PaintedItem): HitResult {
+		const length = item.kind === 'track' && item.shape.type === 'segment'
+			? Math.hypot(item.shape.x2 - item.shape.x1, item.shape.y2 - item.shape.y1)
+			: undefined;
+		return { id: item.id, kind: item.kind, layer: item.layer, netName: item.netName, length };
+	}
+
+	/** Given an already-hit track (kind:'track') paint id, reports which end
+	 *  ('start'/'end') the given screen position is closest to, if within
+	 *  pick tolerance of that specific endpoint — null if the click landed
+	 *  mid-track (a mid-segment click starts a body drag instead, see
+	 *  assembleTrackLine).
+	 *
+	 *  Real KiCad's own corner-vs-body split (DRAGGER::startDragSegment,
+	 *  pns_dragger.cpp) isn't a fixed pixel radius at all — it's the
+	 *  segment's own drawn half-width, i.e. "click anywhere on the round
+	 *  end-cap counts as the corner". Using only the fixed hit-test pixel
+	 *  tolerance here made clicking a fat track's visible end-cap (bigger
+	 *  on screen than the tiny tolerance circle at its exact vertex) fall
+	 *  through to a body drag instead of the corner/extend drag the
+	 *  end-cap visually promises — reported as "insists on dragging that
+	 *  segment" instead of letting a dangling end be extended/reconnected.
+	 *  max() with the usual pixel tolerance keeps thin tracks just as
+	 *  clickable as before; it only widens the target for thick ones. */
+	trackEndpointNear(paintId: string, screenPos: Vec2): 'start' | 'end' | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const item = this.scene.hitTestItems.find(it => it.id === paintId);
+		if (!item || item.kind !== 'track' || item.shape.type !== 'segment') {
+			return null;
+		}
+		const worldPos = this.screenToWorld(screenPos);
+		const tolerance = Math.max(this.hitTestToleranceWorld(), item.shape.width / 2);
+		const dStart = Math.hypot(worldPos.x - item.shape.x1, worldPos.y - item.shape.y1);
+		const dEnd = Math.hypot(worldPos.x - item.shape.x2, worldPos.y - item.shape.y2);
+		if (dStart <= tolerance && dStart <= dEnd) {
+			return 'start';
+		}
+		if (dEnd <= tolerance) {
+			return 'end';
+		}
+		return null;
 	}
 
 	/**
@@ -679,7 +1175,7 @@ export class KicadRenderSession {
 			kind: hit.kind,
 			layer: hit.layer,
 			labelName: hit.labelName,
-			labelKind: hit.labelKind,
+			labelKind: hit.labelKind
 		};
 	}
 
@@ -777,15 +1273,141 @@ export class KicadRenderSession {
 			this.selectedIds = new Set(ids);
 		}
 		else if (mode === 'add') {
-			for (const id of ids) this.selectedIds.add(id);
+			for (const id of ids) {
+				this.selectedIds.add(id);
+			}
 		}
 		else {
-			for (const id of ids) this.selectedIds.delete(id);
+			for (const id of ids) {
+				this.selectedIds.delete(id);
+			}
 		}
 		// Highlight color is baked per-vertex at build time on WebGL — see
 		// setLayerVisible()'s comment.
 		this.geometryDirty = true;
 		this.scheduleRender();
+	}
+
+	/** Real KiCad's "Select/Expand Connection" (U key, pcb_selection_tool.cpp
+	 *  :2146 expandConnection / :2230 selectAllConnectedTracks) — ported
+	 *  against buildCopperGraph's point-level connectivity (paint/
+	 *  BoardCopperGraph.ts) rather than re-deriving touching-copper
+	 *  detection here. Seeds from the current selection's track/via/pad
+	 *  items — footprints and non-copper graphics are out of scope (a
+	 *  stated simplification: this app's workflow is always "select a
+	 *  track/via/pad first, then press U", unlike real KiCad's additional
+	 *  empty-selection/graphic-shape fallback paths, pcb_selection_tool.cpp
+	 *  :2163-2179).
+	 *
+	 *  Tries three stop tiers in order — junction, pad, whole net —
+	 *  escalating to the next only if the previous one didn't grow the
+	 *  selection, exactly matching real KiCad's own auto-escalating retry
+	 *  loop (:2183-2219): no press-counter needed, each press just
+	 *  re-derives from the CURRENT selection size. "Junction" mirrors real
+	 *  KiCad's pt_count (more than 2 track-kind neighbors at one physical
+	 *  point = a T-branch) via the adjacency graph itself — see
+	 *  CopperGraph.adjacent's doc comment for why this needs no separate
+	 *  detection pass. "Whole net" is answered directly by the union-find
+	 *  (graph.find) rather than walked, since that's exactly what an
+	 *  electrical island already is.
+	 *
+	 *  Returns the number of newly-selected items (0 if there was nothing
+	 *  track/via/pad-shaped selected to seed from, or nothing more to add). */
+	expandBoardConnection(): number {
+		if (this.documentType !== 'board' || !this.scene) {
+			return 0;
+		}
+		const graph = buildCopperGraph(this.scene);
+		const seedIds = new Set(this.selectedIds);
+		const seedNodeIndices = graph.nodes
+			.map((node, index) => ({ node, index }))
+			.filter(({ node }) => seedIds.has(node.itemId))
+			.map(({ index }) => index);
+		if (seedNodeIndices.length === 0) {
+			return 0;
+		}
+		const initialCount = this.selectedIds.size;
+
+		const branchCount = (index: number): number =>
+			graph.adjacent(index).filter(other => graph.nodes[other]!.itemKind === 'track').length;
+
+		// Real KiCad's selectAllConnectedTracks never calls select() on a
+		// pad — only push its position as a new active point so the walk can
+		// continue through it (e.g. a through-hole pad bridging layers). A
+		// pad is a pass-through node, not a selectable/deletable result:
+		// pressing U must never grow the selection into the footprint the
+		// pad belongs to.
+		const toSelectableIds = (nodeIndices: Iterable<number>): Set<string> => {
+			const ids = new Set<string>();
+			for (const nodeIndex of nodeIndices) {
+				const node = graph.nodes[nodeIndex]!;
+				if (node.itemKind !== 'pad') {
+					ids.add(node.itemId);
+				}
+			}
+			return ids;
+		};
+
+		const walk = (stopMode: 'junction' | 'pad'): Set<number> => {
+			const visited = new Set(seedNodeIndices);
+			let frontier = [...seedNodeIndices];
+			while (frontier.length > 0) {
+				const next: number[] = [];
+				for (const nodeIndex of frontier) {
+					for (const neighborIndex of graph.adjacent(nodeIndex)) {
+						if (visited.has(neighborIndex)) {
+							continue;
+						}
+						visited.add(neighborIndex);
+						const neighbor = graph.nodes[neighborIndex]!;
+						const isStartPad = neighbor.itemKind === 'pad' && seedIds.has(neighbor.itemId);
+						// Real KiCad's own stop rule (pcb_selection_tool.cpp
+						// :2423-2446): JUNCTION always stops at a via and at
+						// any pad other than one you started from; PAD only
+						// stops at a non-start pad (vias and branches are
+						// freely crossable at that tier).
+						const stopHere = stopMode === 'junction'
+							? (neighbor.itemKind === 'via'
+								|| (neighbor.itemKind === 'pad' && !isStartPad)
+								|| (neighbor.itemKind === 'track' && branchCount(neighborIndex) > 2))
+							: (neighbor.itemKind === 'pad' && !isStartPad);
+						if (!stopHere) {
+							next.push(neighborIndex);
+						}
+					}
+				}
+				frontier = next;
+			}
+			return visited;
+		};
+		const wholeIslands = (): Set<number> => {
+			const roots = new Set(seedNodeIndices.map(index => graph.find(index)));
+			const result = new Set<number>();
+			for (let index = 0; index < graph.nodes.length; index++) {
+				if (roots.has(graph.find(index))) {
+					result.add(index);
+				}
+			}
+			return result;
+		};
+
+		let resultIds: Set<string> | null = null;
+		for (const tier of ['junction', 'pad', 'never'] as const) {
+			const visited = tier === 'never' ? wholeIslands() : walk(tier);
+			const grownIds = new Set([...this.selectedIds, ...toSelectableIds(visited)]);
+			if (grownIds.size > initialCount || tier === 'never') {
+				resultIds = grownIds;
+				break;
+			}
+		}
+		if (!resultIds) {
+			return 0;
+		}
+		const addedCount = resultIds.size - this.selectedIds.size;
+		if (addedCount > 0) {
+			this.selectMultiple([...resultIds], 'replace');
+		}
+		return addedCount;
 	}
 
 	clearNetHighlight(): void {
@@ -976,12 +1598,10 @@ export class KicadRenderSession {
 	}
 
 	/** Rotates the footprint owning the given paint id in place around its
-	 *  own origin. Every footprint child (pads, graphics, property text) is
-	 *  stored in footprint-LOCAL coordinates and transformed by the
-	 *  footprint's own origin+rotation at paint time (confirmed in
-	 *  BoardPainter.buildFootprint) — unlike a schematic symbol's property
-	 *  fields (stored in absolute coordinates), so rotating a footprint is
-	 *  just updating its own (at) — no child-position math needed. */
+	 * own origin. Footprint-local positions follow the parent matrix, but
+	 * KiCad serializes pad and text angles in the board frame. Their angles
+	 * therefore need the same delta as the footprint (KiCad's
+	 * FOOTPRINT::SetOrientation() / PCB_TEXT::OnFootprintTransformed()). */
 	rotateFootprintByPaintId(paintId: string, degrees: number): boolean {
 		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
 			return false;
@@ -994,7 +1614,12 @@ export class KicadRenderSession {
 		const origin = el.getOrigin();
 		const newRotation = ((origin.rotation + degrees) % 360 + 360) % 360;
 		el.setOrigin(origin.x, origin.y, newRotation);
-		this.commitAstMutation();
+		for (const pad of el.findChildrenByClass(KicadElementPad)) {
+			const padOrigin = pad.getOrigin();
+			const newPadRotation = ((padOrigin.rotation + degrees) % 360 + 360) % 360;
+			pad.setOrigin(padOrigin.x, padOrigin.y, newPadRotation);
+		}
+		this.rebuildAfterFootprintGeometryEdit(el);
 		return true;
 	}
 
@@ -1022,7 +1647,7 @@ export class KicadRenderSession {
 		const origin = el.getOrigin();
 		const newRotation = ((360 - origin.rotation) % 360 + 360) % 360;
 		el.setOrigin(origin.x, origin.y, newRotation);
-		this.commitAstMutation();
+		this.rebuildAfterFootprintGeometryEdit(el);
 		return true;
 	}
 
@@ -1044,6 +1669,9 @@ export class KicadRenderSession {
 		const result: string[] = [];
 		for (const item of this.scene.hitTestItems) {
 			if (item.kind === 'pad') {
+				continue;
+			}
+			if (item.kind !== 'footprint' && !this.isBoardLayerVisible(item.layer)) {
 				continue;
 			}
 			const { x, y, w, h } = item.bbox;
@@ -1131,7 +1759,8 @@ export class KicadRenderSession {
 
 	/** Persists one of Pcbnew's setup-level origins and redraws its marker. */
 	setBoardOrigin(kind: 'grid' | 'drill-place', x: number, y: number): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !Number.isFinite(x) || !Number.isFinite(y)) {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !Number.isFinite(x) || !Number.isFinite(
+			y)) {
 			return false;
 		}
 		this.pushUndoSnapshot(kind === 'grid' ? 'Set Grid Origin' : 'Set Drill/Place File Origin');
@@ -1148,7 +1777,7 @@ export class KicadRenderSession {
 		}
 		origin.attributes = [
 			{ value: x, format: 'literal' },
-			{ value: y, format: 'literal' },
+			{ value: y, format: 'literal' }
 		];
 		if (kind === 'grid') {
 			this.boardGridOrigin = new Vec2(x, y);
@@ -1186,27 +1815,35 @@ export class KicadRenderSession {
 	}
 
 	get currentPadDisplayMode(): ItemDisplayMode { return this.padDisplayMode; }
+
 	get currentViaDisplayMode(): ItemDisplayMode { return this.viaDisplayMode; }
+
 	get currentTrackDisplayMode(): ItemDisplayMode { return this.trackDisplayMode; }
 
 	/** Pcbnew's "Sketch Pads/Vias/Tracks" — same rebuild requirement as
 	 *  setZoneDisplayMode above, for the same static-buffer reason. */
 	setPadDisplayMode(mode: ItemDisplayMode): void {
-		if (this.padDisplayMode === mode) return;
+		if (this.padDisplayMode === mode) {
+			return;
+		}
 		this.padDisplayMode = mode;
 		this.geometryDirty = true;
 		this.scheduleRender();
 	}
 
 	setViaDisplayMode(mode: ItemDisplayMode): void {
-		if (this.viaDisplayMode === mode) return;
+		if (this.viaDisplayMode === mode) {
+			return;
+		}
 		this.viaDisplayMode = mode;
 		this.geometryDirty = true;
 		this.scheduleRender();
 	}
 
 	setTrackDisplayMode(mode: ItemDisplayMode): void {
-		if (this.trackDisplayMode === mode) return;
+		if (this.trackDisplayMode === mode) {
+			return;
+		}
 		this.trackDisplayMode = mode;
 		this.geometryDirty = true;
 		this.scheduleRender();
@@ -1215,19 +1852,28 @@ export class KicadRenderSession {
 	get currentCrosshairMode(): CrosshairMode { return this.crosshairMode; }
 
 	setCrosshairMode(mode: CrosshairMode): void {
-		if (this.crosshairMode === mode) return;
+		if (this.crosshairMode === mode) {
+			return;
+		}
 		this.crosshairMode = mode;
 		this.scheduleRender();
 	}
 
 	/** Called by the board pointer controller on every mousemove regardless
-	 *  of gesture state — the 'full'/'diagonal' crosshair styles have no
-	 *  browser-native equivalent and must be redrawn as the pointer moves. */
+	 *  of gesture state — the crosshair is redrawn (in whichever style) as
+	 *  the pointer moves, since it has no browser-native equivalent for any
+	 *  of the 3 modes now (see workingPointWorld's doc comment). */
 	updateBoardPointerScreen(pos: Vec2 | null): void {
 		this.boardPointerScreen = pos;
-		if (this.crosshairMode !== 'small') {
-			this.scheduleRender();
-		}
+		this.scheduleRender();
+	}
+
+	/** Sets the crosshair's actual draw position — see workingPointWorld's
+	 *  doc comment. Called alongside updateBoardPointerScreen on every
+	 *  mousemove; null falls back to the raw (unsnapped) pointer position. */
+	setBoardWorkingPoint(point: Vec2 | null): void {
+		this.workingPointWorld = point;
+		this.scheduleRender();
 	}
 
 	/** Matches KiCad's non-warping wheel-zoom branch: the world point under
@@ -1285,6 +1931,657 @@ export class KicadRenderSession {
 		return segment.getUuid() ?? null;
 	}
 
+	/** Replaces one existing track segment with a new chain of segments
+	 *  covering the exact same electrical path (same net/width/layer,
+	 *  original start/end points preserved at the chain's own two ends) —
+	 *  the router's shove uses this to reroute a colliding existing track
+	 *  around the one just being placed, instead of only flagging a
+	 *  clearance violation. `element` must be the live KicadElementSegment
+	 *  instance being replaced (carried on a RouterObstacle, which is built
+	 *  straight from the current scene's paint items — always current, no
+	 *  separate lookup needed). Returns false if the element isn't a live
+	 *  child of the board (already removed, wrong document, etc). */
+	shoveTrackSegment(element: any, newSegments: { x1: number; y1: number; x2: number; y2: number }[]): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || newSegments.length === 0) {
+			return false;
+		}
+		const parent = this.boardRoot.rootElement;
+		const idx = parent.children.indexOf(element);
+		if (idx < 0) {
+			return false;
+		}
+		const width = typeof element.getWidth === 'function' ? element.getWidth() : 0.25;
+		const layer = typeof element.getLayer === 'function' ? element.getLayer() : 'F.Cu';
+		const netId = typeof element.getNetId === 'function' ? element.getNetId() : null;
+		const netName = typeof element.getNetName === 'function' ? element.getNetName() : undefined;
+		this.pushUndoSnapshot('Shove track');
+		const replacements = newSegments
+			.filter(seg => seg.x1 !== seg.x2 || seg.y1 !== seg.y2)
+			.map(seg => {
+				const s = new KicadElementSegment();
+				s.setStartEnd(seg.x1, seg.y1, seg.x2, seg.y2);
+				s.setWidth(width);
+				s.setLayer(layer);
+				if (netId !== null && netId !== undefined) {
+					s.setNet(netId, netName ?? undefined);
+				}
+				s.setUuid();
+				return s;
+			});
+		if (replacements.length === 0) {
+			return false;
+		}
+		parent.children.splice(idx, 1, ...replacements);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Real KiCad's LINE assembly (PNS_NODE::AssembleLine,
+	 *  pns_dragger.cpp:118-152's startDragSegment) — walks outward from a
+	 *  clicked track segment in both directions along the SAME connected
+	 *  chain (same net, touching endpoints) until hitting a real stopping
+	 *  point (a via, a pad, or a >2-way branch — the exact junction rule
+	 *  expandBoardConnection's 'junction' tier already encodes), returning
+	 *  the ordered chain of segment ids and their as-drawn corner points.
+	 *  This is what BoardPointerController's mid-segment drag gesture
+	 *  operates on — dragging one segment's body reflows the WHOLE line it
+	 *  belongs to, not just that one segment, matching real KiCad. Doesn't
+	 *  check lock state itself — same separation of concerns as every other
+	 *  session method; callers use isBoardElementLocked per id. Returns null
+	 *  for anything that isn't a straight track segment. */
+	assembleTrackLine(paintId: string): { segmentIds: string[]; points: Vec2[]; width: number; layer: string; netId: number | null } | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const item = this.scene.hitTestItems.find(it => it.id === paintId);
+		if (!item || item.kind !== 'track' || item.shape.type !== 'segment') {
+			return null;
+		}
+		const graph = buildCopperGraph(this.scene);
+		const ownNodeIndices = graph.nodes
+			.map((node, index) => ({ node, index }))
+			.filter(({ node }) => node.itemId === paintId)
+			.map(({ index }) => index);
+		if (ownNodeIndices.length !== 2) {
+			return null;
+		}
+		const [nodeAIndex, nodeBIndex] = ownNodeIndices as [number, number];
+
+		const fromA = this.walkTrackChainOutward(graph, nodeAIndex, paintId);
+		const fromB = this.walkTrackChainOutward(graph, nodeBIndex, paintId);
+		return {
+			segmentIds: [...fromA.segmentIds.reverse(), paintId, ...fromB.segmentIds],
+			points: [...fromA.points.reverse(), graph.nodes[nodeAIndex]!.point, graph.nodes[nodeBIndex]!.point, ...fromB.points],
+			width: item.shape.width,
+			layer: item.layer,
+			netId: item.netId ?? null,
+		};
+	}
+
+	/** A node is a stop for walkTrackChainOutward's linear walk once it's
+	 *  not a track at all (a pad/via — real KiCad's own AssembleLine
+	 *  boundary) or is a >2-way branch point (more than one OTHER track
+	 *  touching it besides the one just arrived from). */
+	private isTrackChainStop(graph: CopperGraph, nodeIndex: number): boolean {
+		const node = graph.nodes[nodeIndex]!;
+		if (node.itemKind !== 'track') {
+			return true;
+		}
+		return graph.adjacent(nodeIndex).filter(other => graph.nodes[other]!.itemKind === 'track').length > 2;
+	}
+
+	/** Follows a connected straight-track chain one hop at a time from
+	 *  `startIndex`, away from the segment identified by `arrivedFromId` —
+	 *  every "touching-point" union recorded during buildCopperGraph is a
+	 *  single physical hop, so a plain 2-way continuation always has exactly
+	 *  one qualifying next node; isTrackChainStop's junction/via/pad check
+	 *  is what keeps this a linear walk instead of a general graph
+	 *  traversal. Shared by assembleTrackLine (mid-segment drag, walks both
+	 *  directions from a clicked segment) and viaDragFanout (walks away from
+	 *  a via, one direction per connected track). */
+	private walkTrackChainOutward(
+		graph: CopperGraph, startIndex: number, arrivedFromId: string
+	): { segmentIds: string[]; points: Vec2[] } {
+		const segmentIds: string[] = [];
+		const points: Vec2[] = [];
+		let current = startIndex;
+		let cameFromId = arrivedFromId;
+		let guard = 0;
+		while (guard++ < 10000) {
+			if (this.isTrackChainStop(graph, current)) {
+				break;
+			}
+			const nextNodeIndex = graph.adjacent(current).find(candidate => {
+				const candidateNode = graph.nodes[candidate]!;
+				return candidateNode.itemKind === 'track' && candidateNode.itemId !== cameFromId;
+			});
+			if (nextNodeIndex === undefined) {
+				break;
+			}
+			const nextNode = graph.nodes[nextNodeIndex]!;
+			const otherEndIndex = graph.adjacent(nextNodeIndex).find(candidate => graph.nodes[candidate]!.itemId === nextNode.itemId);
+			if (otherEndIndex === undefined) {
+				break;
+			}
+			segmentIds.push(nextNode.itemId);
+			points.push(graph.nodes[otherEndIndex]!.point);
+			current = otherEndIndex;
+			cameFromId = nextNode.itemId;
+		}
+		return { segmentIds, points };
+	}
+
+	/** Commits a dragged track line — replaces every one of `oldSegmentIds`'
+	 *  live elements with fresh segments along consecutive `newPoints` pairs
+	 *  (N old segments in, M new segments out; M is whatever
+	 *  dragSegment45/the drag's obstacle handling produced, not necessarily
+	 *  N). Generalizes shoveTrackSegment's splice-replace shape above to
+	 *  multiple old elements — same width/layer/net applied to every new
+	 *  segment (a dragged line is by construction all one net/layer/width;
+	 *  assembleTrackLine only ever walks a single such chain), one
+	 *  pushUndoSnapshot + commitAstMutation. Returns false if any id isn't a
+	 *  live child of the board or the new point chain is degenerate.
+	 *
+	 *  Resolves oldSegmentIds against the AST (parent.children) by uuid, NOT
+	 *  against this.scene.hitTestItems: beginTrackDragPreview (see its doc
+	 *  comment) deliberately removes the assembled line's segments from that
+	 *  same hitTestItems list for the whole drag, so a scene-based lookup
+	 *  here would always find zero of them and silently no-op the commit —
+	 *  every drag would compute the right shape and then revert, since
+	 *  endTrackDragPreview's scene restore is deferred to the next render()
+	 *  tick, which never runs before this synchronous call. This was an
+	 *  actual shipped bug, root-caused against a real user board. */
+	dragTrackLine(oldSegmentIds: string[], newPoints: Vec2[], width: number, layer: string, netId: number | null): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || oldSegmentIds.length === 0 || newPoints.length < 2) {
+			return false;
+		}
+		const parent = this.boardRoot.rootElement;
+		const wanted = new Set(oldSegmentIds);
+		const oldElements: any[] = parent.children.filter((child: any) => {
+			const uuid = child instanceof KicadElementSegment ? child.getUuid() : undefined;
+			return uuid !== undefined && wanted.has(uuid);
+		});
+		if (oldElements.length !== oldSegmentIds.length) {
+			return false;
+		}
+		const indices = oldElements.map(element => parent.children.indexOf(element)).filter(index => index >= 0);
+		if (indices.length !== oldElements.length) {
+			return false;
+		}
+		const firstIndex = Math.min(...indices);
+		this.pushUndoSnapshot('Drag track');
+		for (const element of oldElements) {
+			const idx = parent.children.indexOf(element);
+			if (idx >= 0) {
+				parent.children.splice(idx, 1);
+			}
+		}
+		const replacements: any[] = [];
+		for (let i = 0; i < newPoints.length - 1; i++) {
+			const a = newPoints[i]!, b = newPoints[i + 1]!;
+			if (a.x === b.x && a.y === b.y) {
+				continue;
+			}
+			const segment = new KicadElementSegment();
+			segment.setStartEnd(a.x, a.y, b.x, b.y);
+			segment.setWidth(width);
+			segment.setLayer(layer);
+			if (netId !== null && netId !== undefined) {
+				segment.setNet(netId);
+			}
+			segment.setUuid();
+			replacements.push(segment);
+		}
+		if (replacements.length === 0) {
+			return false;
+		}
+		const insertAt = Math.min(firstIndex, parent.children.length);
+		parent.children.splice(insertAt, 0, ...replacements);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Post-route cleanup — a from-scratch analog of real KiCad's "Cleanup
+	 *  Tracks and Vias" (pcbnew's TRACKS_CLEANER): removes zero-length
+	 *  segments, then repeatedly merges any two straight track segments that
+	 *  meet at a point touched by exactly those two (same net/layer/width,
+	 *  and collinear within a small epsilon) into one longer segment. A
+	 *  degree-2 point with matching width/layer/net is always safe to
+	 *  collapse regardless of whether a pad/via happens to sit exactly on
+	 *  it — the merged segment is still a straight line through that same
+	 *  coordinate, so any copper touching the point stays connected; this
+	 *  only removes a redundant polyline vertex, never a component. Runs as
+	 *  a single undo-able command (called from the Tools menu), not a
+	 *  per-frame drag helper — the O(segments) rescans per pass are fine at
+	 *  that call frequency. */
+	cleanupTracks(): { merged: number; removed: number } {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return { merged: 0, removed: 0 };
+		}
+		const root = this.boardRoot.rootElement;
+		const allSegments = root.findChildrenByClass(KicadElementSegment) as KicadElementSegment[];
+		const zeroLength = allSegments.filter(seg => {
+			const { start, end } = seg.getStartEnd();
+			return start.x === end.x && start.y === end.y;
+		});
+		let survivors = allSegments.filter(seg => !zeroLength.includes(seg));
+		let mergedCount = 0;
+		const EPS = 1e-6;
+		const pointKey = (layer: string, netId: number | null, x: number, y: number) =>
+			`${ layer }|${ netId }|${ x.toFixed(5) }|${ y.toFixed(5) }`;
+		let changed = true;
+		while (changed) {
+			changed = false;
+			const touching = new Map<string, KicadElementSegment[]>();
+			for (const seg of survivors) {
+				const { start, end } = seg.getStartEnd();
+				const layer = seg.getLayer();
+				const netId = seg.getNetId();
+				for (const p of [start, end]) {
+					const key = pointKey(layer, netId, p.x, p.y);
+					const arr = touching.get(key);
+					if (arr) {
+						arr.push(seg);
+					}
+					else {
+						touching.set(key, [seg]);
+					}
+				}
+			}
+			for (const [, pair] of touching) {
+				if (pair.length !== 2 || pair[0] === pair[1]) {
+					continue;
+				}
+				const [a, b] = pair as [KicadElementSegment, KicadElementSegment];
+				if (a.getWidth() !== b.getWidth() || a.getLayer() !== b.getLayer() || a.getNetId() !== b.getNetId()) {
+					continue;
+				}
+				const A = a.getStartEnd();
+				const B = b.getStartEnd();
+				// The shared point is whichever endpoint pairing coincides;
+				// the merge keeps the two FAR endpoints (one from each
+				// segment) as the new combined segment's ends.
+				let sharedA: { x: number; y: number }, farA: { x: number; y: number };
+				let sharedB: { x: number; y: number }, farB: { x: number; y: number };
+				if (Math.hypot(A.start.x - B.start.x, A.start.y - B.start.y) < EPS) {
+					sharedA = A.start;
+					farA = A.end;
+					sharedB = B.start;
+					farB = B.end;
+				}
+				else if (Math.hypot(A.start.x - B.end.x, A.start.y - B.end.y) < EPS) {
+					sharedA = A.start;
+					farA = A.end;
+					sharedB = B.end;
+					farB = B.start;
+				}
+				else if (Math.hypot(A.end.x - B.start.x, A.end.y - B.start.y) < EPS) {
+					sharedA = A.end;
+					farA = A.start;
+					sharedB = B.start;
+					farB = B.end;
+				}
+				else if (Math.hypot(A.end.x - B.end.x, A.end.y - B.end.y) < EPS) {
+					sharedA = A.end;
+					farA = A.start;
+					sharedB = B.end;
+					farB = B.start;
+				}
+				else {
+					continue;
+				}
+				void sharedB;
+				// Collinearity: cross product of (shared-farA) and (shared-farB)
+				// must be ~0 — the two segments point the same/opposite way
+				// through the shared point, not at an angle (a real corner).
+				const v1x = sharedA.x - farA.x, v1y = sharedA.y - farA.y;
+				const v2x = farB.x - sharedA.x, v2y = farB.y - sharedA.y;
+				const cross = v1x * v2y - v1y * v2x;
+				if (Math.abs(cross) > EPS) {
+					continue;
+				}
+				a.setStartEnd(farA.x, farA.y, farB.x, farB.y);
+				survivors = survivors.filter(s => s !== b);
+				mergedCount++;
+				changed = true;
+				break;
+			}
+		}
+		if (zeroLength.length === 0 && mergedCount === 0) {
+			return { merged: 0, removed: 0 };
+		}
+		this.pushUndoSnapshot('Cleanup tracks and vias');
+		for (const seg of allSegments) {
+			if (!survivors.includes(seg)) {
+				const idx = root.children.indexOf(seg);
+				if (idx >= 0) {
+					root.children.splice(idx, 1);
+				}
+			}
+		}
+		this.commitAstMutation();
+		return { merged: mergedCount, removed: zeroLength.length };
+	}
+
+	/** Computes (without mutating anything) the connected-line fanout for a
+	 *  via-drag gesture — mirrors real KiCad's DRAGGER::Start
+	 *  (findViaFanoutByHandle, pns_dragger.cpp) computing the fanout ONCE at
+	 *  drag-start and reusing it for the whole gesture, rather than
+	 *  re-deriving it every mouse move: an earlier version of this method
+	 *  re-walked buildCopperGraph on every single mousemove call and used
+	 *  "the other end of whatever segment currently touches the via" as the
+	 *  anchor — correct on the very first call, but on every call after
+	 *  that, the "current" near-via segment IS the elbow this same method
+	 *  created a moment ago, so the anchor kept sliding forward to that
+	 *  elbow's own corner instead of staying at the track's true fixed far
+	 *  point. A real drag fires many mouse-move events, so that compounded
+	 *  into a trail of dozens of ever-shorter stray segments (reported as
+	 *  "makes some mess"). Calling this ONCE at gesture start and reusing
+	 *  the SAME fanout for every live-preview frame (via
+	 *  BoardPointerController's 'via' gesture, mirroring 'track-body''s
+	 *  assembleTrackLine/dragSegment45 split) fixes that.
+	 *
+	 *  For each track connected to the via (per bridged copper layer),
+	 *  walks the WHOLE assembled line out to its real far anchor (a pad,
+	 *  junction, or another via — walkTrackChainOutward's stop rule,
+	 *  matching real KiCad's own AssembleLine boundary) rather than just the
+	 *  one segment immediately touching the via. This is what dragViaChain
+	 *  (PnsDragger.ts, the port of dragCornerInternal) needs: its backward
+	 *  search can only absorb a trailing segment that would otherwise
+	 *  zigzag if that segment is actually IN the chain handed to it — with
+	 *  only the near segment available (this method's first version), the
+	 *  search space was always exactly one segment wide, which is what
+	 *  produced the reported "weird C shape" the real router doesn't. A
+	 *  fix's whole segment chain is skipped (not partially dragged) if ANY
+	 *  segment in it is locked — a via with an unusual fanout shouldn't
+	 *  half-drag a locked track by touching just its unlocked near end.
+	 *  Returns null for a paintId that isn't a live via on the current
+	 *  board. */
+	viaDragFanout(paintId: string): { fixes: ViaDragFix[]; viaSize: number } | null {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
+			return null;
+		}
+		this.rebuildBoardSceneIfPending();
+		const viaItem = this.scene.hitTestItems.find(it => it.id === paintId);
+		if (!viaItem?.element || !(viaItem.element instanceof KicadElementVia) || viaItem.shape.type !== 'circle') {
+			return null;
+		}
+		const viaSize = viaItem.shape.r * 2;
+		const graph = buildCopperGraph(this.scene);
+		const viaNodeIndices = graph.nodes
+			.map((node, index) => ({ node, index }))
+			.filter(({ node }) => node.itemId === paintId && node.itemKind === 'via')
+			.map(({ index }) => index);
+
+		const fixes: ViaDragFix[] = [];
+		// A through via's several per-layer nodes could each separately
+		// touch a track on their own layer — dedupe by the track's own
+		// paint id so a track never gets queued for two conflicting fixes.
+		const seenTrackIds = new Set<string>();
+		for (const viaNodeIndex of viaNodeIndices) {
+			const viaPoint = graph.nodes[viaNodeIndex]!.point;
+			for (const neighborIndex of graph.adjacent(viaNodeIndex)) {
+				const neighbor = graph.nodes[neighborIndex]!;
+				if (neighbor.itemKind !== 'track' || seenTrackIds.has(neighbor.itemId)) {
+					continue;
+				}
+				seenTrackIds.add(neighbor.itemId);
+				const otherEndIndex = graph.adjacent(neighborIndex)
+					.find(candidate => graph.nodes[candidate]!.itemId === neighbor.itemId);
+				if (otherEndIndex === undefined) {
+					continue;
+				}
+				const segItem = this.scene.hitTestItems.find(it => it.id === neighbor.itemId);
+				if (!segItem || segItem.shape.type !== 'segment') {
+					continue;
+				}
+				const walked = this.walkTrackChainOutward(graph, otherEndIndex, neighbor.itemId);
+				// Near-to-far order (segment touching the via first).
+				const segmentIds = [neighbor.itemId, ...walked.segmentIds];
+				if (segmentIds.some(id => this.isBoardElementLocked(id))) {
+					continue;
+				}
+				const points = [graph.nodes[otherEndIndex]!.point, ...walked.points];
+				fixes.push({
+					// Reversed to far-to-near/far-anchor-first — the order
+					// dragViaChain and its upstream original both expect.
+					segmentIds: [...segmentIds].reverse(),
+					originPoints: [...points].reverse().concat([viaPoint]),
+					width: segItem.shape.width,
+					layer: segItem.layer,
+					netId: segItem.netId ?? null
+				});
+			}
+		}
+		return { fixes, viaSize };
+	}
+
+	/** Commits a via drag once, at mouseup — replaces each fix's WHOLE
+	 *  segment chain (resolved by uuid straight from the AST, not
+	 *  this.scene.hitTestItems: the gesture that leads here hid these exact
+	 *  segments out of the scene for the whole drag via
+	 *  beginTrackDragPreview, and endTrackDragPreview's restore is itself
+	 *  deferred to the next render(), so at the moment onMouseUp calls this
+	 *  the scene still doesn't have them back — same reasoning as
+	 *  dragTrackLine's identical AST-not-scene lookup) with its final point
+	 *  chain, moves the via, single undo snapshot. `chain` is whatever
+	 *  BoardPointerController's live preview last computed via
+	 *  dragViaChain(fix.originPoints, cursor, cornerMode) — committing the
+	 *  exact last-previewed geometry rather than recomputing it here keeps
+	 *  this a plain "make it permanent" step, the same WYSIWYG contract
+	 *  dragTrackLine's commitPoints parameter has. Multiple old segments can
+	 *  collapse into however many new ones `chain` produced (mirrors
+	 *  dragTrackLine's own N-old-to-M-new splice), all inserted at the
+	 *  position of the chain's nearest-to-far-anchor old segment. */
+	commitViaDrag(
+		paintId: string,
+		fixes: { segmentIds: string[]; chain: Vec2[]; width: number; layer: string; netId: number | null }[],
+		x: number, y: number
+	): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return false;
+		}
+		const parent = this.boardRoot.rootElement;
+		const viaElement = parent.children.find((child: any) =>
+			child instanceof KicadElementVia && child.getUuid() === paintId);
+		if (!viaElement) {
+			return false;
+		}
+		this.pushUndoSnapshot('Move via');
+		for (const fix of fixes) {
+			this.applyFixChain(parent, fix, fix.chain, fix.width, fix.layer, fix.netId);
+		}
+		viaElement.setOrigin(x, y);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Shared N-old-segments-to-M-new-segments splice, resolved by uuid
+	 *  straight from the AST (not this.scene.hitTestItems: the gesture that
+	 *  leads here hid these exact segments out of the scene for the whole
+	 *  drag via beginTrackDragPreview, and endTrackDragPreview's restore is
+	 *  itself deferred to the next render(), so at commit time the scene
+	 *  still doesn't have them back — same reasoning as dragTrackLine's own
+	 *  AST-not-scene lookup). Used by both commitViaDrag (one call per
+	 *  fanout fix, via element moved separately after) and
+	 *  commitTrackCornerDrag (same shape, no via involved) — factored out
+	 *  once the two calls turned out identical. No-ops (leaves the AST
+	 *  untouched) if `fix.segmentIds` doesn't fully resolve to live
+	 *  elements. Caller owns pushUndoSnapshot/commitAstMutation. */
+	private applyFixChain(
+		parent: any,
+		fix: { segmentIds: string[] },
+		chain: Vec2[], width: number, layer: string, netId: number | null
+	): void {
+		{
+			const wanted = new Set(fix.segmentIds);
+			const oldElements: any[] = parent.children.filter((child: any) => {
+				const uuid = child instanceof KicadElementSegment ? child.getUuid() : undefined;
+				return uuid !== undefined && wanted.has(uuid);
+			});
+			if (oldElements.length !== fix.segmentIds.length) {
+				return;
+			}
+			const firstIndex = Math.min(...oldElements.map(element => parent.children.indexOf(element)));
+			for (const element of oldElements) {
+				const idx = parent.children.indexOf(element);
+				if (idx >= 0) {
+					parent.children.splice(idx, 1);
+				}
+			}
+			const replacements: any[] = [];
+			for (let i = 0; i < chain.length - 1; i++) {
+				const a = chain[i]!, b = chain[i + 1]!;
+				if (a.x === b.x && a.y === b.y) {
+					continue;
+				}
+				const segment = new KicadElementSegment();
+				segment.setStartEnd(a.x, a.y, b.x, b.y);
+				segment.setWidth(width);
+				segment.setLayer(layer);
+				if (netId !== null && netId !== undefined) {
+					segment.setNet(netId);
+				}
+				segment.setUuid();
+				replacements.push(segment);
+			}
+			if (replacements.length > 0) {
+				const insertAt = Math.min(firstIndex, parent.children.length);
+				parent.children.splice(insertAt, 0, ...replacements);
+			}
+		}
+	}
+
+	/** Computes (without mutating anything) the fanout for dragging a
+	 *  single track corner (an endpoint reported by trackEndpointNear) —
+	 *  real KiCad's DragCorner (LINE::DragCorner, pns_line.cpp) always
+	 *  operates on the WHOLE assembled line the clicked corner belongs to,
+	 *  the same AssembleLine boundary assembleTrackLine/viaDragFanout both
+	 *  already use, not just the one segment that happens to have been
+	 *  clicked — a previous, simpler version of this drag
+	 *  (moveTrackEndpointByPaintId) just overwrote the raw coordinate with
+	 *  no 45°/90° constraint and no elbow reflow at all, which is exactly
+	 *  what produced the reported "after a couple minutes of dragging wires
+	 *  I end up with some monstrosity": real KiCad never lets a drag leave
+	 *  the routing grid, no matter which corner you grab.
+	 *
+	 *  The dragged corner can be either a true dangling end (nothing else
+	 *  touches it — the common "extend this wire" case) or a junction where
+	 *  OTHER tracks also meet (a mid-board T/corner) — real KiCad's own
+	 *  dragCorner45 handles both uniformly by treating the drag point as the
+	 *  shared endpoint of however many connected lines happen to touch it,
+	 *  reflowing each one independently toward the same new position (see
+	 *  its own `aIndex` middle-vs-end branches). This mirrors that: one
+	 *  ViaDragFix per connected line touching the drag point (always
+	 *  including the clicked segment's own line, walking away from the
+	 *  clicked corner through it), each walked out to its own real far
+	 *  anchor via walkTrackChainOutward exactly like viaDragFanout's per-
+	 *  layer fixes — there's just no via at the near end here, only a bare
+	 *  point. Fixes touching a locked segment are dropped (not refused
+	 *  wholesale — matches viaDragFanout's own lock simplification).
+	 *  Returns null if the corner isn't a live track endpoint, or every
+	 *  fix ended up locked. */
+	trackCornerDragFanout(paintId: string, endpoint: 'start' | 'end'): { fixes: ViaDragFix[]; dragPoint: Vec2 } | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		this.rebuildBoardSceneIfPending();
+		const item = this.scene.hitTestItems.find(it => it.id === paintId);
+		if (!item || item.kind !== 'track' || item.shape.type !== 'segment') {
+			return null;
+		}
+		const dragPoint = endpoint === 'start'
+			? new Vec2(item.shape.x1, item.shape.y1)
+			: new Vec2(item.shape.x2, item.shape.y2);
+
+		const graph = buildCopperGraph(this.scene);
+		const ownNodeIndices = graph.nodes
+			.map((node, index) => ({ node, index }))
+			.filter(({ node }) => node.itemId === paintId)
+			.map(({ index }) => index);
+		if (ownNodeIndices.length !== 2) {
+			return null;
+		}
+		const [nodeA, nodeB] = ownNodeIndices as [number, number];
+		const distA = Math.hypot(graph.nodes[nodeA]!.point.x - dragPoint.x, graph.nodes[nodeA]!.point.y - dragPoint.y);
+		const distB = Math.hypot(graph.nodes[nodeB]!.point.x - dragPoint.x, graph.nodes[nodeB]!.point.y - dragPoint.y);
+		const nodeAtDragPoint = distA <= distB ? nodeA : nodeB;
+		const ownOtherEnd = distA <= distB ? nodeB : nodeA;
+
+		const fixes: ViaDragFix[] = [];
+		const seenTrackIds = new Set<string>([paintId]);
+
+		// The clicked segment's own line: walk away from the drag point,
+		// through the segment itself, out to its real far anchor.
+		{
+			const walked = this.walkTrackChainOutward(graph, ownOtherEnd, paintId);
+			const nearToFarIds = [paintId, ...walked.segmentIds];
+			const nearToFarPoints = [graph.nodes[ownOtherEnd]!.point, ...walked.points];
+			fixes.push({
+				segmentIds: [...nearToFarIds].reverse(),
+				originPoints: [...nearToFarPoints].reverse().concat([dragPoint]),
+				width: item.shape.width,
+				layer: item.layer,
+				netId: item.netId ?? null
+			});
+		}
+
+		// Any OTHER track(s) also touching the drag point — a junction, not
+		// a true dangling end.
+		for (const neighborIndex of graph.adjacent(nodeAtDragPoint)) {
+			const neighbor = graph.nodes[neighborIndex]!;
+			if (neighbor.itemKind !== 'track' || seenTrackIds.has(neighbor.itemId)) {
+				continue;
+			}
+			seenTrackIds.add(neighbor.itemId);
+			const otherEndIndex = graph.adjacent(neighborIndex)
+				.find(candidate => graph.nodes[candidate]!.itemId === neighbor.itemId);
+			if (otherEndIndex === undefined) {
+				continue;
+			}
+			const segItem = this.scene.hitTestItems.find(it => it.id === neighbor.itemId);
+			if (!segItem || segItem.shape.type !== 'segment') {
+				continue;
+			}
+			const walked = this.walkTrackChainOutward(graph, otherEndIndex, neighbor.itemId);
+			const nearToFarIds = [neighbor.itemId, ...walked.segmentIds];
+			const nearToFarPoints = [graph.nodes[otherEndIndex]!.point, ...walked.points];
+			fixes.push({
+				segmentIds: [...nearToFarIds].reverse(),
+				originPoints: [...nearToFarPoints].reverse().concat([dragPoint]),
+				width: segItem.shape.width,
+				layer: segItem.layer,
+				netId: segItem.netId ?? null
+			});
+		}
+
+		const unlockedFixes = fixes.filter(fix => !fix.segmentIds.some(id => this.isBoardElementLocked(id)));
+		if (unlockedFixes.length === 0) {
+			return null;
+		}
+		return { fixes: unlockedFixes, dragPoint };
+	}
+
+	/** Commits a track-corner drag once, at mouseup — same WYSIWYG
+	 *  "replace with whatever the live preview last computed" contract as
+	 *  commitViaDrag, just with no via to move at the end (the drag point
+	 *  isn't its own persisted element — it's just wherever every fix's
+	 *  chain happens to converge). */
+	commitTrackCornerDrag(
+		fixes: { segmentIds: string[]; chain: Vec2[]; width: number; layer: string; netId: number | null }[]
+	): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || fixes.length === 0) {
+			return false;
+		}
+		const parent = this.boardRoot.rootElement;
+		this.pushUndoSnapshot('Drag track');
+		for (const fix of fixes) {
+			this.applyFixChain(parent, fix, fix.chain, fix.width, fix.layer, fix.netId);
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
 	/** Creates a through via spanning the supplied copper-layer pair. */
 	addVia(
 		x: number, y: number, size: number, drill: number,
@@ -1315,8 +2612,11 @@ export class KicadRenderSession {
 	/** Pcbnew's default board-graphic width (board_design_settings.h's
 	 * DEFAULT_LINE_WIDTH) is 0.10 mm.  These helpers intentionally construct
 	 * the board-native `gr_*` records rather than reusing schematic graphics. */
-	addBoardGraphicLine(x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) return null;
+	addBoardGraphicLine(
+		x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw line');
 		const line = new KicadElementGrLine();
 		line.setStartEnd(x1, y1, x2, y2);
@@ -1328,8 +2628,11 @@ export class KicadRenderSession {
 		return line.getUuid() ?? null;
 	}
 
-	addBoardGraphicRect(x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) return null;
+	addBoardGraphicRect(
+		x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw rectangle');
 		const rect = new KicadElementGrRect();
 		rect.setStartEnd(x1, y1, x2, y2);
@@ -1342,7 +2645,9 @@ export class KicadRenderSession {
 	}
 
 	addBoardGraphicCircle(cx: number, cy: number, radius: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || radius <= 0) return null;
+		if (!this.canAddBoardGraphic() || radius <= 0) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw circle');
 		const circle = new KicadElementGrCircle();
 		circle.setCenter(cx, cy);
@@ -1355,8 +2660,13 @@ export class KicadRenderSession {
 		return circle.getUuid() ?? null;
 	}
 
-	addBoardGraphicArc(sx: number, sy: number, mx: number, my: number, ex: number, ey: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || (sx === ex && sy === ey)) return null;
+	addBoardGraphicArc(
+		sx: number, sy: number, mx: number, my: number, ex: number, ey: number, layer: string,
+		strokeWidth = 0.1
+	): string | null {
+		if (!this.canAddBoardGraphic() || (sx === ex && sy === ey)) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw arc');
 		const arc = new KicadElementGrArc();
 		arc.setStartMidEnd(sx, sy, mx, my, ex, ey);
@@ -1368,8 +2678,11 @@ export class KicadRenderSession {
 		return arc.getUuid() ?? null;
 	}
 
-	addBoardGraphicPolygon(points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || points.length < 3) return null;
+	addBoardGraphicPolygon(
+		points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || points.length < 3) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw polygon');
 		const polygon = new KicadElementGrPoly();
 		polygon.setPoints(points.map(point => ({ x: point.x, y: point.y })));
@@ -1381,8 +2694,11 @@ export class KicadRenderSession {
 		return polygon.getUuid() ?? null;
 	}
 
-	addBoardGraphicBezier(points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || points.length !== 4) return null;
+	addBoardGraphicBezier(
+		points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
+		if (!this.canAddBoardGraphic() || points.length !== 4) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw Bezier');
 		const curve = new KicadElementGrCurve();
 		curve.setPoints(points.map(point => ({ x: point.x, y: point.y })));
@@ -1398,7 +2714,9 @@ export class KicadRenderSession {
 	 * 0.15 mm text stroke.  It anchors newly placed text left/bottom and mirrors
 	 * it when placed on a back layer. */
 	addBoardGraphicText(x: number, y: number, value: string, layer: string): string | null {
-		if (!this.canAddBoardGraphic() || !value.trim()) return null;
+		if (!this.canAddBoardGraphic() || !value.trim()) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw text');
 		const text = new KicadElementGrText(value);
 		text.setOrigin(x, y, 0);
@@ -1415,8 +2733,11 @@ export class KicadRenderSession {
 	 * stroke/2 + text-height*0.75 = 0.825 mm for the default board style.
 	 * A text box is border-enabled by default and uses the ordinary 0.10 mm
 	 * graphic stroke while its text itself uses the 0.15 mm text stroke. */
-	addBoardGraphicTextBox(x1: number, y1: number, x2: number, y2: number, value: string, layer: string): string | null {
-		if (!this.canAddBoardGraphic() || !value.trim() || x1 === x2 || y1 === y2) return null;
+	addBoardGraphicTextBox(
+		x1: number, y1: number, x2: number, y2: number, value: string, layer: string): string | null {
+		if (!this.canAddBoardGraphic() || !value.trim() || x1 === x2 || y1 === y2) {
+			return null;
+		}
 		this.pushUndoSnapshot('Draw text box');
 		const textBox = new KicadElementGrTextBox(value);
 		textBox.setStartEnd(Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2));
@@ -1454,6 +2775,106 @@ export class KicadRenderSession {
 		}
 		const element: any = this.scene.hitTestItems.find(item => item.id === hit.id)?.element;
 		return typeof element?.getNetId === 'function' ? element.getNetId() : null;
+	}
+
+	/** Looks up a net's name from the board's own root-level `(net id name)`
+	 *  table — the router needs net NAMES (not just ids) to resolve a
+	 *  net-class via NetClassResolver, since `net_settings` in the
+	 *  `.kicad_pro` keys everything by name. */
+	netNameForId(netId: number | null): string | null {
+		if (netId === null || this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return null;
+		}
+		const entry = this.boardRoot.rootElement.findChildrenByClass(KicadElementNet)
+			.find((net: KicadElementNet) => net.id === netId);
+		return entry?.netName ?? null;
+	}
+
+	/** Nearest ratsnest airwire ENDPOINT (an unrouted pad's exact world
+	 *  position) within `toleranceWorld` of `worldPos` — lets the route tool
+	 *  start a route by clicking near (not exactly on) an unconnected pad,
+	 *  snapping to its precise center and inheriting its net, matching real
+	 *  KiCad's ratsnest-driven routing entry point. */
+	nearestRatsnestPoint(worldPos: Vec2, toleranceWorld: number): { point: Vec2; netId: number } | null {
+		if (this.documentType !== 'board') {
+			return null;
+		}
+		let best: { point: Vec2; netId: number; dist: number } | null = null;
+		for (const line of this.ratsnestLines) {
+			for (const endpoint of [line.from, line.to]) {
+				const dist = Math.hypot(endpoint.x - worldPos.x, endpoint.y - worldPos.y);
+				if (dist <= toleranceWorld && (!best || dist < best.dist)) {
+					best = { point: new Vec2(endpoint.x, endpoint.y), netId: line.netId, dist };
+				}
+			}
+		}
+		return best ? { point: best.point, netId: best.netId } : null;
+	}
+
+	/** Nearest existing-copper connection point (pad/via center, or a track
+	 *  segment's endpoint) within `toleranceWorld` of `worldPos` — real
+	 *  KiCad's router always snaps a click to the nearest such anchor rather
+	 *  than routing from wherever inside a pad's outline was actually
+	 *  clicked. Pad/via anchors use the painted shape's own bbox center
+	 *  (exact for circular pads/vias, and exact for the common centered
+	 *  rect/roundrect/oval pad case). Distinct
+	 *  from nearestRatsnestPoint: that one only reports UNROUTED airwire
+	 *  endpoints; this reports any real copper, routed or not, which is what
+	 *  a click mid-route (continuing onto a target pad, or snapping onto an
+	 *  already-placed via/track corner) needs.
+	 *
+	 *  `netFilter`, when given a real net id, restricts candidates to that
+	 *  net (net-less items still match — same "unassigned is always
+	 *  compatible" rule RouterNode's collision skip uses). Real KiCad's
+	 *  router only magnetizes onto anchors compatible with the net actually
+	 *  being routed — pass this once a route has an established net (i.e.
+	 *  every anchor-snap after the route's start point) so the cursor can't
+	 *  snap onto, and a click can't accidentally land a corner on, a pad
+	 *  belonging to a different net. Omit it only for the very first click
+	 *  of a route, which is what DETERMINES the net in the first place.
+	 *
+	 *  `width`, populated only for `kind: 'track'`, is that segment's own
+	 *  copper width — real KiCad's "use existing track width" toolbar
+	 *  toggle (BoardPointerController's `useConnectedTrackWidth`) reads it
+	 *  to continue a route at the width of whatever track it's snapping
+	 *  onto, instead of the selected default. */
+	nearestAnchorPoint(worldPos: Vec2, toleranceWorld: number, netFilter?: number | null): {
+		point: Vec2;
+		netId: number | null;
+		kind: 'pad' | 'via' | 'track';
+		width?: number;
+	} | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		let best: { point: Vec2; netId: number | null; kind: 'pad' | 'via' | 'track'; width?: number; dist: number } | null = null;
+		const consider = (x: number, y: number, netId: number | null, kind: 'pad' | 'via' | 'track', width?: number) => {
+			if (netFilter != null && netId !== null && netId !== netFilter) {
+				return;
+			}
+			const dist = Math.hypot(x - worldPos.x, y - worldPos.y);
+			if (dist <= toleranceWorld && (!best || dist < best.dist)) {
+				best = { point: new Vec2(x, y), netId, kind, width, dist };
+			}
+		};
+		for (const item of this.scene.hitTestItems) {
+			if (item.kind === 'pad' || item.kind === 'via') {
+				const { x, y, w, h } = item.bbox;
+				consider(x + w / 2, y + h / 2, item.netId ?? null, item.kind);
+			}
+			else if (item.kind === 'track' && item.shape.type === 'segment') {
+				consider(item.shape.x1, item.shape.y1, item.netId ?? null, 'track', item.shape.width);
+				consider(item.shape.x2, item.shape.y2, item.netId ?? null, 'track', item.shape.width);
+			}
+		}
+		return best;
+	}
+
+	/** Public counterpart to hitTestToleranceWorld — the route tool's
+	 *  ratsnest-snap radius should track the same zoom-derived, comfortable-
+	 *  at-any-zoom pixel tolerance every other click target already uses. */
+	get pickToleranceWorld(): number {
+		return this.hitTestToleranceWorld();
 	}
 
 	/** Resolves the schematic connection name for a selected paint item id.
@@ -1529,7 +2950,12 @@ export class KicadRenderSession {
 		}
 	}
 
-	private wireSegmentForItem(item: SchPaintedItem | null | undefined): { x1: number; y1: number; x2: number; y2: number } | null {
+	private wireSegmentForItem(item: SchPaintedItem | null | undefined): {
+		x1: number;
+		y1: number;
+		x2: number;
+		y2: number
+	} | null {
 		if (!item || (item.kind !== 'wire' && item.kind !== 'bus')) {
 			return null;
 		}
@@ -1537,7 +2963,8 @@ export class KicadRenderSession {
 		if (!shape || shape.type !== 'segment') {
 			return null;
 		}
-		if (typeof shape.x1 !== 'number' || typeof shape.y1 !== 'number' || typeof shape.x2 !== 'number' || typeof shape.y2 !== 'number') {
+		if (typeof shape.x1 !== 'number' || typeof shape.y1 !== 'number' || typeof shape.x2 !== 'number'
+			|| typeof shape.y2 !== 'number') {
 			return null;
 		}
 		return { x1: shape.x1, y1: shape.y1, x2: shape.x2, y2: shape.y2 };
@@ -1554,7 +2981,7 @@ export class KicadRenderSession {
 			}
 			return {
 				x: item.bbox.x + item.bbox.w / 2,
-				y: item.bbox.y + item.bbox.h / 2,
+				y: item.bbox.y + item.bbox.h / 2
 			};
 		}
 		if (item.kind === 'pin') {
@@ -1573,7 +3000,7 @@ export class KicadRenderSession {
 		if (item.kind === 'symbol') {
 			return {
 				x: item.bbox.x + item.bbox.w / 2,
-				y: item.bbox.y + item.bbox.h / 2,
+				y: item.bbox.y + item.bbox.h / 2
 			};
 		}
 		return { x: item.bbox.x, y: item.bbox.y };
@@ -1603,7 +3030,8 @@ export class KicadRenderSession {
 				if (!ref) {
 					return;
 				}
-				const { number } = typeof candidate.element.getPin === 'function' ? candidate.element.getPin() : { number: '' };
+				const { number } = typeof candidate.element.getPin === 'function' ? candidate.element.getPin() :
+					{ number: '' };
 				if (!number) {
 					return;
 				}
@@ -1627,10 +3055,13 @@ export class KicadRenderSession {
 			}
 		};
 
-		const pointsClose = (x1: number, y1: number, x2: number, y2: number) => Math.hypot(x1 - x2, y1 - y2) <= connectTolerance;
-		const itemTouchesSegment = (candidate: SchPaintedItem, segment: { x1: number; y1: number; x2: number; y2: number }) => {
+		const pointsClose = (x1: number, y1: number, x2: number, y2: number) => Math.hypot(x1 - x2, y1 - y2)
+			<= connectTolerance;
+		const itemTouchesSegment = (
+			candidate: SchPaintedItem, segment: { x1: number; y1: number; x2: number; y2: number }) => {
 			const anchor = this.pointForAttachedItem(candidate);
-			return distanceToSegment(anchor.x, anchor.y, segment.x1, segment.y1, segment.x2, segment.y2) <= attachTolerance;
+			return distanceToSegment(anchor.x, anchor.y, segment.x1, segment.y1, segment.x2, segment.y2)
+				<= attachTolerance;
 		};
 
 		while (queue.length) {
@@ -1646,7 +3077,8 @@ export class KicadRenderSession {
 					}
 					const otherSegment = this.wireSegmentForItem(candidate);
 					if (otherSegment) {
-						const connected = pointsClose(currentSegment.x1, currentSegment.y1, otherSegment.x1, otherSegment.y1)
+						const connected = pointsClose(
+								currentSegment.x1, currentSegment.y1, otherSegment.x1, otherSegment.y1)
 							|| pointsClose(currentSegment.x1, currentSegment.y1, otherSegment.x2, otherSegment.y2)
 							|| pointsClose(currentSegment.x2, currentSegment.y2, otherSegment.x1, otherSegment.y1)
 							|| pointsClose(currentSegment.x2, currentSegment.y2, otherSegment.x2, otherSegment.y2);
@@ -1655,7 +3087,8 @@ export class KicadRenderSession {
 						}
 						continue;
 					}
-					if (itemTouchesSegment(candidate, currentSegment) && !visited.has(candidate.id) && !queue.includes(candidate)) {
+					if (itemTouchesSegment(candidate, currentSegment) && !visited.has(candidate.id) && !queue.includes(
+						candidate)) {
 						addCandidateName(candidate);
 					}
 				}
@@ -1842,7 +3275,7 @@ export class KicadRenderSession {
 					continue;
 				}
 				const nearStart = Math.hypot(current.x - wshape.x1, current.y - wshape.y1) <= WIRE_SNAP;
-				const nearEnd   = Math.hypot(current.x - wshape.x2, current.y - wshape.y2) <= WIRE_SNAP;
+				const nearEnd = Math.hypot(current.x - wshape.x2, current.y - wshape.y2) <= WIRE_SNAP;
 				if (nearStart || nearEnd) {
 					visited.add(wire.id);
 					ids.add(wire.id);
@@ -2096,7 +3529,9 @@ export class KicadRenderSession {
 		this.documentType = 'board';
 		const t0 = performance.now();
 		const parser = new KicadParser();
-		const rootElement = parser.parse(text);
+		const rootElement = parser.parse(repairLegacyMalformedZoneText(text));
+		this.repairMalformedBoardZoneOutlines(rootElement);
+		this.repairDetachedBoardZoneFields(rootElement);
 		const parseMs = performance.now() - t0;
 		const boardRoot = { rootElement };
 		this.boardRoot = boardRoot;
@@ -2105,10 +3540,32 @@ export class KicadRenderSession {
 		this.boardDrillPlaceOrigin = readBoardOrigin(setup, 'aux_axis_origin');
 
 		const t1 = performance.now();
+		const previousLayerState = this.layerState;
 		this.scene = this.painter.build(boardRoot);
 		this.ratsnestLines = buildBoardRatsnest(this.scene);
 		const buildMs = performance.now() - t1;
 		this.layerState = defaultLayerState(this.scene.layersPresent);
+		// preserveView reloads the SAME document (undo/redo, resyncBoardFromAst
+		// after an external AST edit) rather than opening a different file — the
+		// user's Appearance panel choices (e.g. a hidden F.Fab, sourced from the
+		// project's .kicad_prl on initial open) must survive that reload instead
+		// of silently reverting to defaults. Exact same merge
+		// rebuildBoardSceneIfPending already does for every ordinary structural
+		// edit's own scene rebuild (see its doc comment) — this was the one
+		// reload path that had been missed, which is why undo specifically was
+		// observed resurrecting hidden layers: every other edit already went
+		// through the incremental path that preserves this correctly. A fresh
+		// file open (preserveView unset) deliberately skips this — there's no
+		// "previous" state from an unrelated file worth keeping.
+		if (options?.preserveView) {
+			for (const [layer, state] of this.layerState) {
+				const previous = previousLayerState.get(layer);
+				if (previous) {
+					state.visible = previous.visible;
+					state.opacity = previous.opacity;
+				}
+			}
+		}
 		this.geometryDirty = true;
 		this.selectedIds = new Set();
 		// A fresh parse means every element reference held elsewhere (undo/
@@ -2127,6 +3584,71 @@ export class KicadRenderSession {
 		this.scheduleRender();
 
 		return { parseMs, buildMs, layersPresent: this.scene.layersPresent };
+	}
+
+	/** Board-side twin of resyncSchematicFromAst — same reason: external
+	 *  callers (e.g. Update PCB from Schematic) that mutate the currently-
+	 *  loaded board's AST directly must resync this session's live text
+	 *  afterward or SessionController.saveProject()'s re-derive-from-
+	 *  getBoardText() step silently discards the edit. */
+	async resyncBoardFromAst(text: string): Promise<void> {
+		await this.loadBoardText(text, { preserveView: true });
+	}
+
+	/**
+	 * Lightweight footprint-only preview loader — parses a standalone
+	 * `(footprint ...)` .kicad_mod text and paints just that footprint's
+	 * own pads/silkscreen/fab/courtyard, skipping the full board pipeline
+	 * loadBoardText() runs (tracks/zones/vias/ratsnest — all meaningless
+	 * for one footprint out of board context). Mirrors how SymbolChooser's
+	 * own preview injects a bare symbol into a session without a full
+	 * schematic document behind it. Returns false (session left untouched)
+	 * if the text doesn't parse to a real footprint; the caller is
+	 * responsible for calling render() afterward (this only loads/fits,
+	 * matching SymbolChooser.renderPreview()'s own synchronous-render
+	 * pattern rather than this class's normal scheduleRender() debounce,
+	 * since a chooser's preview canvas isn't part of the main render loop).
+	 */
+	loadFootprintPreviewText(sourceText: string): boolean {
+		const parsedFootprint = new KicadParser().parse(sourceText);
+		const footprint = parsedFootprint.name === 'footprint'
+			? parsedFootprint
+			: parsedFootprint.children.find((child: any) => child.name === 'footprint');
+		if (!footprint) {
+			return false;
+		}
+		// A minimal real layer table — not a real board document, just
+		// enough for BoardPainter.getGlobalLayerNames() to resolve a pad's
+		// "*.Cu"/"*.Mask" wildcard layers correctly (the same layer set
+		// every real board ships) — buildFootprintPreviewItems only reads
+		// this for that lookup.
+		const layersDoc = '(kicad_pcb (layers '
+			+ '(0 "F.Cu" signal) (31 "B.Cu" signal) (34 "B.Paste" user) (35 "F.Paste" user) '
+			+ '(36 "B.SilkS" user) (37 "F.SilkS" user) (38 "B.Mask" user) (39 "F.Mask" user) '
+			+ '(44 "Edge.Cuts" user) (46 "B.CrtYd" user) (47 "F.CrtYd" user) (48 "B.Fab" user) (49 "F.Fab" user)))';
+		const fakeBoard = { rootElement: new KicadParser().parse(layersDoc) };
+
+		const items = this.painter.buildFootprintPreviewItems(fakeBoard, footprint);
+		const layerBuckets = new Map<string, PaintedItem[]>();
+		for (const item of items) {
+			(layerBuckets.get(item.layer) ?? layerBuckets.set(item.layer, []).get(item.layer)!).push(item);
+		}
+		this.documentType = 'board';
+		this.boardRoot = fakeBoard;
+		this.scene = {
+			layersPresent: [...layerBuckets.keys()],
+			layerBuckets,
+			hitTestItems: items,
+			zoneFills: [],
+			copperLayerStack: ['F.Cu', 'B.Cu'],
+			declaredLayers: [...layerBuckets.keys()]
+		};
+		this.ratsnestLines = [];
+		this.layerState = defaultLayerState(this.scene.layersPresent);
+		this.geometryDirty = true;
+		this.selectedIds = new Set();
+		this.fitToItems(this.scene.hitTestItems);
+		return true;
 	}
 
 	/**
@@ -2154,10 +3676,69 @@ export class KicadRenderSession {
 			return '';
 		}
 		const root = this.boardRoot.rootElement;
+		this.repairMalformedBoardZoneOutlines(root);
+		this.repairDetachedBoardZoneFields(root);
 		if (typeof root.write === 'function') {
 			return String(root.write());
 		}
 		return '';
+	}
+
+	/** Repairs the anonymous zone-outline group emitted by early KiOnline
+	 * builds: `(( pts ...))`. KiCad itself rejects it, but our permissive
+	 * S-expression reader can still recover every `(xy ...)` point. Repair
+	 * during load and before serialization so refreshing an existing project
+	 * genuinely upgrades its stored board rather than preserving corruption. */
+	private repairMalformedBoardZoneOutlines(root: any): void {
+		const zones = root?.findChildrenByClass?.(KicadElementZone) as KicadElementZone[] | undefined;
+		if (!zones?.length) return;
+		for (const zone of zones) {
+			if (zone.getPolygon().length > 0) continue;
+			const malformed = zone.children.find(child => child.name === '('
+				&& child.attributes[0]?.value === 'pts');
+			if (!malformed) continue;
+			const points = malformed.children
+				.filter(child => child.name === 'xy')
+				.map(child => ({ x: Number(child.attributes[0]?.value), y: Number(child.attributes[1]?.value) }))
+				.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+			if (points.length < 3) continue;
+			const replacement = new KicadElementPolygon();
+			replacement.setPoints(points);
+			replacement.parent = zone;
+			replacement.rootLevel = malformed.rootLevel;
+			const index = zone.children.indexOf(malformed);
+			zone.children.splice(index, 1, replacement);
+		}
+	}
+
+	/** Reattaches zone fields that an older permissive parse left at the
+	 * board root after an outline's premature close. This also fixes an
+	 * already-loaded board at export time, where the raw-text migration cannot
+	 * run again. A real board-level `(layers ...)` table never immediately
+	 * follows an outline-only zone, so requiring that first detached field
+	 * keeps the recovery deliberately narrow. */
+	private repairDetachedBoardZoneFields(root: any): void {
+		const children = root?.children as any[] | undefined;
+		if (!children) return;
+		const zoneFieldNames = new Set([
+			'net', 'net_name', 'layer', 'layers', 'property', 'tstamp', 'uuid', 'hatch', 'priority',
+			'connect_pads', 'min_thickness', 'filled_areas_thickness', 'fill', 'placement', 'keepout',
+			'polygon', 'filled_polygon', 'fill_segments', 'attr', 'locked', 'name'
+		]);
+		for (let index = 0; index < children.length; index++) {
+			const zone = children[index];
+			if (!(zone instanceof KicadElementZone) && zone?.name !== 'zone') continue;
+			const hasOutline = zone.children?.some((child: any) => child.name === 'polygon');
+			const hasLayer = zone.children?.some((child: any) => child.name === 'layer' || child.name === 'layers');
+			const firstDetached = children[index + 1];
+			if (!hasOutline || hasLayer || (firstDetached?.name !== 'layer' && firstDetached?.name !== 'layers')) {
+				continue;
+			}
+			while (index + 1 < children.length && zoneFieldNames.has(children[index + 1]?.name)) {
+				const [field] = children.splice(index + 1, 1);
+				zone.addChild(field);
+			}
+		}
 	}
 
 	/**
@@ -2193,6 +3774,19 @@ export class KicadRenderSession {
 		this.scheduleRender();
 
 		return { parseMs, buildMs, layersPresent: this.schScene.layersPresent };
+	}
+
+	/** External callers (e.g. the Symbol Fields Table) that mutate the AST of
+	 *  the CURRENTLY-loaded schematic directly, bypassing this session's own
+	 *  edit methods, must resync this session's live text afterward — the
+	 *  save path (SessionController.saveProject()) re-derives the open
+	 *  sheet's rootElement from getSchematicText(), so an external mutation
+	 *  invisible to that text would otherwise be silently discarded on save.
+	 *  preserveView keeps the camera from jumping, matching the same
+	 *  {...this.schematicDocInfo, preserveView: true} pattern this class
+	 *  already uses internally for undo/redo. */
+	async resyncSchematicFromAst(text: string): Promise<void> {
+		await this.loadSchematicText(text, { ...this.schematicDocInfo, preserveView: true });
 	}
 
 	/**
@@ -2256,6 +3850,29 @@ export class KicadRenderSession {
 		}
 		this.boardDirtyFootprints.add(footprint);
 		this.scheduleRender();
+	}
+
+	/** Rotate/flip's counterpart to scheduleFootprintRebuild — those commit
+	 *  through commitAstMutation()'s full boardStructureDirty rebuild
+	 *  unconditionally, which re-adds the footprint to the static scene at
+	 *  its new orientation while drawBoardDragPreview() keeps drawing the
+	 *  stale pre-rotation preview on top for the rest of the gesture (the
+	 *  preview is only refreshed by updateBoardDragPreview(), driven by
+	 *  mousemove, not by a mid-drag keypress) — two copies on screen at
+	 *  once. If a drag-preview owns this footprint, refresh its preview
+	 *  items in place (same builder beginBoardDragPreview seeds from) so it
+	 *  reflects the rotation immediately and the static scene is left
+	 *  alone until the drag ends; otherwise fall back to the normal
+	 *  incremental rebuild. */
+	private rebuildAfterFootprintGeometryEdit(footprint: any): void {
+		if (this.dragPreviewFootprints.has(footprint)) {
+			this.dragPreviewFootprints.set(
+				footprint, this.painter.buildFootprintPreviewItems(this.boardRoot, footprint));
+			this.geometryDirty = true;
+			this.scheduleRender();
+			return;
+		}
+		this.scheduleFootprintRebuild(footprint);
 	}
 
 	private rebuildSchScene(): void {
@@ -2524,6 +4141,60 @@ export class KicadRenderSession {
 		this.scheduleRender();
 	}
 
+	/** Segment ids currently pulled out of the static scene by
+	 *  beginTrackDragPreview, for endTrackDragPreview to restore. */
+	private hiddenTrackDragIds = new Set<string>();
+
+	/** Starts a track-body drag (BoardPointerController's 'track-body'
+	 *  gesture): removes the assembled line's own segments from the static
+	 *  scene, the same "hide the original, draw a live copy separately"
+	 *  idea beginBoardDragPreview uses for footprints (see its doc comment)
+	 *  — simpler here since there's no per-frame preview-items list to
+	 *  maintain: BoardPointerController already draws the in-progress shape
+	 *  through the ordinary route-style editPreview overlay
+	 *  (setEditPreview), so this only needs a hide/restore pair, not a
+	 *  redraw-every-frame path. Without this, the untouched original
+	 *  segments — still selected (this gesture arms right after a
+	 *  session.select() call), so drawn in the selection-highlight color —
+	 *  would sit visibly in place under the moving live preview for the
+	 *  whole drag, reading as the selection itself fighting the drag. Call
+	 *  endTrackDragPreview() once on release (commit or plain click),
+	 *  exactly like beginBoardDragPreview/endBoardDragPreview. */
+	beginTrackDragPreview(paintIds: Iterable<string>): void {
+		if (this.documentType !== 'board' || !this.scene) {
+			return;
+		}
+		const ids = new Set(paintIds);
+		if (ids.size === 0) {
+			return;
+		}
+		this.painter.removeItemsByIds(this.scene, ids);
+		for (const id of ids) {
+			this.hiddenTrackDragIds.add(id);
+		}
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	/** Ends an active track-body drag-preview. A full board scene rebuild
+	 *  (commitAstMutation's own path) always naturally restores whatever
+	 *  beginTrackDragPreview hid, since removeItemsByIds only ever mutated
+	 *  the in-memory scene, never the AST — this covers BOTH the "drag
+	 *  committed" case (dragTrackLine already queued its own rebuild; the
+	 *  fresh scene reflects the new segments, not the hidden old ones
+	 *  either way) and the "plain click, nothing moved" case (nothing else
+	 *  would otherwise trigger a rebuild, so the hidden originals would
+	 *  otherwise just stay gone). Safe to call with nothing hidden (no-op),
+	 *  matching endBoardDragPreview's contract. */
+	endTrackDragPreview(): void {
+		if (this.hiddenTrackDragIds.size === 0) {
+			return;
+		}
+		this.hiddenTrackDragIds.clear();
+		this.boardStructureDirty = true;
+		this.scheduleRender();
+	}
+
 	/** Full-board ratsnest recompute — the safety net a drag's own
 	 *  incremental refreshRatsnestForFootprints() shouldn't normally need,
 	 *  but structural edits (delete/route/zone edit/...) already get one for
@@ -2547,12 +4218,43 @@ export class KicadRenderSession {
 	 *  reads as 'imported' (whatever the file itself carried). */
 	protected zoneFillState = new Map<string, 'imported' | 'live' | 'cleared'>();
 
+	/** Accepts either a bare zone uuid (callers with a real zone reference
+	 *  already in hand, e.g. fillZone) or a zone hit-test paint id — BoardPainter.buildZone
+	 *  gives every zone's outline/fill PaintedItems a composite id
+	 *  (`${zoneUuid}:${layer}:outline` / `:fill:${idx}`) so per-layer/per-fill
+	 *  items stay unique, but a UUID itself never contains a colon, so
+	 *  stripping everything from the first ':' recovers the real uuid either
+	 *  way. Without this, double-click-to-edit (which hands this method the
+	 *  raw HitResult.id) could never resolve a zone at all. */
 	protected findZoneByUuid(uuid: string): KicadElementZone | null {
 		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
 			return null;
 		}
+		const bareUuid = uuid.includes(':') ? uuid.slice(0, uuid.indexOf(':')) : uuid;
 		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
-		return zones.find(zone => zone.getUuid() === uuid) ?? null;
+		return zones.find(zone => zone.getUuid() === bareUuid) ?? null;
+	}
+
+	/** The point editor is deliberately shared by graphic polygons, copper
+	 * zones, and rule areas. Their storage differs, but all expose one closed
+	 * ring of editable points. */
+	private findBoardPolygonByPaintId(paintId: string): {
+		id: string; points: { x: number; y: number }[];
+		setPoints(points: { x: number; y: number }[]): void;
+	} | null {
+		const zone = this.findZoneByUuid(paintId);
+		if (zone) {
+			return { id: zone.getUuid() ?? paintId, points: zone.getPolygon(), setPoints: points => zone.setPolygon(points) };
+		}
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return null;
+		}
+		const polygon = (this.boardRoot.rootElement.findChildrenByClass(KicadElementGrPoly) as KicadElementGrPoly[])
+			.find(item => item.getUuid() === paintId);
+		if (!polygon) {
+			return null;
+		}
+		return { id: polygon.getUuid() ?? paintId, points: polygon.getPoints(), setPoints: points => polygon.setPoints(points) };
 	}
 
 	/** Every board-wide rule area whose `(keepout (copperpour not_allowed))`
@@ -2565,7 +4267,8 @@ export class KicadRenderSession {
 	 *  filled area", zone_filler.cpp), so callers pass every zone on the
 	 *  board, not just the ones being filled this call. */
 	private keepoutZoneInputs(allZones?: readonly KicadElementZone[]): KeepoutZoneInput[] {
-		const zones = allZones ?? (this.boardRoot?.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[] ?? []);
+		const zones = allZones ?? (this.boardRoot?.rootElement.findChildrenByClass(
+			KicadElementZone) as KicadElementZone[] ?? []);
 		return zones
 			.filter(zone => zone.isRuleArea() && zone.getDoNotAllowZoneFills() && zone.getPolygon().length >= 3)
 			.map(zone => ({ outlinePoints: zone.getPolygon(), layers: zone.getLayers() }));
@@ -2592,7 +4295,7 @@ export class KicadRenderSession {
 	 */
 	async fillZone(
 		zoneUuid: string, runJobs: ZoneFillExecutor, onProgress?: (done: number, total: number) => void,
-		designSettings?: ZoneFillDesignSettings,
+		designSettings?: ZoneFillDesignSettings
 	): Promise<boolean> {
 		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
 			return false;
@@ -2611,11 +4314,19 @@ export class KicadRenderSession {
 		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardRoot);
 		const copperLayers = resolveCopperLayers(this.scene);
 		const extraExclusionsByLayer = buildEdgeExclusionsByLayer(
-			this.boardRoot, copperLayers, this.keepoutZoneInputs(), designSettings?.copperEdgeClearanceMm,
+			this.boardRoot, copperLayers, this.keepoutZoneInputs(), designSettings?.copperEdgeClearanceMm
 		);
 		const jobs = buildZoneFillJobs(
-			[{ uuid: zoneUuid, outlinePoints: outline, netId: zone.getNetId(), layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings) }],
-			this.scene, boardOutlineNm, extraExclusionsByLayer,
+			[
+				{
+					uuid: zoneUuid,
+					outlinePoints: outline,
+					netId: zone.getNetId(),
+					layers: zone.getLayers(),
+					clearanceMm: resolveZoneClearanceMm(zone, designSettings)
+				}
+			],
+			this.scene, boardOutlineNm, extraExclusionsByLayer
 		);
 		const results = await runJobs(jobs, onProgress);
 
@@ -2649,13 +4360,293 @@ export class KicadRenderSession {
 		return true;
 	}
 
+	/** Every field the Copper Zone Properties dialog collects — one draft
+	 *  object shared by both "draw a new zone" and "edit an existing one",
+	 *  applied via the exact same KicadElementZone setters either way
+	 *  (applyZoneDraft below) so the two flows can't drift apart. netId 0
+	 *  is real KiCad's own "<no net>" floating-copper-pour representation,
+	 *  not a sentinel this app invented. */
+	getBoardNets(): { id: number; name: string }[] {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return [];
+		}
+		return (this.boardRoot.rootElement.findChildrenByClass(KicadElementNet) as KicadElementNet[])
+			.map(net => ({ id: net.id, name: net.netName ?? '' }))
+			.sort((a, b) => a.id - b.id);
+	}
+
+	/** Reads an existing zone's current values into the same ZoneDraft shape
+	 *  createZoneFromOutline/updateZoneProperties consume — the Copper Zone
+	 *  Properties dialog's "edit" path pre-fills its fields from this
+	 *  instead of the dialog inventing its own defaults for an
+	 *  already-placed zone. */
+	getZoneDraft(paintId: string): ZoneDraft | null {
+		const zone = this.findZoneByUuid(paintId);
+		if (!zone) {
+			return null;
+		}
+		const hatch = zone.getHatch();
+		const pad = zone.getThermalRelief();
+		const smoothing = zone.getCornerSmoothing();
+		const island = zone.getIslandRemovalMode();
+		return {
+			layers: zone.getLayers(),
+			netId: zone.getNetId() ?? 0,
+			netName: zone.getNetName() ?? '',
+			name: zone.getZoneName(),
+			locked: zone.isLocked(),
+			clearanceMm: zone.getClearance(),
+			minThicknessMm: zone.getMinThickness(),
+			padConnection: zone.getPadConnectionType(),
+			thermalGapMm: pad.gapMm,
+			thermalSpokeWidthMm: pad.spokeWidthMm,
+			cornerSmoothing: smoothing.type,
+			cornerRadiusMm: smoothing.radiusMm,
+			islandRemoval: island.mode,
+			islandAreaMinMm: island.areaMinMm,
+			priority: zone.getPriority(),
+			hatchStyle: hatch.style,
+			hatchPitchMm: hatch.pitchMm
+		};
+	}
+
+	private applyZoneDraft(zone: KicadElementZone, draft: ZoneDraft): void {
+		zone.setLayers(draft.layers);
+		zone.setNet(draft.netId, draft.netName);
+		zone.setZoneName(draft.name);
+		zone.setLocked(draft.locked);
+		zone.setClearance(draft.clearanceMm);
+		zone.setMinThickness(draft.minThicknessMm);
+		zone.setPadConnectionType(draft.padConnection);
+		zone.setThermalRelief(draft.thermalGapMm, draft.thermalSpokeWidthMm);
+		zone.setCornerSmoothing(draft.cornerSmoothing, draft.cornerRadiusMm);
+		zone.setIslandRemovalMode(draft.islandRemoval, draft.islandAreaMinMm);
+		zone.setPriority(draft.priority);
+		zone.setHatch(draft.hatchStyle, draft.hatchPitchMm);
+	}
+
+	/** Commits a freshly click-drawn outline as a new copper zone — the
+	 *  polygon a zone-tool gesture collected, plus whatever the Copper Zone
+	 *  Properties dialog's OK button gathered. Caller still owns actually
+	 *  computing the fill (fillZone) once this returns a uuid — creating the
+	 *  zone and running Clipper2 against it are kept separate exactly like
+	 *  every other zone-fill entry point (fillZone/fillAllZones) already
+	 *  does, since the fill is the slow, worker-hosted half. */
+	createZoneFromOutline(points: readonly { x: number; y: number }[], draft: ZoneDraft): string | null {
+		if (!this.canAddBoardGraphic() || points.length < 3 || draft.layers.length === 0) {
+			return null;
+		}
+		this.pushUndoSnapshot('Draw zone');
+		const zone = new KicadElementZone();
+		this.applyZoneDraft(zone, draft);
+		zone.setUuid();
+		// Polygon comes after the zone settings in KiCad's canonical writer
+		// order. More importantly, setPolygon guarantees the grammar-bearing
+		// `(polygon (pts ...))` wrapper rather than an anonymous group.
+		zone.setPolygon(points.map(point => ({ x: point.x, y: point.y })));
+		this.boardRoot!.rootElement.addChild(zone);
+		this.commitAstMutation();
+		return zone.getUuid() ?? null;
+	}
+
+	/** Re-applies every Copper Zone Properties field to an already-placed
+	 *  zone (the dialog's "edit" path, reached by double-clicking an
+	 *  existing zone) — outline geometry is untouched. Real KiCad boards
+	 *  aren't required to carry a zone uuid (see fillAllZones' own doc
+	 *  comment on the same gap); an edit is the natural moment to backfill
+	 *  one so this zone has a stable, collision-free fillZone() key from
+	 *  here on. */
+	updateZoneProperties(paintId: string, draft: ZoneDraft): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return false;
+		}
+		const zone = this.findZoneByUuid(paintId);
+		if (!zone) {
+			return false;
+		}
+		this.pushUndoSnapshot('Edit zone properties');
+		this.applyZoneDraft(zone, draft);
+		if (!zone.getUuid()) {
+			zone.setUuid();
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Reads an existing PCB rule area into the same draft shape used by its
+	 * draw and edit dialogs. Rule areas are zones with a `(keepout ...)`
+	 * child, so their outline editing remains shared with copper zones. */
+	getRuleAreaDraft(paintId: string): RuleAreaDraft | null {
+		const zone = this.findZoneByUuid(paintId);
+		if (!zone?.isRuleArea()) {
+			return null;
+		}
+		const hatch = zone.getHatch();
+		return {
+			layers: zone.getLayers(), name: zone.getZoneName(), locked: zone.isLocked(),
+			hatchStyle: hatch.style, hatchPitchMm: hatch.pitchMm,
+			keepout: zone.getKeepoutSettings(),
+		};
+	}
+
+	private applyRuleAreaDraft(zone: KicadElementZone, draft: RuleAreaDraft): void {
+		zone.setLayers(draft.layers);
+		zone.setZoneName(draft.name);
+		zone.setLocked(draft.locked);
+		zone.setHatch(draft.hatchStyle, draft.hatchPitchMm);
+		zone.setKeepoutSettings(draft.keepout);
+	}
+
+	createRuleAreaFromOutline(points: readonly { x: number; y: number }[], draft: RuleAreaDraft): string | null {
+		if (!this.canAddBoardGraphic() || points.length < 3 || draft.layers.length === 0) {
+			return null;
+		}
+		this.pushUndoSnapshot('Draw rule area');
+		const zone = new KicadElementZone();
+		this.applyRuleAreaDraft(zone, draft);
+		zone.setUuid();
+		zone.setPolygon(points.map(point => ({ x: point.x, y: point.y })));
+		this.boardRoot!.rootElement.addChild(zone);
+		this.commitAstMutation();
+		return zone.getUuid() ?? null;
+	}
+
+	updateRuleAreaProperties(paintId: string, draft: RuleAreaDraft): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+			return false;
+		}
+		const zone = this.findZoneByUuid(paintId);
+		if (!zone?.isRuleArea()) {
+			return false;
+		}
+		this.pushUndoSnapshot('Edit rule area properties');
+		this.applyRuleAreaDraft(zone, draft);
+		if (!zone.getUuid()) {
+			zone.setUuid();
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Corner + edge-midpoint anchors for each editable PCB closed polygon:
+	 *  graphics, copper zones, and rule areas. Drawn whenever one is selected
+	 *  in Edit mode, and hit-tested by BoardPointerController to start a
+	 *  corner-move or edge-parallel-drag gesture — mirrors real KiCad's
+	 *  PCB_POINT_EDITOR (pcb_point_editor.cpp) zone-outline behavior: a
+	 *  square handle at each existing vertex (drag moves just that vertex),
+	 *  a round handle at each edge midpoint (drag shifts BOTH that edge's
+	 *  endpoints by the same delta, sliding the whole edge sideways in
+	 *  parallel — real KiCad's EDIT_LINE::SetPosition; it does NOT insert a
+	 *  new corner — that's a separate "Create Corner" board context-menu
+	 *  action, see nearestBoardPolygonInsertion/insertBoardPolygonPoint).
+	 *  `midpoints[i]` sits between `corners[i]` and
+	 *  `corners[(i+1) % corners.length]` — the outline is always implicitly
+	 *  closed, same as its rendered outline. */
+	getBoardPolygonAnchors(paintId: string): { id: string; corners: Vec2[]; midpoints: Vec2[] } | null {
+		const polygon = this.findBoardPolygonByPaintId(paintId);
+		const points = polygon?.points;
+		if (!polygon || !points || points.length < 2) {
+			return null;
+		}
+		const corners = points.map(point => new Vec2(point.x, point.y));
+		const midpoints = points.map((point, index) => {
+			const next = points[(index + 1) % points.length]!;
+			return new Vec2((point.x + next.x) / 2, (point.y + next.y) / 2);
+		});
+		return { id: polygon.id, corners, midpoints };
+	}
+
+	/** Moves an existing PCB polygon vertex. The caller owns
+	 *  the undo snapshot, pushed once at gesture start like every other
+	 *  drag in this codebase — a whole drag is one undo step, not one per
+	 *  mousemove frame. */
+	moveBoardPolygonPoint(paintId: string, index: number, x: number, y: number): boolean {
+		const polygon = this.findBoardPolygonByPaintId(paintId);
+		if (!polygon || index < 0 || index >= polygon.points.length) {
+			return false;
+		}
+		polygon.setPoints(polygon.points.map((point, pointIndex) => pointIndex === index ? { x, y } : { x: point.x, y: point.y }));
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Shifts an entire PCB polygon edge in parallel by (dx, dy). Mirrors real KiCad's
+	 *  EDIT_LINE::SetPosition (include/tool/edit_points.h), which moves both
+	 *  endpoints by the SAME delta rather than inserting anything. `dx`/`dy`
+	 *  is the delta from the edge's current position (this frame's move
+	 *  minus last frame's, not from the drag's original start point), so
+	 *  repeated calls across one drag gesture accumulate correctly —
+	 *  matches moveBoardPolygonPoint/translateBoardSelection's identical
+	 *  per-frame-delta convention. `edgeIndex` is the edge between
+	 *  points[edgeIndex] and points[(edgeIndex+1) % length]. */
+	moveBoardPolygonEdge(paintId: string, edgeIndex: number, dx: number, dy: number): boolean {
+		const polygon = this.findBoardPolygonByPaintId(paintId);
+		if (!polygon || edgeIndex < 0 || edgeIndex >= polygon.points.length) {
+			return false;
+		}
+		const nextIndex = (edgeIndex + 1) % polygon.points.length;
+		polygon.setPoints(polygon.points.map((point, index) => (index === edgeIndex || index === nextIndex)
+			? { x: point.x + dx, y: point.y + dy } : { x: point.x, y: point.y }));
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Finds where a new corner belongs for the board context menu's
+	 *  "Create Corner" action — the point closest to (x, y) on any polygon
+	 *  EDGES (a projection onto that segment, not the nearest existing
+	 *  vertex), plus which edge it landed on. Mirrors real KiCad's
+	 *  PCB_POINT_EDITOR::addCorner (pcb_point_editor.cpp): scan every
+	 *  segment, keep the nearest, project the cursor onto it. Pass the
+	 *  result straight to insertBoardPolygonPoint. */
+	nearestBoardPolygonInsertion(paintId: string, x: number, y: number): { edgeIndex: number; x: number; y: number } | null {
+		const polygon = this.findBoardPolygonByPaintId(paintId);
+		const points = polygon?.points;
+		if (!polygon || !points || points.length < 2) {
+			return null;
+		}
+		let best: { edgeIndex: number; x: number; y: number; distSq: number } | null = null;
+		for (let index = 0; index < points.length; index++) {
+			const a = points[index]!;
+			const b = points[(index + 1) % points.length]!;
+			const dx = b.x - a.x, dy = b.y - a.y;
+			const lengthSq = dx * dx + dy * dy;
+			const t = lengthSq > 0 ? Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / lengthSq)) : 0;
+			const px = a.x + t * dx, py = a.y + t * dy;
+			const distSq = (x - px) ** 2 + (y - py) ** 2;
+			if (!best || distSq < best.distSq) {
+				best = { edgeIndex: index, x: px, y: py, distSq };
+			}
+		}
+		return best ? { edgeIndex: best.edgeIndex, x: best.x, y: best.y } : null;
+	}
+
+	/** Inserts a new PCB polygon vertex on the edge right after
+	 *  `afterIndex` (0-based — the edge between points[afterIndex] and
+	 *  points[afterIndex+1], wrapping for the closing edge) — the "Create
+	 *  Corner" board context-menu action's mutation half; call
+	 *  nearestBoardPolygonInsertion first to get afterIndex/x/y. Returns the
+	 *  new vertex's index. */
+	insertBoardPolygonPoint(paintId: string, afterIndex: number, x: number, y: number): number | null {
+		const polygon = this.findBoardPolygonByPaintId(paintId);
+		const points = polygon?.points;
+		if (!polygon || !points || afterIndex < 0 || afterIndex >= points.length) {
+			return null;
+		}
+		const insertIndex = afterIndex + 1;
+		const next = points.map(point => ({ x: point.x, y: point.y }));
+		next.splice(insertIndex, 0, { x, y });
+		polygon.setPoints(next);
+		this.commitAstMutation();
+		return insertIndex;
+	}
+
 	/** Fills every zone on the board in one undo step (one worker run
 	 *  covering every zone's jobs, so progress reflects the whole board, not
 	 *  one zone at a time). Returns the count actually filled (zones with
 	 *  fewer than 3 outline points are skipped, same guard as fillZone). */
 	async fillAllZones(
 		runJobs: ZoneFillExecutor, onProgress?: (done: number, total: number) => void,
-		designSettings?: ZoneFillDesignSettings,
+		designSettings?: ZoneFillDesignSettings
 	): Promise<number> {
 		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
 			return 0;
@@ -2670,12 +4661,19 @@ export class KicadRenderSession {
 		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardRoot);
 		const copperLayers = resolveCopperLayers(this.scene);
 		const extraExclusionsByLayer = buildEdgeExclusionsByLayer(
-			this.boardRoot, copperLayers, this.keepoutZoneInputs(zones), designSettings?.copperEdgeClearanceMm,
+			this.boardRoot, copperLayers, this.keepoutZoneInputs(zones), designSettings?.copperEdgeClearanceMm
 		);
-		const zoneInputs = fillable.map(zone => ({
-			uuid: zone.getUuid() ?? '', outlinePoints: zone.getPolygon(), netId: zone.getNetId(),
-			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings),
-		})).filter(z => z.uuid);
+		// Real KiCad zones aren't required to carry a (uuid ...) child — it's
+		// an optional field many exported boards omit — so `getUuid()` alone
+		// isn't a safe job tag here. Use a synthetic per-call id for the
+		// duration of the fill-job/result-regrouping below; it's never
+		// written back onto the zone (setUuid is never called), only used to
+		// match each async job result back to the `fillable[i]` it came from.
+		const jobIds = fillable.map((zone, i) => zone.getUuid() ?? `__zonefill_${ i }`);
+		const zoneInputs = fillable.map((zone, i) => ({
+			uuid: jobIds[i], outlinePoints: zone.getPolygon(), netId: zone.getNetId(),
+			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings)
+		}));
 		const jobs = buildZoneFillJobs(zoneInputs, this.scene, boardOutlineNm, extraExclusionsByLayer);
 		const results = await runJobs(jobs, onProgress);
 
@@ -2684,19 +4682,23 @@ export class KicadRenderSession {
 		}
 		const resultsByZone = new Map<string, { layer: string; points: MmPath }[]>();
 		for (const r of results) {
-			if (!resultsByZone.has(r.zoneUuid)) resultsByZone.set(r.zoneUuid, []);
+			if (!resultsByZone.has(r.zoneUuid)) {
+				resultsByZone.set(r.zoneUuid, []);
+			}
 			resultsByZone.get(r.zoneUuid)!.push({ layer: r.layer, points: r.points });
 		}
 
 		this.pushUndoSnapshot('Fill all zones');
 		let filledCount = 0;
-		for (const zone of fillable) {
-			const uuid = zone.getUuid();
-			if (!uuid) continue;
-			const fill = resultsByZone.get(uuid) ?? [];
+		for (let i = 0; i < fillable.length; i++) {
+			const zone = fillable[i];
+			const fill = resultsByZone.get(jobIds[i]) ?? [];
 			zone.setFilledPolygons(fill);
 			zone.setFilled(fill.length > 0);
-			this.zoneFillState.set(uuid, 'live');
+			const uuid = zone.getUuid();
+			if (uuid) {
+				this.zoneFillState.set(uuid, 'live');
+			}
 			filledCount++;
 		}
 		this.commitAstMutation();
@@ -2788,8 +4790,8 @@ export class KicadRenderSession {
 			redoDepth: this.redoStack.length,
 			undo: this.undoStack.map((text, index) => ({
 				label: this.undoLabels[index] ?? 'Edit',
-				bytes: text.length,
-			})),
+				bytes: text.length
+			}))
 		};
 	}
 
@@ -2962,6 +4964,20 @@ export class KicadRenderSession {
 		return true;
 	}
 
+	/** Read-only lock check for a board hit item — BoardPointerController
+	 *  calls this before committing to a drag gesture (Override locks
+	 *  toolbar checkbox). Duck-typed `isLocked` rather than a class check
+	 *  since Footprint/Zone/Via/Segment/TrackArc each implement it via
+	 *  their own mixin/copy but share no common lockable base; anything
+	 *  else (graphics, text, zones without geometry) simply isn't locked. */
+	isBoardElementLocked(paintId: string): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+			return false;
+		}
+		const element = this.scene.hitTestItems.find(it => it.id === paintId)?.element as { isLocked?(): boolean } | undefined;
+		return !!element?.isLocked?.();
+	}
+
 	/**
 	 * Batch sibling of mutateElementByPaintId for a multi-selection of
 	 * same-kind items — shaped like deleteElements (one undo push, one
@@ -2973,15 +4989,17 @@ export class KicadRenderSession {
 	 * rebuild the scene N times for one logical edit — this pushes once and
 	 * rebuilds once. Returns the count actually mutated (0 means the caller
 	 * should not treat this as a real edit — e.g. skip the undo-adjacent
-	 * UI refresh).
+	 * UI refresh). Dual-mode via activeRoot/activeScene (schematic OR
+	 * board) — e.g. the board context menu's Lock/Unlock action on a
+	 * multi-selection.
 	 */
 	mutateElementsByPaintIds(ids: string[], mutate: (element: any) => void): number {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+		if (!this.activeRoot || !this.activeScene) {
 			return 0;
 		}
 		const elements: any[] = [];
 		for (const id of ids) {
-			const el = this.schScene.hitTestItems.find(it => it.id === id)?.element;
+			const el = this.activeScene.hitTestItems.find(it => it.id === id)?.element;
 			if (el) {
 				elements.push(el);
 			}
@@ -3191,7 +5209,8 @@ export class KicadRenderSession {
 		}
 		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
 		const pin = item?.element;
-		if (!(pin instanceof KicadElementPin) || !(pin.parent instanceof KicadElementSheet) || typeof pin.setOrigin !== 'function') {
+		if (!(pin instanceof KicadElementPin) || !(pin.parent instanceof KicadElementSheet) || typeof pin.setOrigin
+			!== 'function') {
 			return false;
 		}
 		const sheet = pin.parent;
@@ -3205,7 +5224,7 @@ export class KicadRenderSession {
 			{ side: 'top', dist: distanceToSegment(x, y, left, top, right, top) },
 			{ side: 'right', dist: distanceToSegment(x, y, right, top, right, bottom) },
 			{ side: 'bottom', dist: distanceToSegment(x, y, right, bottom, left, bottom) },
-			{ side: 'left', dist: distanceToSegment(x, y, left, bottom, left, top) },
+			{ side: 'left', dist: distanceToSegment(x, y, left, bottom, left, top) }
 		];
 		const nearest = edges.reduce((a, b) => (b.dist < a.dist ? b : a));
 
@@ -3274,7 +5293,7 @@ export class KicadRenderSession {
 			return false;
 		}
 		const items = this.schScene?.hitTestItems ?? [];
-		const item = items.find(it => it.id === paintId || it.id.startsWith(`${paintId}:`));
+		const item = items.find(it => it.id === paintId || it.id.startsWith(`${ paintId }:`));
 		const fieldName = item?.fieldName ?? paintId.match(/:prop:(.+)$/)?.[1] ?? null;
 		if (fieldName) {
 			const instance = item?.element;
@@ -3348,7 +5367,7 @@ export class KicadRenderSession {
 				libId,
 				x: Number(origin?.x ?? 0),
 				y: Number(origin?.y ?? 0),
-				rotation: Number(origin?.rotation ?? 0),
+				rotation: Number(origin?.rotation ?? 0)
 			});
 		}
 		return out;
@@ -3374,7 +5393,7 @@ export class KicadRenderSession {
 			libId,
 			x: Number(origin?.x ?? 0),
 			y: Number(origin?.y ?? 0),
-			rotation: Number(origin?.rotation ?? 0),
+			rotation: Number(origin?.rotation ?? 0)
 		};
 	}
 
@@ -3417,7 +5436,8 @@ export class KicadRenderSession {
 		const root: any = this.schematicRoot!.rootElement;
 		el.parent = root;
 		el.rootLevel = (root.rootLevel ?? 0) + 1;
-		const trailingIndex = root.children.findIndex((c: any) => c.name === 'sheet_instances' || c.name === 'embedded_files');
+		const trailingIndex = root.children.findIndex(
+			(c: any) => c.name === 'sheet_instances' || c.name === 'embedded_files');
 		if (trailingIndex === -1) {
 			root.children.push(el);
 		}
@@ -3457,7 +5477,12 @@ export class KicadRenderSession {
 	 *  child-add) because junctionNeededAt reads already-resolved pin
 	 *  positions off schScene, which only exist post-build. */
 	private addWireLike(
-		makeEl: () => { setPoints(pts: { x: number; y: number }[]): void; setStroke(w: number, t: 'default'): void; setUuid(u?: string): void; getUuid(): string | undefined },
+		makeEl: () => {
+			setPoints(pts: { x: number; y: number }[]): void;
+			setStroke(w: number, t: 'default'): void;
+			setUuid(u?: string): void;
+			getUuid(): string | undefined
+		},
 		x1: number, y1: number, x2: number, y2: number, strokeWidth: number, kind: 'wire' | 'bus'
 	): string | null {
 		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
@@ -3543,7 +5568,8 @@ export class KicadRenderSession {
 					angles.add(SYNTHETIC_ANGLE_BASE + uniq++);
 				}
 			}
-			const labels = (this.schScene.layerBuckets.get('Labels') ?? []).filter(it => it.kind === 'label' && it.hitTestable);
+			const labels = (this.schScene.layerBuckets.get('Labels') ?? []).filter(
+				it => it.kind === 'label' && it.hitTestable);
 			for (const item of labels) {
 				const origin = typeof item.element?.getOrigin === 'function' ? item.element.getOrigin() : null;
 				if (origin && pointsNear(origin.x, origin.y, x, y)) {
@@ -3619,9 +5645,13 @@ export class KicadRenderSession {
 	}
 
 	addGraphicTable(x: number, y: number, rows: number, columns: number, values: string[][]): string | null {
-		if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1) return null;
+		if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1) {
+			return null;
+		}
 		const table = new KicadElementTable();
-		const cells = new (class extends KicadElementTableCell { override name = 'cells'; })();
+		const cells = new (class extends KicadElementTableCell {
+			override name = 'cells';
+		})();
 		// The `cells` container is a named wrapper, not a table_cell itself.
 		(table as any).children.pop();
 		cells.name = 'cells';
@@ -3663,7 +5693,9 @@ export class KicadRenderSession {
 	}
 
 	addRuleArea(points: { x: number; y: number }[]): string | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || points.length < 3) return null;
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || points.length < 3) {
+			return null;
+		}
 		this.pushUndoSnapshot();
 		// Typed setters (not setSimpleChild's generic-KicadElement path) —
 		// using the untyped path here left a rule area's 4 boolean flags as
@@ -3753,8 +5785,8 @@ export class KicadRenderSession {
 			return {
 				id: item.id, kind: 'circle', anchors: [
 					{ kind: 'circle-center', x: center.x, y: center.y },
-					{ kind: 'circle-radius', x: center.x + radius, y: center.y },
-				],
+					{ kind: 'circle-radius', x: center.x + radius, y: center.y }
+				]
 			};
 		}
 		if (el.name === 'arc' && typeof el.getStartMidEnd === 'function'
@@ -3767,8 +5799,8 @@ export class KicadRenderSession {
 						{ kind: 'arc-start', x: start.x, y: start.y },
 						{ kind: 'arc-mid', x: mid.x, y: mid.y },
 						{ kind: 'arc-end', x: end.x, y: end.y },
-						{ kind: 'arc-center', x: geometry.centerX, y: geometry.centerY },
-					],
+						{ kind: 'arc-center', x: geometry.centerX, y: geometry.centerY }
+					]
 				};
 			}
 			catch {
@@ -3777,13 +5809,15 @@ export class KicadRenderSession {
 		}
 		if (el.name === 'bezier' && typeof el.getPoints === 'function') {
 			const points = el.getPoints();
-			if (!Array.isArray(points) || points.length !== 4) return null;
+			if (!Array.isArray(points) || points.length !== 4) {
+				return null;
+			}
 			const kinds: CurveAnchor[] = ['bezier-start', 'bezier-control-1', 'bezier-control-2', 'bezier-end'];
 			return {
 				id: item.id, kind: 'bezier',
 				anchors: points.map((point: { x: number; y: number }, index: number) => ({
-					kind: kinds[index]!, x: point.x, y: point.y,
-				})),
+					kind: kinds[index]!, x: point.x, y: point.y
+				}))
 			};
 		}
 		if (item.shape.type === 'polygon' && (el.name === 'polyline' || el.name === 'rule_area')) {
@@ -3791,8 +5825,8 @@ export class KicadRenderSession {
 			return {
 				id: item.id, kind: 'polygon',
 				anchors: points.map((point, index) => ({
-					kind: `polygon-vertex-${index}` as CurveAnchor, x: point.x, y: point.y,
-				})),
+					kind: `polygon-vertex-${ index }` as CurveAnchor, x: point.x, y: point.y
+				}))
 			};
 		}
 		return null;
@@ -3860,14 +5894,18 @@ export class KicadRenderSession {
 	 *  afterward" precedent as buildPowerSymbolInstance's Reference/Value
 	 *  placement) rather than replicating real KiCad's AutoplaceFields
 	 *  heuristic. */
-	addDirectiveLabel(x: number, y: number, netclassName: string, shape: KicadDirectiveLabelShape = 'round', rotation = 0): string | null {
+	addDirectiveLabel(
+		x: number, y: number, netclassName: string, shape: KicadDirectiveLabelShape = 'round',
+		rotation = 0
+	): string | null {
 		const flag = new KicadElementNetclassFlag();
 		flag.setOrigin(x, y, rotation);
 		flag.setShape(shape);
 		flag.setPinLength(2.54);
 		flag.setFont(1.27, 1.27);
 		flag.setJustify(KicadRenderSession.labelJustifyFor(rotation));
-		flag.addChild(KicadElementSymbol.buildLibraryProperty('Netclass', netclassName, { x: x + 2.54, y: y - 1.27, rot: 0 }));
+		flag.addChild(
+			KicadElementSymbol.buildLibraryProperty('Netclass', netclassName, { x: x + 2.54, y: y - 1.27, rot: 0 }));
 		return this.attachToSchematicRoot(flag);
 	}
 
@@ -3914,7 +5952,9 @@ export class KicadRenderSession {
 		let graphicsSource = source;
 		if (source.isDerived() && source.getLayers().length === 0) {
 			const base = candidates.find(symbol => symbol.symbolName === source.getExtends());
-			if (base) graphicsSource = base;
+			if (base) {
+				graphicsSource = base;
+			}
 		}
 		return graphicsSource.getUnitCount();
 	}
@@ -3932,7 +5972,10 @@ export class KicadRenderSession {
 	 * multi-unit placement calls this once per unit, reusing unit 1's
 	 * returned reference for units 2..N so every unit of one physical part
 	 * shares the same designator, matching real KiCad's own model. */
-	addLibrarySymbolFromText(sourceText: string, symbolName: string, x: number, y: number, libIdOverride?: string, unit = 1, reuseReference?: string): string | null {
+	addLibrarySymbolFromText(
+		sourceText: string, symbolName: string, x: number, y: number, libIdOverride?: string, unit = 1,
+		reuseReference?: string
+	): string | null {
 		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !sourceText.trim()) {
 			return null;
 		}
@@ -4003,10 +6046,11 @@ export class KicadRenderSession {
 				x: x + Number(origin?.x ?? 0),
 				y: y + Number(origin?.y ?? fallbackY),
 				rot: Number(origin?.rotation ?? 0),
-				hide: property?.isHidden?.() ?? (name !== 'Reference' && name !== 'Value'),
+				hide: property?.isHidden?.() ?? (name !== 'Reference' && name !== 'Value')
 			};
 		};
-		instance.addChild(KicadElementSymbol.buildLibraryProperty('Reference', reference, propertyAt('Reference', -2.54)));
+		instance.addChild(
+			KicadElementSymbol.buildLibraryProperty('Reference', reference, propertyAt('Reference', -2.54)));
 		instance.addChild(KicadElementSymbol.buildLibraryProperty('Value', value, propertyAt('Value', 2.54)));
 		instance.addChild(KicadElementSymbol.buildLibraryProperty('Footprint', '', propertyAt('Footprint', 0)));
 		instance.addChild(KicadElementSymbol.buildLibraryProperty('Datasheet', '', propertyAt('Datasheet', 0)));
@@ -4019,11 +6063,15 @@ export class KicadRenderSession {
 		const prefix = base.replace(/[0-9?]+$/g, '') || 'U';
 		let max = 0;
 		for (const kid of this.schematicRoot?.rootElement?.children ?? []) {
-			if (kid?.name !== 'symbol' || typeof (kid as any).getReference !== 'function') continue;
+			if (kid?.name !== 'symbol' || typeof (kid as any).getReference !== 'function') {
+				continue;
+			}
 			const value = String((kid as any).getReference() ?? '');
 			const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 			const match = new RegExp(`^${ escapedPrefix }(\\d+)$`).exec(value);
-			if (match) max = Math.max(max, Number(match[1]));
+			if (match) {
+				max = Math.max(max, Number(match[1]));
+			}
 		}
 		return `${ prefix }${ max + 1 }`;
 	}
@@ -4221,7 +6269,7 @@ export class KicadRenderSession {
 		'wire', 'bus', 'bus_entry', 'junction', 'no_connect',
 		'symbol', 'rectangle', 'circle', 'arc', 'polyline', 'bezier', 'rule_area',
 		'text', 'text_box', 'label', 'global_label', 'hierarchical_label', 'netclass_flag',
-		'image', 'table',
+		'image', 'table'
 	]);
 
 	/**
@@ -4277,7 +6325,7 @@ export class KicadRenderSession {
 				}
 			}
 			if (defs.length > 0) {
-				parts.push(`(lib_symbols\n${defs.join('\n')}\n)`);
+				parts.push(`(lib_symbols\n${ defs.join('\n') }\n)`);
 			}
 		}
 		for (const el of elements) {
@@ -4319,7 +6367,7 @@ export class KicadRenderSession {
 		}
 		let wrapper: any;
 		try {
-			wrapper = new KicadParser().parse(`(kicad_sch\n${text}\n)`);
+			wrapper = new KicadParser().parse(`(kicad_sch\n${ text }\n)`);
 		}
 		catch {
 			return [];
@@ -4471,7 +6519,8 @@ export class KicadRenderSession {
 			return 0;
 		}
 		const uuids = new Set(
-			ids.map(id => (this.schScene!.hitTestItems.find(it => it.id === id)?.element as any)?.getUuid?.()).filter(Boolean)
+			ids.map(id => (this.schScene!.hitTestItems.find(it => it.id === id)?.element as any)?.getUuid?.())
+				.filter(Boolean)
 		);
 		if (uuids.size === 0) {
 			return 0;
@@ -4658,7 +6707,8 @@ export class KicadRenderSession {
 		const el: any = item.element;
 		const origin = typeof el?.getOrigin === 'function' ? el.getOrigin() : null;
 		if (item.kind === 'symbol' && origin) {
-			return this.moveSymbolByRef(item.refDesignator ?? '', origin.x + dx, origin.y + dy, origin.rotation, item.id);
+			return this.moveSymbolByRef(
+				item.refDesignator ?? '', origin.x + dx, origin.y + dy, origin.rotation, item.id);
 		}
 		if (item.kind === 'sheet' && origin) {
 			return this.moveSheetById(item.id, origin.x + dx, origin.y + dy);
@@ -4675,7 +6725,8 @@ export class KicadRenderSession {
 			const current = prop && typeof prop.getOrigin === 'function'
 				? prop.getOrigin()
 				: (item.fieldOrigin ?? { x: 0, y: 0, rotation: 0 });
-			return this.moveLabelById(item.id, Number(current.x ?? 0) + dx, Number(current.y ?? 0) + dy, current.rotation ?? 0);
+			return this.moveLabelById(
+				item.id, Number(current.x ?? 0) + dx, Number(current.y ?? 0) + dy, current.rotation ?? 0);
 		}
 		return this.translateElementById(item.id, dx, dy);
 	}
@@ -4711,9 +6762,13 @@ export class KicadRenderSession {
 		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 		for (const id of ids) {
 			const item = this.schScene.hitTestItems.find(it => it.id === id);
-			if (!item) continue;
+			if (!item) {
+				continue;
+			}
 			const { x, y, w, h } = item.bbox;
-			if (![x, y, w, h].every(Number.isFinite) || w < 0 || h < 0) continue;
+			if (![x, y, w, h].every(Number.isFinite) || w < 0 || h < 0) {
+				continue;
+			}
 			items.push({ item, bbox: { x, y, w, h } });
 			minX = Math.min(minX, x);
 			minY = Math.min(minY, y);
@@ -4729,12 +6784,24 @@ export class KicadRenderSession {
 		for (const { item, bbox } of items) {
 			let dx = 0, dy = 0;
 			switch (axis) {
-				case 'left': dx = minX - bbox.x; break;
-				case 'right': dx = maxX - (bbox.x + bbox.w); break;
-				case 'top': dy = minY - bbox.y; break;
-				case 'bottom': dy = maxY - (bbox.y + bbox.h); break;
-				case 'center-x': dx = centerX - (bbox.x + bbox.w / 2); break;
-				case 'center-y': dy = centerY - (bbox.y + bbox.h / 2); break;
+				case 'left':
+					dx = minX - bbox.x;
+					break;
+				case 'right':
+					dx = maxX - (bbox.x + bbox.w);
+					break;
+				case 'top':
+					dy = minY - bbox.y;
+					break;
+				case 'bottom':
+					dy = maxY - (bbox.y + bbox.h);
+					break;
+				case 'center-x':
+					dx = centerX - (bbox.x + bbox.w / 2);
+					break;
+				case 'center-y':
+					dy = centerY - (bbox.y + bbox.h / 2);
+					break;
 			}
 			if (Math.abs(dx) > 1e-6 || Math.abs(dy) > 1e-6) {
 				moves.push({ item, dx, dy });
@@ -4758,7 +6825,8 @@ export class KicadRenderSession {
 	/** Resize one root-level rectangle or text box to normalized world bounds.
 	 * Like translateElementById(), this is a continuous-drag primitive: callers
 	 * push a single undo snapshot before the gesture, not for every mousemove. */
-	resizeElementBoundsById(id: string, x: number, y: number, width: number, height: number, handle?: ResizeHandle): boolean {
+	resizeElementBoundsById(
+		id: string, x: number, y: number, width: number, height: number, handle?: ResizeHandle): boolean {
 		if (this.documentType !== 'schematic' || !this.schematicRoot || !(width > 0) || !(height > 0)) {
 			return false;
 		}
@@ -4821,14 +6889,18 @@ export class KicadRenderSession {
 		}
 		if ((anchor === 'circle-center' || anchor === 'circle-radius') && el.name === 'circle') {
 			const center = el.getCenter?.();
-			if (!center) return false;
+			if (!center) {
+				return false;
+			}
 			if (anchor === 'circle-center' && typeof el.setCenter === 'function') {
 				el.setCenter(x, y);
 			}
 			else if (anchor === 'circle-radius' && typeof el.setRadius === 'function') {
 				el.setRadius(Math.max(0.001, Math.hypot(x - center.x, y - center.y)));
 			}
-			else return false;
+			else {
+				return false;
+			}
 		}
 		else if (anchor.startsWith('arc-') && el.name === 'arc' && typeof el.getStartMidEnd === 'function'
 			&& typeof el.setStartMidEnd === 'function') {
@@ -4838,20 +6910,29 @@ export class KicadRenderSession {
 				// center.  Midpoint drags change only radius, while endpoint drags
 				// also adopt the cursor's angle for the dragged endpoint; the other
 				// endpoint is resized to the same radius.
-				if (typeof el.getArcCenterRadiusAngles !== 'function') return false;
+				if (typeof el.getArcCenterRadiusAngles !== 'function') {
+					return false;
+				}
 				let geometry: { centerX: number; centerY: number; radius: number };
-				try { geometry = el.getArcCenterRadiusAngles(false); }
-				catch { return false; }
+				try {
+					geometry = el.getArcCenterRadiusAngles(false);
+				}
+				catch {
+					return false;
+				}
 				const radius = Math.max(0.0254, Math.hypot(x - geometry.centerX, y - geometry.centerY));
 				const scale = radius / Math.max(geometry.radius, 1e-9);
 				const resize = (point: { x: number; y: number }) => ({
 					x: geometry.centerX + (point.x - geometry.centerX) * scale,
-					y: geometry.centerY + (point.y - geometry.centerY) * scale,
+					y: geometry.centerY + (point.y - geometry.centerY) * scale
 				});
 				const cursorVector = { x: x - geometry.centerX, y: y - geometry.centerY };
 				const cursorLength = Math.hypot(cursorVector.x, cursorVector.y);
 				const cursorPoint = cursorLength > 1e-9
-					? { x: geometry.centerX + cursorVector.x * radius / cursorLength, y: geometry.centerY + cursorVector.y * radius / cursorLength }
+					? {
+						x: geometry.centerX + cursorVector.x * radius / cursorLength,
+						y: geometry.centerY + cursorVector.y * radius / cursorLength
+					}
 					: resize(anchor === 'arc-end' ? end : start);
 				const nextStart = anchor === 'arc-start' ? cursorPoint : resize(start);
 				const nextMid = resize(mid);
@@ -4860,22 +6941,32 @@ export class KicadRenderSession {
 			}
 			else if (anchor === 'arc-center' && typeof el.getArcCenterRadiusAngles === 'function') {
 				let geometry: { centerX: number; centerY: number };
-				try { geometry = el.getArcCenterRadiusAngles(false); }
-				catch { return false; }
+				try {
+					geometry = el.getArcCenterRadiusAngles(false);
+				}
+				catch {
+					return false;
+				}
 				const dx = x - geometry.centerX;
 				const dy = y - geometry.centerY;
 				el.setStartMidEnd(start.x + dx, start.y + dy, mid.x + dx, mid.y + dy, end.x + dx, end.y + dy);
 			}
-			else return false;
+			else {
+				return false;
+			}
 		}
 		else if (anchor.startsWith('bezier-') && el.name === 'bezier'
 			&& typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
 			const points = el.getPoints();
-			if (!Array.isArray(points) || points.length !== 4) return false;
+			if (!Array.isArray(points) || points.length !== 4) {
+				return false;
+			}
 			const index = anchor === 'bezier-start' ? 0
 				: anchor === 'bezier-control-1' ? 1
 					: anchor === 'bezier-control-2' ? 2 : anchor === 'bezier-end' ? 3 : -1;
-			if (index < 0) return false;
+			if (index < 0) {
+				return false;
+			}
 			const next = points.map((point: { x: number; y: number }, pointIndex: number) =>
 				pointIndex === index ? { x, y } : { x: point.x, y: point.y });
 			el.setPoints(next);
@@ -4884,9 +6975,13 @@ export class KicadRenderSession {
 			const index = Number(anchor.slice('polygon-vertex-'.length));
 			const polyline = el.name === 'rule_area' && typeof el.getPolyline === 'function' ? el.getPolyline() : el;
 			if (!polyline || typeof polyline.getPoints !== 'function' || typeof polyline.setPoints !== 'function'
-				|| !Number.isInteger(index)) return false;
+				|| !Number.isInteger(index)) {
+				return false;
+			}
 			const points = polyline.getPoints();
-			if (!Array.isArray(points) || index < 0 || index >= points.length) return false;
+			if (!Array.isArray(points) || index < 0 || index >= points.length) {
+				return false;
+			}
 			const closedDuplicate = points.length > 1
 				&& points[0]!.x === points[points.length - 1]!.x
 				&& points[0]!.y === points[points.length - 1]!.y;
@@ -5039,9 +7134,13 @@ export class KicadRenderSession {
 						this.schScene!, renderer, this.schLayerState, highlighted, this.highlightedNetIds, viewBBox);
 				}
 				else {
-					this.painter.paint(this.scene!, renderer, this.layerState, this.activeBoardLayer, this.zoneDisplayMode,
-						highlighted, { pad: this.padDisplayMode, via: this.viaDisplayMode, track: this.trackDisplayMode },
-						this.highlightedBoardNetId, viewBBox);
+					this.painter.paint(
+						this.scene!, renderer, this.layerState, this.activeBoardLayer,
+						this.zoneDisplayMode,
+						highlighted,
+						{ pad: this.padDisplayMode, via: this.viaDisplayMode, track: this.trackDisplayMode },
+						this.highlightedBoardNetId, viewBBox
+					);
 				}
 			};
 
@@ -5093,6 +7192,7 @@ export class KicadRenderSession {
 			this.drawBoardDragPreview(renderer);
 			this.drawEditPreview(renderer);
 			this.drawBoardHighlight(renderer);
+			this.drawZoneEditHandles(renderer);
 			this.drawSelectionResizeHandles(renderer);
 			this.drawSelectionCurveAnchors(renderer);
 			this.drawBoardCrosshair(renderer);
@@ -5203,18 +7303,18 @@ export class KicadRenderSession {
 			renderer.circle(origin, radius, { strokeColor: color, strokeWidth: width });
 			if (style === 'circle-x') {
 				renderer.line([
-					new Vec2(origin.x - radius, origin.y - radius), new Vec2(origin.x + radius, origin.y + radius),
+					new Vec2(origin.x - radius, origin.y - radius), new Vec2(origin.x + radius, origin.y + radius)
 				], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
 				renderer.line([
-					new Vec2(origin.x - radius, origin.y + radius), new Vec2(origin.x + radius, origin.y - radius),
+					new Vec2(origin.x - radius, origin.y + radius), new Vec2(origin.x + radius, origin.y - radius)
 				], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
 				return;
 			}
 			renderer.line([
-				new Vec2(origin.x - radius, origin.y), new Vec2(origin.x + radius, origin.y),
+				new Vec2(origin.x - radius, origin.y), new Vec2(origin.x + radius, origin.y)
 			], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
 			renderer.line([
-				new Vec2(origin.x, origin.y - radius), new Vec2(origin.x, origin.y + radius),
+				new Vec2(origin.x, origin.y - radius), new Vec2(origin.x, origin.y + radius)
 			], { strokeColor: color, strokeWidth: width, capStyle: 'butt' });
 		};
 		// Exact Pcbnew ORIGIN_VIEWITEM styles: its default grid origin is a
@@ -5242,7 +7342,8 @@ export class KicadRenderSession {
 		switch (p.kind) {
 			case 'wire': {
 				const bend = orthogonalWireBend(p.from, p.cursor);
-				renderer.line(bend ? [p.from, bend, p.cursor] : [p.from, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
+				renderer.line(
+					bend ? [p.from, bend, p.cursor] : [p.from, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
 				break;
 			}
 			case 'line':
@@ -5252,15 +7353,32 @@ export class KicadRenderSession {
 				}
 				break;
 			case 'route':
-				renderer.line([...p.points, p.cursor], { strokeColor: color, strokeWidth: p.width });
+				renderer.line(
+					[...p.points, p.cursor],
+					{ strokeColor: p.collides ? ROUTE_COLLISION_COLOR : color, strokeWidth: p.width }
+				);
+				break;
+			case 'via-drag':
+				for (const track of p.tracks) {
+					renderer.line([...track.points, p.cursor], { strokeColor: color, strokeWidth: track.width });
+				}
+				if (p.viaSize) {
+					renderer.circle(p.cursor, p.viaSize / 2, { fillColor: color });
+				}
 				break;
 			case 'junction':
 				renderer.circle(p.cursor, 0.4, { fillColor: color });
 				break;
 			case 'no-connect': {
 				const half = 0.9;
-				renderer.line([new Vec2(p.cursor.x - half, p.cursor.y - half), new Vec2(p.cursor.x + half, p.cursor.y + half)], { strokeColor: color, strokeWidth: 0.3 });
-				renderer.line([new Vec2(p.cursor.x - half, p.cursor.y + half), new Vec2(p.cursor.x + half, p.cursor.y - half)], { strokeColor: color, strokeWidth: 0.3 });
+				renderer.line(
+					[new Vec2(p.cursor.x - half, p.cursor.y - half), new Vec2(p.cursor.x + half, p.cursor.y + half)],
+					{ strokeColor: color, strokeWidth: 0.3 }
+				);
+				renderer.line(
+					[new Vec2(p.cursor.x - half, p.cursor.y + half), new Vec2(p.cursor.x + half, p.cursor.y - half)],
+					{ strokeColor: color, strokeWidth: 0.3 }
+				);
 				break;
 			}
 			case 'rect': {
@@ -5270,7 +7388,7 @@ export class KicadRenderSession {
 				}
 				const corners = [
 					new Vec2(p.anchor.x, p.anchor.y), new Vec2(p.cursor.x, p.anchor.y),
-					new Vec2(p.cursor.x, p.cursor.y), new Vec2(p.anchor.x, p.cursor.y),
+					new Vec2(p.cursor.x, p.cursor.y), new Vec2(p.anchor.x, p.cursor.y)
 				];
 				renderer.line([...corners, corners[0]!], { strokeColor: color, strokeWidth: 0.15 });
 				break;
@@ -5303,7 +7421,10 @@ export class KicadRenderSession {
 				probe.setStartMidEnd(start!.x, start!.y, p.cursor.x, p.cursor.y, end!.x, end!.y);
 				try {
 					const local = probe.getArcCenterRadiusAngles(false);
-					renderer.arc(new Vec2(local.centerX, local.centerY), local.radius, local.startAngle, local.endAngle, { strokeColor: color, strokeWidth: 0.15 });
+					renderer.arc(
+						new Vec2(local.centerX, local.centerY), local.radius, local.startAngle, local.endAngle,
+						{ strokeColor: color, strokeWidth: 0.15 }
+					);
 				}
 				catch {
 					// Collinear (start/mid/end) — no arc yet; show what's known.
@@ -5397,7 +7518,8 @@ export class KicadRenderSession {
 				const fillColor = p.selectMode === 'add' ? SELECTION_BOX_FILL_ADD
 					: p.selectMode === 'subtract' ? SELECTION_BOX_FILL_SUBTRACT
 						: SELECTION_BOX_FILL_REPLACE;
-				const strokeColor = p.mode === 'contained' ? SELECTION_BOX_OUTLINE_CONTAINED : SELECTION_BOX_OUTLINE_TOUCHING;
+				const strokeColor = p.mode === 'contained' ? SELECTION_BOX_OUTLINE_CONTAINED :
+					SELECTION_BOX_OUTLINE_TOUCHING;
 				renderer.rect(new Vec2(x0, y0), w, h, { fillColor, strokeColor, strokeWidth: 0.15 });
 				break;
 			}
@@ -5460,16 +7582,18 @@ export class KicadRenderSession {
 				const highlighted = this.selectedIds.has(item.id);
 				if (item.kind === 'footprint') {
 					if (highlighted) {
-						renderer.rect(new Vec2(item.bbox.x, item.bbox.y), item.bbox.w, item.bbox.h,
-							{ strokeColor: '#ffcc00', strokeWidth: 0.18 });
+						renderer.rect(
+							new Vec2(item.bbox.x, item.bbox.y), item.bbox.w, item.bbox.h,
+							{ strokeColor: '#ffcc00', strokeWidth: 0.18 }
+						);
 					}
 					continue;
 				}
 				const color = highlighted ? '#ffcc00' : styleForLayer(item.layer).color;
 				const mode = item.kind === 'pad' ? this.padDisplayMode
 					: item.kind === 'via' ? this.viaDisplayMode
-					: item.kind === 'track' ? this.trackDisplayMode
-					: 'filled';
+						: item.kind === 'track' ? this.trackDisplayMode
+							: 'filled';
 				item.draw(renderer, color, mode);
 			}
 		}
@@ -5489,19 +7613,34 @@ export class KicadRenderSession {
 		const pad = Math.max(0.5, Math.max(w, h) * 0.08);
 		renderer.rect(
 			new Vec2(x - pad, y - pad), w + pad * 2, h + pad * 2,
-			{ strokeColor: BOARD_HIGHLIGHT_COLOR, strokeWidth: 0.2 });
+			{ strokeColor: BOARD_HIGHLIGHT_COLOR, strokeWidth: 0.2 }
+		);
 	}
 
-	/** Pcbnew's 'full'/'diagonal' crosshair styles — full-window lines through
-	 *  the pointer, ported from opengl_gal.cpp's blitCursor(). 'small' is
-	 *  intentionally a no-op here: the browser's own cursor already gives a
-	 *  small fixed-size cross with none of this method's per-frame cost. */
+	/** Real KiCad's 3 GAL cursor styles (opengl_gal.cpp's blitCursor()),
+	 *  drawn at workingPointWorld — the current snapped WORKING point, not
+	 *  the raw pointer (see that field's doc comment for why: this is what
+	 *  actually shows the user a pad/via/track magnetizing a route, since
+	 *  the browser's own OS cursor can't be moved to reflect a snap the way
+	 *  a real desktop app's self-drawn cursor can). 'small' is a short fixed
+	 *  screen-length cross; 'full'/'diagonal' extend across the whole
+	 *  viewport. */
 	protected drawBoardCrosshair(renderer: Renderer): void {
-		if (this.documentType !== 'board' || this.crosshairMode === 'small' || !this.boardPointerScreen) {
+		if (this.documentType !== 'board' || !this.boardPointerScreen) {
 			return;
 		}
 		const zoom = this.camera.zoom;
 		if (!Number.isFinite(zoom) || zoom <= 0) {
+			return;
+		}
+		const center = this.workingPointWorld ?? this.screenToWorld(this.boardPointerScreen);
+		const deviceScale = window.devicePixelRatio || 1;
+		const lineWidth = deviceScale / zoom;
+		const style = { strokeColor: BOARD_CURSOR_COLOR, strokeWidth: lineWidth, capStyle: 'butt' as const };
+		if (this.crosshairMode === 'small') {
+			const half = (12 * deviceScale) / zoom;
+			renderer.line([new Vec2(center.x - half, center.y), new Vec2(center.x + half, center.y)], style);
+			renderer.line([new Vec2(center.x, center.y - half), new Vec2(center.x, center.y + half)], style);
 			return;
 		}
 		let bbox;
@@ -5514,10 +7653,6 @@ export class KicadRenderSession {
 		if (![bbox.x, bbox.y, bbox.w, bbox.h].every(Number.isFinite) || bbox.w <= 0 || bbox.h <= 0) {
 			return;
 		}
-		const center = this.screenToWorld(this.boardPointerScreen);
-		const deviceScale = window.devicePixelRatio || 1;
-		const lineWidth = deviceScale / zoom;
-		const style = { strokeColor: BOARD_CURSOR_COLOR, strokeWidth: lineWidth, capStyle: 'butt' as const };
 		if (this.crosshairMode === 'full') {
 			renderer.line([new Vec2(bbox.x, center.y), new Vec2(bbox.x + bbox.w, center.y)], style);
 			renderer.line([new Vec2(center.x, bbox.y), new Vec2(center.x, bbox.y + bbox.h)], style);
@@ -5526,8 +7661,10 @@ export class KicadRenderSession {
 		// 'diagonal': ±45° lines through the pointer, long enough to clear
 		// the viewport at any pan/rotation of the aspect ratio.
 		const reach = Math.hypot(bbox.w, bbox.h);
-		renderer.line([new Vec2(center.x - reach, center.y - reach), new Vec2(center.x + reach, center.y + reach)], style);
-		renderer.line([new Vec2(center.x - reach, center.y + reach), new Vec2(center.x + reach, center.y - reach)], style);
+		renderer.line(
+			[new Vec2(center.x - reach, center.y - reach), new Vec2(center.x + reach, center.y + reach)], style);
+		renderer.line(
+			[new Vec2(center.x - reach, center.y + reach), new Vec2(center.x + reach, center.y - reach)], style);
 	}
 
 	/** KiCad-style 3×3 resize affordance for the two selected root shapes that
@@ -5547,17 +7684,52 @@ export class KicadRenderSession {
 		const lineWidth = deviceScale / this.camera.zoom;
 		const size = 7 * deviceScale / this.camera.zoom;
 		renderer.line([
-			new Vec2(box.x, box.y), new Vec2(x2, box.y), new Vec2(x2, y2), new Vec2(box.x, y2), new Vec2(box.x, box.y),
+			new Vec2(box.x, box.y), new Vec2(x2, box.y), new Vec2(x2, y2), new Vec2(box.x, y2), new Vec2(box.x, box.y)
 		], { strokeColor: color, strokeWidth: lineWidth });
 		for (const point of [
 			new Vec2(box.x, box.y), new Vec2(cx, box.y), new Vec2(x2, box.y),
 			new Vec2(box.x, cy), new Vec2(cx, cy), new Vec2(x2, cy),
-			new Vec2(box.x, y2), new Vec2(cx, y2), new Vec2(x2, y2),
+			new Vec2(box.x, y2), new Vec2(cx, y2), new Vec2(x2, y2)
 		]) {
 			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
 				fillColor: color,
 				strokeColor: schematicBackgroundColor,
-				strokeWidth: lineWidth,
+				strokeWidth: lineWidth
+			});
+		}
+	}
+
+	/** PCB counterpart to drawSelectionCurveAnchors's polygon case — square
+	 *  handles at each existing zone outline vertex, round handles at each
+	 *  edge midpoint (dragging one inserts a new corner there; see
+	 *  getBoardPolygonAnchors/moveBoardPolygonPoint/insertBoardPolygonPoint).
+	 *  Reads the LIVE zone geometry straight off the AST every frame rather
+	 *  than tracking separate drag-preview state — the drag handlers below
+	 *  already commit each mousemove via commitAstMutation() (the same
+	 *  established pattern moveCurveAnchorById uses on the schematic side),
+	 *  so the handles simply track whatever the zone's outline currently is. */
+	protected drawZoneEditHandles(renderer: Renderer): void {
+		if (this.documentType !== 'board' || this.selectedIds.size !== 1
+			|| !Number.isFinite(this.camera.zoom) || this.camera.zoom <= 0) {
+			return;
+		}
+		const anchors = this.getBoardPolygonAnchors([...this.selectedIds][0]!);
+		if (!anchors) {
+			return;
+		}
+		const color = '#ffcc00';
+		const deviceScale = window.devicePixelRatio || 1;
+		const lineWidth = deviceScale / this.camera.zoom;
+		const size = 7 * deviceScale / this.camera.zoom;
+		const radius = size / 2;
+		for (const midpoint of anchors.midpoints) {
+			renderer.circle(midpoint, radius, {
+				fillColor: color, strokeColor: boardBackgroundColor, strokeWidth: lineWidth
+			});
+		}
+		for (const corner of anchors.corners) {
+			renderer.rect(new Vec2(corner.x - size / 2, corner.y - size / 2), size, size, {
+				fillColor: color, strokeColor: boardBackgroundColor, strokeWidth: lineWidth
 			});
 		}
 	}
@@ -5592,7 +7764,8 @@ export class KicadRenderSession {
 		else if (curve.kind === 'polygon' && curve.anchors.length > 1) {
 			const points = curve.anchors
 				.slice()
-				.sort((a, b) => Number(a.kind.slice('polygon-vertex-'.length)) - Number(b.kind.slice('polygon-vertex-'.length)))
+				.sort((a, b) => Number(a.kind.slice('polygon-vertex-'.length)) - Number(
+					b.kind.slice('polygon-vertex-'.length)))
 				.map(anchor => new Vec2(anchor.x, anchor.y));
 			renderer.line([...points, points[0]!], { strokeColor: color, strokeWidth: lineWidth });
 		}
@@ -5600,7 +7773,7 @@ export class KicadRenderSession {
 			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
 				fillColor: color,
 				strokeColor: schematicBackgroundColor,
-				strokeWidth: lineWidth,
+				strokeWidth: lineWidth
 			});
 		}
 	}
@@ -5651,6 +7824,9 @@ function pointLiesOnSegmentInterior(px: number, py: number, x1: number, y1: numb
 /** Semi-transparent white reads as a "ghost" preview over any real element
  *  color underneath, without colliding with schColors' saturated palette. */
 const EDIT_PREVIEW_COLOR = 'rgba(255, 255, 255, 0.6)';
+/** Route preview color when the candidate path violates clearance —
+ *  matches real KiCad's own collision-red ratsnest/highlight convention. */
+const ROUTE_COLLISION_COLOR = 'rgba(255, 64, 64, 0.9)';
 
 /** Opaque, saturated yellow — reads clearly against board copper/silkscreen
  *  colors at any zoom, and doesn't collide with any of them (see
@@ -5682,16 +7858,15 @@ function cubicBezierToPolyline(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, steps = 3
 		const u = 1 - t;
 		points.push(new Vec2(
 			u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
-			u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
+			u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y
 		));
 	}
 	return points;
 }
 
-function drawCrosshair(renderer: Renderer, at: Vec2, color: string): void {
-	const s = 0.5;
-	renderer.line([new Vec2(at.x - s, at.y), new Vec2(at.x + s, at.y)], { strokeColor: color, strokeWidth: 0.1 });
-	renderer.line([new Vec2(at.x, at.y - s), new Vec2(at.x, at.y + s)], { strokeColor: color, strokeWidth: 0.1 });
+function drawCrosshair(renderer: Renderer, at: Vec2, color: string, size = 0.5): void {
+	renderer.line([new Vec2(at.x - size, at.y), new Vec2(at.x + size, at.y)], { strokeColor: color, strokeWidth: 0.1 });
+	renderer.line([new Vec2(at.x, at.y - size), new Vec2(at.x, at.y + size)], { strokeColor: color, strokeWidth: 0.1 });
 }
 
 function rotatePreviewPoint(p: { x: number; y: number }, rotationDeg: number): Vec2 {
@@ -5720,29 +7895,45 @@ function drawLabelFlagPreview(
 	if (kind === 'global-label') {
 		const half = s / 2;
 		const len = s * 2;
-		pts = [{ x: 0, y: 0 }, { x: 0, y: -half }, { x: -len, y: -half }, { x: -len, y: half }, { x: 0, y: half }, { x: 0, y: 0 }];
+		pts = [
+			{ x: 0, y: 0 }, { x: 0, y: -half }, { x: -len, y: -half }, { x: -len, y: half }, { x: 0, y: half },
+			{ x: 0, y: 0 }
+		];
 		if (shape === 'input' || shape === 'bidirectional' || shape === 'tri_state') {
-			pts[0]!.x += half; pts[5]!.x += half;
+			pts[0]!.x += half;
+			pts[5]!.x += half;
 		}
 		if (shape === 'output' || shape === 'bidirectional' || shape === 'tri_state') {
-			pts[2]!.x -= half; pts[3]!.x -= half;
+			pts[2]!.x -= half;
+			pts[3]!.x -= half;
 		}
 		shapeRotation = rotation + 180;
 	}
 	else {
 		switch (shape) {
 			case 'output':
-				pts = [{ x: 0, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 }, { x: 0, y: -s / 2 }, { x: 0, y: s / 2 }];
+				pts = [
+					{ x: 0, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 },
+					{ x: 0, y: -s / 2 }, { x: 0, y: s / 2 }
+				];
 				break;
 			case 'input':
-				pts = [{ x: s, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: 0, y: 0 }, { x: s / 2, y: -s / 2 }, { x: s, y: -s / 2 }, { x: s, y: s / 2 }];
+				pts = [
+					{ x: s, y: s / 2 }, { x: s / 2, y: s / 2 }, { x: 0, y: 0 }, { x: s / 2, y: -s / 2 },
+					{ x: s, y: -s / 2 }, { x: s, y: s / 2 }
+				];
 				break;
 			case 'bidirectional':
 			case 'tri_state':
-				pts = [{ x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 }, { x: 0, y: 0 }, { x: s / 2, y: s / 2 }];
+				pts = [
+					{ x: s / 2, y: s / 2 }, { x: s, y: 0 }, { x: s / 2, y: -s / 2 }, { x: 0, y: 0 },
+					{ x: s / 2, y: s / 2 }
+				];
 				break;
 			default: // passive
-				pts = [{ x: 0, y: s / 2 }, { x: s, y: s / 2 }, { x: s, y: -s / 2 }, { x: 0, y: -s / 2 }, { x: 0, y: s / 2 }];
+				pts = [
+					{ x: 0, y: s / 2 }, { x: s, y: s / 2 }, { x: s, y: -s / 2 }, { x: 0, y: -s / 2 }, { x: 0, y: s / 2 }
+				];
 				break;
 		}
 	}
@@ -5755,14 +7946,23 @@ function drawLabelFlagPreview(
 	const dist = s * 2.5;
 	let textOffset: Vec2;
 	switch (rotation) {
-		case 90: textOffset = new Vec2(0, -dist); break;
-		case 180: textOffset = new Vec2(-dist, 0); break;
-		case 270: textOffset = new Vec2(0, dist); break;
-		default: textOffset = new Vec2(dist, 0); break;
+		case 90:
+			textOffset = new Vec2(0, -dist);
+			break;
+		case 180:
+			textOffset = new Vec2(-dist, 0);
+			break;
+		case 270:
+			textOffset = new Vec2(0, dist);
+			break;
+		default:
+			textOffset = new Vec2(dist, 0);
+			break;
 	}
 	const worldTextPos = new Vec2(worldOrigin.x + textOffset.x, worldOrigin.y + textOffset.y);
 	const textAngle = (rotation === 90 || rotation === 270) ? 90 : 0;
 	const hAlign = rotation === 180 ? 1 : 0;
-	const geometry = computeStrokeTextGeometry(text, worldTextPos, textSize, textAngle, false, 0.15, { x: hAlign, y: 0.5 });
+	const geometry = computeStrokeTextGeometry(
+		text, worldTextPos, textSize, textAngle, false, 0.15, { x: hAlign, y: 0.5 });
 	drawStrokeTextGeometry(renderer, geometry, color);
 }

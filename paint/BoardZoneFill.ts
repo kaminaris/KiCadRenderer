@@ -1,10 +1,11 @@
-import { BooleanOp, ClipType } from '@clipper2-ts/engine';
+import { ClipType } from '@clipper2-ts/engine';
 import { FillRule, Path, Paths, Point64Of, PointInPolygon, PointInPolygonResult } from '@clipper2-ts/core';
-import { EndType, InflatePaths, JoinType } from '@clipper2-ts/offset';
+import { EndType, JoinType } from '@clipper2-ts/offset';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
 import { Vec2 } from '../math/Vec2';
 import { LayeredBoardScene, PaintedItem } from './BoardPainter';
+import { getClipperEngine } from './ClipperEngine';
 import { PaintedShape } from './PaintedShape';
 
 /**
@@ -146,7 +147,7 @@ function polylineCapsuleRingMm(points: MmPath, width: number): MmPath {
 	if (points.length === 0) return [];
 	if (points.length === 1) return tessellateCircleMm(points[0]!.x, points[0]!.y, width / 2);
 	const pathNm = toClipperPath(points);
-	const capsule = InflatePaths([pathNm], (width / 2) * NM_PER_MM, JoinType.Round, EndType.Round);
+	const capsule = getClipperEngine().inflatePaths([pathNm], (width / 2) * NM_PER_MM, JoinType.Round, EndType.Round);
 	return capsule[0] ? fromClipperPath(capsule[0]) : [];
 }
 
@@ -385,7 +386,7 @@ export function buildBoardOutlineRegionNm(board: any): Paths | null {
 	const chained = assembleClosedLoops(openEdges);
 	const allLoops = [...closedLoops, ...chained].filter(l => l.length >= 3);
 	if (allLoops.length === 0) return null;
-	return BooleanOp(ClipType.Union, FillRule.EvenOdd, allLoops.map(toClipperPath), []);
+	return getClipperEngine().booleanOp(ClipType.Union, FillRule.EvenOdd, allLoops.map(toClipperPath), []);
 }
 
 // Real KiCad's own stock default (DEFAULT_COPPEREDGECLEARANCE,
@@ -428,7 +429,7 @@ export function buildEdgeExclusionsByLayer(
 	const edgeRingsMm: MmPath[] = [];
 	if (edgeClearanceMm > 0) {
 		for (const loop of closedLoops) {
-			const inflated = InflatePaths([toClipperPath(loop)], edgeClearanceMm * NM_PER_MM, JoinType.Round, EndType.Polygon);
+			const inflated = getClipperEngine().inflatePaths([toClipperPath(loop)], edgeClearanceMm * NM_PER_MM, JoinType.Round, EndType.Polygon);
 			for (const path of inflated) edgeRingsMm.push(fromClipperPath(path));
 		}
 		for (const edge of openEdges) {
@@ -487,9 +488,10 @@ export function computeFillFromRings(
 	fracture, one per disjoint fill region */ {
 	if (outlinePoints.length < 3) return [];
 
+	const engine = getClipperEngine();
 	let outlineRingsNm: Paths = [toClipperPath(outlinePoints)];
 	if (boardOutlineNm && boardOutlineNm.length > 0) {
-		outlineRingsNm = BooleanOp(ClipType.Intersection, FillRule.NonZero, outlineRingsNm, boardOutlineNm);
+		outlineRingsNm = engine.booleanOp(ClipType.Intersection, FillRule.NonZero, outlineRingsNm, boardOutlineNm);
 		if (outlineRingsNm.length === 0) return []; // zone doesn't overlap the board at all
 	}
 
@@ -501,15 +503,15 @@ export function computeFillFromRings(
 		// No obstacles — still route the outline through a Union-with-itself
 		// so self-intersections in an authored (possibly hand-drawn) outline
 		// get the same cleanup real KiCad's fill always applies.
-		fillNm = BooleanOp(ClipType.Union, FillRule.NonZero, outlineRingsNm, []);
+		fillNm = engine.booleanOp(ClipType.Union, FillRule.NonZero, outlineRingsNm, []);
 	}
 	else {
 		const inflatedNm = hasClearanceObstacles
-			? InflatePaths(exclusionRingsMm.map(toClipperPath), clearanceMm * NM_PER_MM, JoinType.Round, EndType.Polygon)
+			? engine.inflatePaths(exclusionRingsMm.map(toClipperPath), clearanceMm * NM_PER_MM, JoinType.Round, EndType.Polygon)
 			: [];
 		const preformedNm = (extraExclusionRingsMm ?? []).map(toClipperPath);
-		const unionExclusionsNm = BooleanOp(ClipType.Union, FillRule.NonZero, [...inflatedNm, ...preformedNm], []);
-		fillNm = BooleanOp(ClipType.Difference, FillRule.NonZero, outlineRingsNm, unionExclusionsNm);
+		const unionExclusionsNm = engine.booleanOp(ClipType.Union, FillRule.NonZero, [...inflatedNm, ...preformedNm], []);
+		fillNm = engine.booleanOp(ClipType.Difference, FillRule.NonZero, outlineRingsNm, unionExclusionsNm);
 	}
 	return fractureFillResult(fillNm).map(fromClipperPath);
 }
