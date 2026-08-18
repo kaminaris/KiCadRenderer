@@ -324,7 +324,21 @@ function padThermalSpokesMm(
 
 	const halfW = localSizeMm.width / 2, halfH = localSizeMm.height / 2;
 	const hw = spokeWidth / 2;
-	const outerW = halfW + gapMm, outerH = halfH + gapMm;
+	// Real KiCad's own buildThermalSpokes (zone_filler.cpp) inflates its
+	// spoke bounding box by `thermalReliefGap + epsilon` (epsilon =
+	// bds.m_MaxError, a small geometry tolerance), NOT by the gap alone —
+	// its own comment explains this is needed so the spoke provably reaches
+	// past the knocked-out moat rather than landing exactly on its boundary.
+	// This matters here for the same reason: the moat ring comes from
+	// Clipper2's numerical inflate of the pad's own polygon, while the spoke
+	// reach is computed by plain arithmetic — an exact halfW+gap match
+	// leaves the connectivity test point sitting exactly ON the moat edge,
+	// where floating-point/tessellation noise can tip it either way. Without
+	// this overlap, a real board reproducibly showed a pad with a
+	// legitimately-open spoke direction still losing its connection because
+	// the test point landed a hair inside the moat.
+	const spokeOverlapMm = 0.005;
+	const outerW = halfW + gapMm + spokeOverlapMm, outerH = halfH + gapMm + spokeOverlapMm;
 	// Real KiCad defaults a round (or round-anchor custom) pad's thermal
 	// spoke angle to 45° (an "X"), and every other shape to a cardinal "+" —
 	// see pad.h's own GetThermalSpokeAngle doc comment. This app doesn't
@@ -641,7 +655,7 @@ export function resolveCopperLayers(scene: LayeredBoardScene): string[] {
  *  outer/hole rings consistently, but nesting parity is the sign-independent
  *  ground truth, which matters more for a point landing exactly on the
  *  knife-edge between an intermediate chain of boolean ops. */
-export function isPointInsideRings(pt: Point, rings: Paths): boolean {
+function isPointInsideRings(pt: Point, rings: Paths): boolean {
 	let count = 0;
 	for (const ring of rings) {
 		if (PointInPolygon(pt, ring) !== PointInPolygonResult.IsOutside) count++;
@@ -660,7 +674,7 @@ export function isPointInsideRings(pt: Point, rings: Paths): boolean {
  * each other even when neither alone reaches the main pour. A spoke that
  * fails both checks is exactly what real KiCad calls a leg that "would not
  * connect to anywhere" and simply isn't drawn. */
-export function pruneThermalSpokes(candidates: ThermalSpokeCandidateMm[], fillNm: Paths): Path[] {
+function pruneThermalSpokes(candidates: ThermalSpokeCandidateMm[], fillNm: Paths): Path[] {
 	if (candidates.length === 0) return [];
 	const candidatesNm = candidates.map(c => ({
 		ring: toClipperPath(c.ring),

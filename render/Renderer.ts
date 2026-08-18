@@ -37,7 +37,7 @@ export interface Renderer {
 	circle(center: Vec2, radius: number, style: RenderStyle): void;
 	arc(center: Vec2, radius: number, startAngleRad: number, endAngleRad: number, style: RenderStyle): void;
 	rect(topLeft: Vec2, width: number, height: number, style: RenderStyle): void;
-	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number): void;
+	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number, corners?: [Vec2, Vec2, Vec2, Vec2]): void;
 	/**
 	 * Multiple point rings filled as ONE path with the even-odd rule — needed
 	 * for glyph outlines (KiCad's text render_cache), where a letter like "G"

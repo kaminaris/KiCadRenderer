@@ -121,6 +121,7 @@ export const boardOutlineAreaColor = 'rgba(100, 100, 100, 0.35)';
 // whichever copper layer it's flashed on (see BoardPainter.buildVia).
 export const viaHoleWallColor = 'rgb(236, 236, 236)';
 export const viaHoleColor = 'rgb(227, 183, 46)';
+export const pointCrossColor = 'rgb(255, 38, 226)';
 
 export function styleForLayer(layer: string): LayerStyle {
 	return layerStyles[layer] ?? defaultStyle;

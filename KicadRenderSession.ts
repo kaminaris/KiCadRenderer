@@ -9,6 +9,7 @@
 // text) — this class owns camera state, scene building, and painting.
 
 import { KicadParser } from '@kicad-io/KicadParser';
+import { onBoardBarcodeEncoderReady } from './paint/BarcodeEncoder';
 import {
 	KicadElementWire
 }                      from '@kicad-io/KicadElementWire';
@@ -22,13 +23,13 @@ import {
 	KicadElementNoConnect
 }                      from '@kicad-io/KicadElementNoConnect';
 import {
-	KicadElementRectangle, KicadElementGrLine, KicadElementGrRect
+	KicadElementRectangle, KicadElementGrLine, KicadElementGrRect, KicadElementFpLine, KicadElementFpRect
 }                      from '@kicad-io/KicadElementStartEnd';
 import {
-	KicadElementCircle, KicadElementGrCircle
+	KicadElementCircle, KicadElementGrCircle, KicadElementFpCircle
 }                      from '@kicad-io/KicadElementCircle';
 import {
-	KicadElementArc, KicadElementGrArc
+	KicadElementArc, KicadElementGrArc, KicadElementFpArc
 }                      from '@kicad-io/KicadElementArc';
 import {
 	KicadElementPolyline, KicadElementBezier, KicadElementGrCurve
@@ -64,6 +65,9 @@ import {
 	KicadElementImage
 }                      from '@kicad-io/KicadElementImage';
 import {
+	KicadElementBarcode
+}                      from '@kicad-io/KicadElementBarcode';
+import {
 	KicadElementText, KicadElementTextBox, KicadElementLabel, KicadElementGrText, KicadElementGrTextBox
 }                      from '@kicad-io/KicadElementText';
 import {
@@ -78,6 +82,9 @@ import {
 import {
 	KicadElementSymbol
 }                      from '@kicad-io/KicadElementSymbol';
+import {
+	KicadElementProperty
+}                      from '@kicad-io/KicadElementProperty';
 import {
 	KicadElementFootprint
 }                      from '@kicad-io/KicadElementFootprint';
@@ -98,6 +105,9 @@ import {
 	type ZoneHatchStyle, type ZonePadConnectionType, type ZoneSmoothingType, type ZoneIslandRemovalMode,
 	type RuleAreaKeepoutSettings
 }                      from '@kicad-io/KicadElementZone';
+import {
+	KicadElementDimension
+}                      from '@kicad-io/KicadElementDimension';
 import {
 	KicadElementSheet
 }                      from '@kicad-io/KicadElementSheet';
@@ -424,10 +434,10 @@ export type ResizeHandle = 'nw' | 'n' | 'ne' | 'w' | 'center' | 'e' | 'sw' | 's'
  *  only exists in the PCB editor — so alignSelection() only covers these six. */
 export type AlignAxis = 'left' | 'right' | 'top' | 'bottom' | 'center-x' | 'center-y';
 
-/** The editable, axis-aligned bounds of a selected root-level rectangle or
- * text box. These are deliberately separate from general hit bounds: the
- * latter also cover symbols and every other painted item, none of which has
- * the nine-handle resize contract. */
+/** The editable, axis-aligned bounds of a selected root-level rectangle,
+ * text box, image, or barcode. These are deliberately separate from general
+ * hit bounds: the latter also cover symbols and every other painted item,
+ * none of which has the nine-handle resize contract. */
 export interface SelectionResizeBox {
 	id: string;
 	x: number;
@@ -484,6 +494,7 @@ export type EditPreviewState =
 	| { kind: 'arc'; points: Vec2[]; cursor: Vec2 }
 	| { kind: 'bezier'; points: Vec2[]; cursor: Vec2 }
 	| { kind: 'rule-area'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'dimension'; type: 'aligned' | 'orthogonal'; points: Vec2[]; cursor: Vec2 }
 	| { kind: 'text'; anchor: Vec2; text: string }
 	| { kind: 'text-box'; x: number; y: number; width: number; height: number; text: string }
 	| { kind: 'label'; anchor: Vec2; text: string; rotation: number }
@@ -753,6 +764,12 @@ export class KicadRenderSession {
 	 */
 	constructor(canvas2d: HTMLCanvasElement, canvasGl: HTMLCanvasElement | null) {
 		registerDefaultKicadClasses();
+		onBoardBarcodeEncoderReady(() => {
+			if (this.documentType === 'board' && this.boardRoot) {
+				this.boardStructureDirty = true;
+				this.scheduleRender();
+			}
+		});
 
 		this.canvas2d = canvas2d;
 		this.canvasGl = canvasGl;
@@ -2767,6 +2784,324 @@ export class KicadRenderSession {
 		return this.documentType === 'board' && !!this.boardRoot?.rootElement;
 	}
 
+	/** Embed a raster image as a board-level `image` record on the active
+	 * layer.  KiCad stores the same binary payload shape as schematic images,
+	 * with the PCB layer providing its visibility and rendering color context. */
+	addBoardGraphicImage(x: number, y: number, data: string, mimeType: string, layer: string, scale = 1): string | null {
+		if (!this.canAddBoardGraphic() || !data || !mimeType.startsWith('image/')) {
+			return null;
+		}
+		this.pushUndoSnapshot('Place image');
+		const image = new KicadElementImage();
+		image.setOrigin(x, y);
+		image.setLayer(layer);
+		image.setScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
+		image.setUuid();
+		const imageData = new KicadElementData();
+		imageData.data = data;
+		image.addChild(imageData);
+		this.boardRoot!.rootElement.addChild(image);
+		this.commitAstMutation();
+		return image.getUuid() ?? null;
+	}
+
+	/** Creates a native Pcbnew `(barcode ...)` semantic record. Its modules are
+	 * deliberately not serialized: Zint regenerates them from these fields. */
+	addBoardBarcode(
+		x: number, y: number, data: {
+			text: string; type: 'code39' | 'code128' | 'datamatrix' | 'qr' | 'microqr'; errorCorrection: 'L' | 'M' | 'Q' | 'H';
+			showText: boolean; textHeightMm: number; widthMm: number; heightMm: number; locked: boolean;
+			layer: string; knockout: boolean; marginXmm: number; marginYmm: number; orientation: number;
+		}
+	): string | null {
+		if (!this.canAddBoardGraphic() || !data.text.trim()) return null;
+		this.pushUndoSnapshot('Place barcode');
+		const barcode = new KicadElementBarcode();
+		barcode.setOrigin(x, y, data.orientation);
+		barcode.setLayer(data.layer);
+		barcode.setSize(Math.max(0.01, data.widthMm), Math.max(0.01, data.heightMm));
+		barcode.setBarcodeText(data.text);
+		barcode.setBarcodeType(data.type);
+		if (data.type === 'qr' || data.type === 'microqr') barcode.setErrorCorrection(data.errorCorrection);
+		barcode.setTextHidden(!data.showText);
+		barcode.setTextHeight(Math.max(0.01, data.textHeightMm));
+		barcode.setKnockout(data.knockout);
+		if (data.knockout) barcode.setMargins(Math.max(0, data.marginXmm), Math.max(0, data.marginYmm));
+		barcode.setLocked(data.locked);
+		barcode.setUuid();
+		this.boardRoot!.rootElement.addChild(barcode);
+		this.commitAstMutation();
+		return barcode.getUuid() ?? null;
+	}
+
+	/** Creates the two regular linear dimension records Pcbnew uses. `height`
+	 * is the signed offset of the rendered dimension line from the measured
+	 * points, rather than a third point in the file format. */
+	addBoardDimension(
+		type: 'aligned' | 'orthogonal', first: { x: number; y: number }, second: { x: number; y: number },
+		placement: { x: number; y: number }, layer: string
+	): string | null {
+		if (!this.canAddBoardGraphic() || (first.x === second.x && first.y === second.y)) {
+			return null;
+		}
+		const dx = second.x - first.x;
+		const dy = second.y - first.y;
+		const orientation = Math.abs(dx) >= Math.abs(dy) ? 0 : 1;
+		const distance = Math.hypot(dx, dy);
+		const height = type === 'orthogonal'
+			? (orientation === 0 ? placement.y - first.y : placement.x - first.x)
+			: ((placement.x - first.x) * -dy + (placement.y - first.y) * dx) / distance;
+		if (height === 0) {
+			return null;
+		}
+
+		this.pushUndoSnapshot(`Place ${ type } dimension`);
+		const dimension = new KicadElementDimension();
+		dimension.setDimensionType(type);
+		dimension.setLayer(layer);
+		dimension.setPoints([first, second]);
+		dimension.setHeight(height);
+		if (type === 'orthogonal') {
+			dimension.setOrientation(orientation);
+		}
+		dimension.setUuid();
+		const uuid = dimension.getUuid()!;
+
+		// Real KiCad defaults (pcb_dimension.h's constructor field
+		// initializers) — see KicadElementDimensionFormat/Style's own doc
+		// comments for the file-format token names these map to.
+		dimension.setPrefix('');
+		dimension.setSuffix('');
+		dimension.setUnitsMode('automatic');
+		dimension.setUnitsFormat('bare_suffix');
+		dimension.setPrecision(4);
+		dimension.setLineThickness(0.1);
+		dimension.setArrowLength(1.27);
+		dimension.setTextPositionMode('manual');
+		dimension.setArrowDirection('outward');
+		dimension.setExtensionHeight(0.58642);
+		dimension.setExtensionOffset(0.5);
+		dimension.setKeepTextAligned(true);
+
+		const lineStart = type === 'orthogonal'
+			? (orientation === 0 ? { x: first.x, y: first.y + height } : { x: first.x + height, y: first.y })
+			: { x: first.x - dy / distance * height, y: first.y + dx / distance * height };
+		const lineEnd = type === 'orthogonal'
+			? (orientation === 0 ? { x: second.x, y: second.y + height } : { x: second.x + height, y: second.y })
+			: { x: second.x - dy / distance * height, y: second.y + dx / distance * height };
+		const measured = type === 'orthogonal' ? (orientation === 0 ? Math.abs(dx) : Math.abs(dy)) : distance;
+		const text = new KicadElementGrText(this.formatDimensionValueText(dimension, measured));
+		const textAngle = type === 'aligned'
+			? ((-Math.atan2(dy, dx) * 180 / Math.PI + 90) % 180) - 90
+			: (orientation === 1 ? 90 : 0);
+		text.setOrigin((lineStart.x + lineEnd.x) / 2, (lineStart.y + lineEnd.y) / 2, textAngle);
+		text.setLayer(layer);
+		text.setFont(1, 1, false, false, 0.1);
+		text.setUuid();
+		dimension.addChild(text);
+
+		this.boardRoot!.rootElement.addChild(dimension);
+		this.commitAstMutation();
+		return uuid;
+	}
+
+	/** Real KiCad's `PCB_DIMENSION_BASE::GetValueText()` equivalent — the
+	 *  measured length (already in mm, this app's native board unit),
+	 *  converted to the dimension's own chosen display unit, formatted to
+	 *  its precision/suppress-trailing-zeroes settings, and wrapped in
+	 *  prefix/suffix/unit-suffix — or the literal override text verbatim
+	 *  when override is enabled. `measuredMm` is the caller's job to compute
+	 *  (aligned: point-to-point distance; orthogonal: the single-axis
+	 *  delta) since that math already differs by type at every call site. */
+	private formatDimensionValueText(dim: KicadElementDimension, measuredMm: number): string {
+		if (dim.getOverrideTextEnabled()) {
+			return dim.getOverrideText();
+		}
+		const unitsMode = dim.getUnitsMode();
+		const unitLabel = unitsMode === 'inch' ? 'in' : unitsMode === 'mils' ? 'mil' : 'mm';
+		const converted = unitsMode === 'inch' ? measuredMm / 25.4
+			: unitsMode === 'mils' ? (measuredMm / 25.4) * 1000
+			: measuredMm;
+		const precision = dim.getPrecision();
+		let valueStr = converted.toFixed(precision);
+		if (dim.getSuppressZeroes() && valueStr.includes('.')) {
+			valueStr = valueStr.replace(/0+$/, '').replace(/\.$/, '');
+		}
+		const unitsFormat = dim.getUnitsFormat();
+		const suffix = unitsFormat === 'no_suffix' ? '' : unitsFormat === 'paren_suffix' ? ` (${ unitLabel })` : ` ${ unitLabel }`;
+		return `${ dim.getPrefix() }${ valueStr }${ suffix }${ dim.getSuffix() }`;
+	}
+
+	/** Re-derives a dimension's measured value from its stored points/type
+	 *  and re-runs formatDimensionValueText — called after any property
+	 *  edit that affects the displayed string (precision, prefix/suffix,
+	 *  units, units format, suppress-zeroes, override text/enabled), since
+	 *  none of those touch the geometry translateElementGeometry/
+	 *  addBoardDimension already handle. Matches real KiCad's own
+	 *  updateGeometry()/updateText(), which re-derive and re-store the text
+	 *  on every relevant change rather than computing it lazily at paint
+	 *  time — this app's buildDimension still just renders whatever's
+	 *  baked into the `gr_text` child, so that child must be kept in sync
+	 *  here instead. */
+	refreshDimensionText(paintId: string): boolean {
+		if (this.documentType !== 'board' || !this.scene) {
+			return false;
+		}
+		const dim = this.findDimensionByPaintId(paintId);
+		const textEl = dim?.findFirstChildByClass(KicadElementGrText);
+		const measuredMm = dim ? this.measuredMmForDimension(dim) : null;
+		if (!dim || !textEl || measuredMm === null) {
+			return false;
+		}
+		textEl.value = this.formatDimensionValueText(dim, measuredMm);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Read-only counterpart to refreshDimensionText — the dialog's "Value"
+	 *  preview row needs the measured/formatted string without writing it
+	 *  back (and without requiring override to already be enabled, unlike
+	 *  refreshDimensionText which only ever runs after a real property
+	 *  edit). Returns null for anything that isn't a dimension. */
+	getDimensionMeasuredText(paintId: string): string | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const dim = this.findDimensionByPaintId(paintId);
+		const measuredMm = dim ? this.measuredMmForDimension(dim) : null;
+		return dim && measuredMm !== null ? this.formatDimensionValueText(dim, measuredMm) : null;
+	}
+
+	/** Resolves either a dimension's own `:line` paint item OR its `:text`
+	 *  sub-item (whose `element` is the gr_text child itself, `.parent` the
+	 *  owning dimension — see BoardPainter.buildDimension's doc comment) to
+	 *  the owning KicadElementDimension. */
+	private findDimensionByPaintId(paintId: string): KicadElementDimension | undefined {
+		const item = this.scene?.hitTestItems.find(candidate => candidate.id === paintId)
+			?? [...(this.scene?.layerBuckets.values() ?? [])].flat().find(candidate => candidate.id === paintId);
+		return item?.element instanceof KicadElementDimension ? item.element
+			: item?.element instanceof KicadElementGrText && item.element.parent instanceof KicadElementDimension
+				? item.element.parent
+				: undefined;
+	}
+
+	private measuredMmForDimension(dim: KicadElementDimension): number | null {
+		const points = dim.getPoints();
+		if (points.length < 2) {
+			return null;
+		}
+		const [p1, p2] = points;
+		return dim.getDimensionType() === 'orthogonal'
+			? (dim.getOrientation() === 0 ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y))
+			: Math.hypot(p2.x - p1.x, p2.y - p1.y);
+	}
+
+	/** The crossbar's two endpoints (real KiCad's `m_crossBarStart`/
+	 *  `m_crossBarEnd`) — same offset-by-height math BoardPainter.
+	 *  buildDimension recomputes every frame for drawing, duplicated here
+	 *  rather than shared across the render/session split (matches how
+	 *  addBoardDimension already computes this same math independently at
+	 *  placement time). Null points/degenerate line -> null. */
+	private computeDimensionCrossbar(dim: KicadElementDimension): { lineStart: Vec2; lineEnd: Vec2 } | null {
+		const points = dim.getPoints();
+		if (points.length < 2) {
+			return null;
+		}
+		const [p1, p2] = points;
+		const height = dim.getHeight() ?? 0;
+		if (dim.getDimensionType() === 'orthogonal') {
+			const orientation = dim.getOrientation() ?? 0;
+			return orientation === 1
+				? { lineStart: new Vec2(p1.x + height, p1.y), lineEnd: new Vec2(p2.x + height, p2.y) }
+				: { lineStart: new Vec2(p1.x, p1.y + height), lineEnd: new Vec2(p2.x, p2.y + height) };
+		}
+		const dx = p2.x - p1.x, dy = p2.y - p1.y;
+		const dist = Math.hypot(dx, dy) || 1;
+		const nx = -dy / dist, ny = dx / dist;
+		return {
+			lineStart: new Vec2(p1.x + nx * height, p1.y + ny * height),
+			lineEnd: new Vec2(p2.x + nx * height, p2.y + ny * height),
+		};
+	}
+
+	/**
+	 * The 5 real-KiCad point-editor handles for a selected dimension
+	 * (PCB_POINT_EDITOR's `PCB_DIM_ALIGNED`/`PCB_DIM_ORTHOGONAL` case,
+	 * pcb_point_editor.cpp): the two MEASURED points (dragging re-measures
+	 * — see moveDimensionMeasuredPoint), the two CROSSBAR/arrow ends
+	 * (dragging changes the crossbar height — see
+	 * setDimensionHeightFromCursor), and the text's own position (dragging
+	 * repositions the label — already handled generically by the text
+	 * sub-item's own independent drag, see BoardPainter.buildDimension's
+	 * doc comment; this just reports where to draw/hit-test that 5th
+	 * handle). Accepts either the dimension's own `:line` paint id or its
+	 * `:text` sub-id (whichever is currently selected). */
+	getDimensionEditAnchors(paintId: string): { measured: [Vec2, Vec2]; crossbar: [Vec2, Vec2]; text: Vec2 } | null {
+		const dim = this.findDimensionByPaintId(paintId);
+		const points = dim?.getPoints();
+		const crossbar = dim ? this.computeDimensionCrossbar(dim) : null;
+		const textEl = dim?.findFirstChildByClass(KicadElementGrText);
+		if (!dim || !points || points.length < 2 || !crossbar || !textEl) {
+			return null;
+		}
+		const textOrigin = textEl.getOrigin();
+		return {
+			measured: [new Vec2(points[0].x, points[0].y), new Vec2(points[1].x, points[1].y)],
+			crossbar: [crossbar.lineStart, crossbar.lineEnd],
+			text: new Vec2(textOrigin.x, textOrigin.y),
+		};
+	}
+
+	/** Drags one of a dimension's two MEASURED-point handles — re-measures
+	 *  the dimension (the crossbar/arrows/extension lines all recompute
+	 *  from the new points at paint time, same as any points edit) and
+	 *  refreshes the displayed value text, since the distance itself just
+	 *  changed. `index` is 0 or 1, matching getDimensionEditAnchors'
+	 *  `measured` tuple order. */
+	moveDimensionMeasuredPoint(paintId: string, index: 0 | 1, x: number, y: number): boolean {
+		const dim = this.findDimensionByPaintId(paintId);
+		const points = dim?.getPoints();
+		if (!dim || !points || points.length < 2) {
+			return false;
+		}
+		const next = points.map((p, i) => i === index ? { x, y } : { x: p.x, y: p.y });
+		dim.setPoints(next);
+		this.refreshDimensionText(paintId);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Drags one of a dimension's two CROSSBAR-end (arrow) handles — changes
+	 *  the crossbar height, matching real KiCad's PCB_POINT_EDITOR letting
+	 *  you reshape how far the dimension line sits from the measured points
+	 *  by grabbing an arrow end. `cursorX/Y` is the live drag position; the
+	 *  height is derived by projecting it onto the perpendicular-to-the-
+	 *  measured-line axis (aligned) or the relevant single axis (orthogonal)
+	 *  — the exact same formula addBoardDimension already uses when a
+	 *  dimension is first placed, just re-run continuously during the drag
+	 *  instead of once at creation. Doesn't touch the displayed text (height
+	 *  doesn't affect the measured value). */
+	setDimensionHeightFromCursor(paintId: string, cursorX: number, cursorY: number): boolean {
+		const dim = this.findDimensionByPaintId(paintId);
+		const points = dim?.getPoints();
+		if (!dim || !points || points.length < 2) {
+			return false;
+		}
+		const [p1, p2] = points;
+		let height: number;
+		if (dim.getDimensionType() === 'orthogonal') {
+			height = (dim.getOrientation() ?? 0) === 0 ? cursorY - p1.y : cursorX - p1.x;
+		}
+		else {
+			const dx = p2.x - p1.x, dy = p2.y - p1.y;
+			const dist = Math.hypot(dx, dy) || 1;
+			height = ((cursorX - p1.x) * -dy + (cursorY - p1.y) * dx) / dist;
+		}
+		dim.setHeight(height);
+		this.commitAstMutation();
+		return true;
+	}
+
 	/** Reads a pad/track/via net directly from the painted item's AST node.
 	 *  Clicking mid-track therefore inherits its net without splitting the
 	 *  original segment—KiCad connectivity treats touching same-net copper
@@ -2874,6 +3209,141 @@ export class KicadRenderSession {
 			}
 		}
 		return best;
+	}
+
+	/**
+	 * Direct-purpose port of real KiCad's `PCB_GRID_HELPER::BestSnapAnchor`
+	 * (`pcbnew/tools/pcb_grid_helper.cpp`) as used by `DRAWING_TOOL::
+	 * DrawDimension` (`pcbnew/tools/drawing_tool.cpp:1698`) — every dimension
+	 * click there is `grid.BestSnapAnchor(cursorPos, nullptr, GRID_GRAPHICS)`,
+	 * not a plain grid-snap, which is why a dimension's endpoints in real
+	 * KiCad land exactly on pad centers, footprint corners, and graphic-item
+	 * endpoints instead of wherever the cursor happened to be. Not net-
+	 * filtered (dimensions aren't electrical items, unlike routing's
+	 * `nearestAnchorPoint`).
+	 *
+	 * Real KiCad's `computeAnchors` (same file, `:1333` on) walks every
+	 * visible item type and calls `addAnchor` for a curated set of points per
+	 * type — this ports the subset that actually matters for dimensioning a
+	 * board: pad/via centers, track endpoints, a footprint's own anchor
+	 * position plus its selection-hull corners, and every graphic line/rect/
+	 * circle/arc's own endpoints/corners/midpoints/center (its `addAnchor`
+	 * calls at `:1376`, `:1428-1432`, `:1496-1505`, `:1520-1533`). Doesn't
+	 * port table/image/text/group anchors or intersection/construction-line
+	 * snapping — out of scope for a first pass at "dimensions actually snap
+	 * to something."
+	 */
+	nearestBoardGraphicAnchor(worldPos: Vec2, toleranceWorld: number): Vec2 | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		let best: { point: Vec2; dist: number } | null = null;
+		const consider = (x: number, y: number) => {
+			const dist = Math.hypot(x - worldPos.x, y - worldPos.y);
+			if (dist <= toleranceWorld && (!best || dist < best.dist)) {
+				best = { point: new Vec2(x, y), dist };
+			}
+		};
+		const considerLineLike = (el: any) => {
+			const { start, end } = el.getStartEnd();
+			const isRect = typeof el.name === 'string' && el.name.endsWith('_rect');
+			if (!isRect) {
+				consider(start.x, start.y);
+				consider(end.x, end.y);
+				consider((start.x + end.x) / 2, (start.y + end.y) / 2);
+				return;
+			}
+			const corners = [
+				{ x: start.x, y: start.y }, { x: end.x, y: start.y },
+				{ x: end.x, y: end.y }, { x: start.x, y: end.y },
+			];
+			consider((start.x + end.x) / 2, (start.y + end.y) / 2);
+			for (let i = 0; i < 4; i++) {
+				const a = corners[i]!, b = corners[(i + 1) % 4]!;
+				consider(a.x, a.y);
+				consider((a.x + b.x) / 2, (a.y + b.y) / 2);
+			}
+		};
+		const considerCircleLike = (el: any) => {
+			const { x: cx, y: cy } = el.getCenter();
+			const { x: ex, y: ey } = el.getEnd();
+			const r = Math.hypot(ex - cx, ey - cy);
+			consider(cx, cy);
+			consider(cx + r, cy);
+			consider(cx - r, cy);
+			consider(cx, cy + r);
+			consider(cx, cy - r);
+		};
+		const considerArcLike = (el: any) => {
+			const { start, mid, end } = el.getStartMidEnd();
+			consider(start.x, start.y);
+			consider(mid.x, mid.y);
+			consider(end.x, end.y);
+			try {
+				const { centerX, centerY } = el.getArcCenterRadiusAngles();
+				consider(centerX, centerY);
+			}
+			catch {
+				// Collinear start/mid/end (degenerate arc) — no well-defined
+				// center to offer as an anchor, same as real KiCad's own
+				// GetCenter() guard for a zero-curvature arc.
+			}
+		};
+		// Deliberately scans layerBuckets (every drawn item), not hitTestItems
+		// (only individually CLICKABLE items — plain board-level gr_line/gr_arc
+		// and every footprint-owned fp_line/fp_rect/fp_circle/fp_arc are
+		// `hitTestable: false` there, matching real KiCad's own selection
+		// rule that footprint-owned graphics resolve clicks to the whole
+		// footprint instead — see BoardPainter.buildFpLine's doc comment).
+		// That rule is specifically about mouse-picking; real KiCad's own
+		// grid helper snaps to those same items regardless (confirmed
+		// against a board using a plain gr_line for its Edge.Cuts outline —
+		// far and away the single most common dimension target — which
+		// silently produced ZERO anchors when this scanned hitTestItems).
+		const seen = new Set<any>();
+		for (const bucket of this.scene.layerBuckets.values()) {
+			for (const item of bucket) {
+				if (seen.has(item)) {
+					continue;
+				}
+				seen.add(item);
+				if (item.kind === 'pad' || item.kind === 'via') {
+					const { x, y, w, h } = item.bbox;
+					consider(x + w / 2, y + h / 2);
+				}
+				else if (item.kind === 'track' && item.shape.type === 'segment') {
+					consider(item.shape.x1, item.shape.y1);
+					consider(item.shape.x2, item.shape.y2);
+				}
+				else if (item.kind === 'footprint') {
+					const origin = (item.element as any)?.getOrigin?.();
+					if (origin) {
+						consider(origin.x, origin.y);
+					}
+					if (item.shape.type === 'polygon') {
+						for (const pt of item.shape.points) {
+							consider(pt.x, pt.y);
+						}
+					}
+				}
+				else if (item.kind === 'graphic') {
+					const el = item.element as any;
+					if (
+						el instanceof KicadElementGrLine || el instanceof KicadElementFpLine ||
+						el instanceof KicadElementGrRect || el instanceof KicadElementFpRect
+					) {
+						considerLineLike(el);
+					}
+					else if (el instanceof KicadElementGrCircle || el instanceof KicadElementFpCircle) {
+						considerCircleLike(el);
+					}
+					else if (el instanceof KicadElementGrArc || el instanceof KicadElementFpArc) {
+						considerArcLike(el);
+					}
+				}
+			}
+		}
+		return best ? (best as { point: Vec2; dist: number }).point : null;
 	}
 
 	/** Public counterpart to hitTestToleranceWorld — the route tool's
@@ -3670,10 +4140,87 @@ export class KicadRenderSession {
 			return '';
 		}
 		const root = this.schematicRoot.rootElement;
+		this.repairLibSymbolsPosition(root);
+		this.repairDerivedLibSymbols(root);
 		if (typeof root.write === 'function') {
 			return String(root.write());
 		}
 		return '';
+	}
+
+	/** Repairs a `lib_symbols` block left at the FRONT of the schematic root
+	 *  by ensureLibSymbol's earlier `unshift()` bug (now fixed at creation
+	 *  time — see that method's doc comment — but an already-loaded document
+	 *  whose `lib_symbols` was created before the fix still carries the
+	 *  misplaced block forward untouched, since ensureLibSymbol only fixes
+	 *  the POSITION when it creates a fresh one, never when it finds an
+	 *  existing one already in the wrong spot). Repair at serialization time
+	 *  so exporting/saving an already-corrupted project genuinely fixes it
+	 *  rather than preserving the corruption — same rationale as this file's
+	 *  own repairMalformedBoardZoneOutlines/repairDetachedBoardZoneFields for
+	 *  the board side. */
+	private repairLibSymbolsPosition(root: any): void {
+		const children = root?.children as any[] | undefined;
+		if (!children) {
+			return;
+		}
+		const libSymbolsIndex = children.findIndex(c => c?.name === 'lib_symbols');
+		if (libSymbolsIndex === -1) {
+			return;
+		}
+		// Remove first, THEN scan for the header run — scanning with
+		// lib_symbols still in the array would stop the run immediately when
+		// lib_symbols itself sits before/inside it (lib_symbols isn't a
+		// header name), miscounting the target index as 0 and wrongly
+		// concluding "already correct" for exactly the corrupted case this
+		// exists to fix.
+		const [libSymbols] = children.splice(libSymbolsIndex, 1);
+		const headerNames = new Set(['version', 'generator', 'generator_version', 'uuid', 'paper']);
+		let correctIndex = 0;
+		for (const child of children) {
+			if (!headerNames.has(child?.name)) {
+				break;
+			}
+			correctIndex++;
+		}
+		children.splice(correctIndex, 0, libSymbols);
+	}
+
+	/** Repairs any `lib_symbols` entry still carrying `(extends ...)` — left
+	 *  over from before addLibrarySymbolFromText started flattening derived
+	 *  placements (see that method's doc comment for why real KiCad can
+	 *  never resolve an `extends` reference inside a SCHEMATIC's own
+	 *  lib_symbols cache: its parser always uses a throwaway, empty map
+	 *  there). An already-placed symbol from before that fix keeps its
+	 *  extends-based entry forever otherwise, since nothing else in the
+	 *  load→edit→save pipeline ever revisits an existing lib_symbols entry.
+	 *  Repair at serialization time, same rationale/pattern as
+	 *  repairLibSymbolsPosition just above. Silently leaves an entry alone
+	 *  if its base isn't present in the same lib_symbols block (nothing to
+	 *  flatten against — shouldn't happen for anything this app itself
+	 *  wrote, but a hand-edited or foreign file could hit it). */
+	private repairDerivedLibSymbols(root: any): void {
+		const libSymbols = root?.children?.find((c: any) => c?.name === 'lib_symbols');
+		const children = libSymbols?.children as KicadElementSymbol[] | undefined;
+		if (!children) {
+			return;
+		}
+		for (let i = 0; i < children.length; i++) {
+			const entry = children[i];
+			if (!(entry instanceof KicadElementSymbol) || !entry.isDerived()) {
+				continue;
+			}
+			const baseName = entry.getExtends()!;
+			const base = children.find(c => c instanceof KicadElementSymbol && c.symbolName === baseName)
+				?? children.find(c => c instanceof KicadElementSymbol && c.symbolName?.endsWith(`:${ baseName }`));
+			if (!base || !entry.symbolName) {
+				continue;
+			}
+			const flattened = this.flattenDerivedLibSymbol(base, entry, entry.symbolName);
+			flattened.rootLevel = entry.rootLevel;
+			flattened.parent = entry.parent;
+			children[i] = flattened;
+		}
 	}
 
 	/**
@@ -5859,14 +6406,33 @@ export class KicadRenderSession {
 
 	getSelectionResizeBox(): SelectionResizeBox | null {
 		const selectedId = this.selection;
-		if (this.documentType !== 'schematic' || !selectedId || !this.schScene) {
+		if (!selectedId) {
 			return null;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === selectedId);
-		const el: any = item?.element;
-		if (!item || !el || (el.name !== 'rectangle' && el.name !== 'text_box' && el.name !== 'image')
-			|| item.shape.type !== 'rect') {
+		const scene = this.documentType === 'board' ? this.scene : this.schScene;
+		if (!scene) {
 			return null;
+		}
+		const item = scene.hitTestItems.find(it => it.id === selectedId);
+		const el: any = item?.element;
+		const boardTextBoxIsAxisAligned = el?.name === 'gr_text_box'
+			&& Number(el.findFirstChildByName?.('angle')?.attributes?.[0]?.value ?? 0) === 0;
+		const boardBarcodeIsAxisAligned = el?.name === 'barcode'
+			&& Number(el.getOrigin?.().rotation ?? 0) === 0;
+		const eligible = this.documentType === 'schematic'
+			? (el?.name === 'rectangle' || el?.name === 'text_box' || el?.name === 'image') && item?.shape.type === 'rect'
+			: (el?.name === 'gr_rect' || el?.name === 'image' || boardTextBoxIsAxisAligned || boardBarcodeIsAxisAligned);
+		if (!item || !eligible) {
+			return null;
+		}
+		if (boardBarcodeIsAxisAligned) {
+			const origin = el.getOrigin();
+			const size = el.getSize?.() ?? {};
+			const width = Number(size.width);
+			const height = Number(size.height);
+			return width > 0 && height > 0
+				? { id: item.id, x: origin.x - width / 2, y: origin.y - height / 2, width, height }
+				: null;
 		}
 		const { x, y, w, h } = item.bbox;
 		return w > 0 && h > 0 ? { id: item.id, x, y, width: w, height: h } : null;
@@ -6016,11 +6582,56 @@ export class KicadRenderSession {
 	 * Find (or build-and-insert) a power-symbol library definition in the
 	 * schematic's lib_symbols block, keyed by libId. If lib_symbols itself is
 	 * missing (rare — every file this app can open already has one, but don't
-	 * assume it can't happen) a fresh one is unshifted to the FRONT of the
-	 * root's children, not appended via addChild, matching real KiCad's
-	 * convention of lib_symbols appearing near the top of the file rather than
-	 * the end.
+	 * assume it can't happen) a fresh one is inserted right after the
+	 * schematic's header block (version/generator/generator_version/uuid/
+	 * paper), not unshifted to the absolute front — real KiCad's own parser
+	 * requires those header elements to be the FIRST children of `kicad_sch`
+	 * (ParseSchematic's parseHeader() reads them positionally, before the
+	 * general element loop even starts), so a bare unshift() landing
+	 * lib_symbols ahead of them produces a file real KiCad rejects with a
+	 * generic "Expecting '(' " parse error at the header's old line 3 —
+	 * confirmed against a real exported project. Same class of bug as
+	 * insertRootChild's sheet_instances/embedded_files fix, just at the
+	 * opposite (leading) end of the file.
 	 */
+	/**
+	 * Direct port of real KiCad's `LIB_SYMBOL::Flatten()` (lib_symbol.cpp):
+	 * clone `base`'s full body (fields + graphics + pin sub-units) as-is,
+	 * then overlay `derived`'s own field properties on top (replacing a
+	 * same-named field, adding any the base didn't have), and finally stamp
+	 * the derived symbol's own identity (`targetLibId`) onto the result. No
+	 * `(extends ...)` is written — see addLibrarySymbolFromText's own doc
+	 * comment for why a schematic-embedded lib_symbols entry can never use
+	 * one. Sub-unit children (`"<Base>_<unit>_<style>"`) are renamed to the
+	 * new symbol's own bare name so the written file matches the naming
+	 * convention real KiCad's own writer produces after flattening.
+	 */
+	private flattenDerivedLibSymbol(
+		base: KicadElementSymbol, derived: KicadElementSymbol, targetLibId: string
+	): KicadElementSymbol {
+		const flattened = new KicadParser().parse(base.write()) as KicadElementSymbol;
+		flattened.symbolName = targetLibId;
+		const bareLibName = targetLibId.includes(':') ? targetLibId.slice(targetLibId.indexOf(':') + 1) : targetLibId;
+		for (const layer of flattened.getLayers()) {
+			const { unit, deMorgan } = layer.deconstructSymbolName();
+			layer.symbolName = `${ bareLibName }_${ unit }_${ deMorgan }`;
+		}
+		for (const prop of derived.getProperties()) {
+			const existing = flattened.getPropertyByName(prop.propertyName!);
+			const clone = new KicadParser().parse(prop.write()) as KicadElementProperty;
+			clone.rootLevel = flattened.rootLevel + 1;
+			clone.parent = flattened;
+			if (existing) {
+				const idx = flattened.children.indexOf(existing);
+				flattened.children[idx] = clone;
+			}
+			else {
+				flattened.children.push(clone);
+			}
+		}
+		return flattened;
+	}
+
 	private ensureLibSymbol(libId: string, build: () => KicadElementSymbol): void {
 		if (!this.schematicRoot?.rootElement) {
 			return;
@@ -6031,7 +6642,15 @@ export class KicadRenderSession {
 			libSymbols = new KicadElementLibSymbols();
 			libSymbols.parent = root;
 			libSymbols.rootLevel = root.rootLevel + 1;
-			root.children.unshift(libSymbols);
+			const headerNames = new Set(['version', 'generator', 'generator_version', 'uuid', 'paper']);
+			let insertIndex = 0;
+			for (const child of root.children) {
+				if (!headerNames.has((child as any)?.name)) {
+					break;
+				}
+				insertIndex++;
+			}
+			root.children.splice(insertIndex, 0, libSymbols);
 		}
 		if (!libSymbols.findSymbolByName(libId)) {
 			libSymbols.addChild(build());
@@ -6095,40 +6714,37 @@ export class KicadRenderSession {
 		const libId = libIdOverride ?? source.symbolName ?? symbolName;
 		const sourceForClone = new KicadParser().parse(source.write()) as KicadElementSymbol;
 		sourceForClone.symbolName = libId;
-		const detached = new KicadParser().parse(sourceForClone.write()) as KicadElementSymbol;
+		let detached = new KicadParser().parse(sourceForClone.write()) as KicadElementSymbol;
 
 		// A derived symbol (`(extends "Base")`) has no graphics/pins of its
-		// own — real KiCad resolves them from the base transparently
-		// everywhere. This app's renderer does the same (see
-		// SchematicPainter.relevantSubUnits), but only within the SAME
-		// lib_symbols block: the base must be embedded here too, not just
-		// referenced. `source.getExtends()` is the base's bare name (no
-		// library prefix — that's how it's written in the source file); the
-		// detached copy's own extends value still says that bare name after
-		// cloning, which would only resolve if a lib_symbols entry happened
-		// to be keyed by the bare name too — instead, embed the base under
-		// the SAME namespace prefix as this symbol's own libId, and rewrite
-		// the detached copy's extends to match, so both entries resolve
-		// consistently by look-up within this document's own lib_symbols.
-		let detachedBase: KicadElementSymbol | null = null;
-		let baseLibId: string | null = null;
+		// own in the SOURCE library file, where that's fine — a real .kicad_sym
+		// library file's parser (SCH_IO_KICAD_SEXPR_PARSER::ParseLib) keeps a
+		// live map of every symbol parsed so far and resolves `extends`
+		// against it. A SCHEMATIC file's OWN embedded `lib_symbols` cache is
+		// different: its parser (T_lib_symbols case) explicitly uses a
+		// throwaway, ALWAYS-EMPTY map — the parser's own comment says "No
+		// derived symbols are allowed in the library cache" — so an `extends`
+		// reference written there can never resolve in real KiCad, no matter
+		// how the base is named or where it sits. Confirmed against a real
+		// exported file: this app's own renderer resolved the extends chain
+		// fine (SchematicPainter.relevantSubUnits still does, for backward
+		// compatibility with already-saved files), but real KiCad rendered
+		// the placed symbol with no body/pins at all. Real KiCad's own
+		// placement path (SCH_SYMBOL's constructor / SetLibSymbol) always
+		// calls LIB_SYMBOL::Flatten() before caching a symbol on a schematic
+		// — clone the base's full body (fields + graphics + sub-units), then
+		// overlay the derived symbol's own field properties on top, exactly
+		// mirroring that function — so this app now writes the same
+		// self-contained, extends-free entry real KiCad itself would.
 		if (source.isDerived()) {
 			const baseName = source.getExtends()!;
 			const base = candidates.find(symbol => symbol.symbolName === baseName);
 			if (base) {
-				const prefix = libId.includes(':') ? libId.slice(0, libId.indexOf(':') + 1) : '';
-				baseLibId = `${ prefix }${ baseName }`;
-				const baseForClone = new KicadParser().parse(base.write()) as KicadElementSymbol;
-				baseForClone.symbolName = baseLibId;
-				detachedBase = new KicadParser().parse(baseForClone.write()) as KicadElementSymbol;
-				detached.setExtends(baseLibId);
+				detached = this.flattenDerivedLibSymbol(base, source, libId);
 			}
 		}
 
 		this.pushUndoSnapshot('Place symbol');
-		if (detachedBase && baseLibId) {
-			this.ensureLibSymbol(baseLibId, () => detachedBase!);
-		}
 		this.ensureLibSymbol(libId, () => detached);
 
 		const referenceBase = String(source.getAllProperties().Reference ?? 'U').replace(/^~|\?.*$/g, '').trim() || 'U';
@@ -6707,6 +7323,57 @@ export class KicadRenderSession {
 		return true;
 	}
 
+	/** Board equivalent of resizeElementBoundsById. PCB images only support a
+	 * uniform scale, while board rectangles and axis-aligned text boxes own
+	 * explicit start/end corners. */
+	resizeBoardElementBoundsById(
+		id: string, x: number, y: number, width: number, height: number, handle?: ResizeHandle): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene || !(width > 0) || !(height > 0)) {
+			return false;
+		}
+		const item = this.scene.hitTestItems.find(candidate => candidate.id === id);
+		const el: any = item?.element;
+		if (!item || !el) {
+			return false;
+		}
+		if ((el.name === 'gr_rect' || el.name === 'gr_text_box') && typeof el.setStartEnd === 'function') {
+			if (el.name === 'gr_text_box' && Number(el.findFirstChildByName?.('angle')?.attributes?.[0]?.value ?? 0) !== 0) {
+				return false;
+			}
+			el.setStartEnd(x, y, x + width, y + height);
+		}
+		else if (el.name === 'image' && typeof el.getOrigin === 'function'
+			&& typeof el.setOrigin === 'function' && typeof el.getScale === 'function'
+			&& typeof el.setScale === 'function' && item.shape.type === 'rect') {
+			const currentScale = Number(el.getScale() ?? 1);
+			const widthRatio = width / item.shape.w;
+			const heightRatio = height / item.shape.h;
+			const ratio = handle && !handle.includes('e') && !handle.includes('w') ? heightRatio : widthRatio;
+			const nextWidth = item.shape.w * ratio;
+			const nextHeight = item.shape.h * ratio;
+			const fixedRight = x + width;
+			const fixedBottom = y + height;
+			const nextX = handle?.includes('w') ? fixedRight - nextWidth : x;
+			const nextY = handle?.includes('n') ? fixedBottom - nextHeight : y;
+			el.setScale(Math.max(1e-6, currentScale * ratio));
+			el.setOrigin(nextX + nextWidth / 2, nextY + nextHeight / 2);
+		}
+		else if (el.name === 'barcode' && typeof el.getOrigin === 'function'
+			&& typeof el.setOrigin === 'function' && typeof el.setSize === 'function') {
+			const rotation = Number(el.getOrigin().rotation) || 0;
+			if (rotation !== 0) {
+				return false;
+			}
+			el.setSize(width, height);
+			el.setOrigin(x + width / 2, y + height / 2, rotation);
+		}
+		else {
+			return false;
+		}
+		this.commitAstMutation();
+		return true;
+	}
+
 	/** The per-shape geometry dispatch translateElementById() resolves an id
 	 *  to before calling this — split out so callers that already hold a
 	 *  live element reference can reposition it directly. Needed by
@@ -6725,6 +7392,22 @@ export class KicadRenderSession {
 		if (typeof el.getPolyline === 'function') {
 			const polyline = el.getPolyline();
 			return polyline ? this.translateElementGeometry(polyline, dx, dy) : false;
+		}
+		// A dimension's own measured points move like any other WithPts
+		// element (the generic branch just below handles that), but its
+		// text label lives on a SEPARATE child (KicadElementGrText) with its
+		// own origin — dragging the dimension's line/crossbar (this branch)
+		// should carry the label along with it, same as real KiCad's default
+		// "keep text aligned" behavior. Dragging the label ON ITS OWN goes
+		// through a different paint item pointed directly at the text child
+		// (see BoardPainter.buildDimension's doc comment), which reaches the
+		// getOrigin/setOrigin branch below instead — never this one.
+		if (el instanceof KicadElementDimension) {
+			const textEl = el.findFirstChildByClass(KicadElementGrText);
+			if (textEl && typeof textEl.getOrigin === 'function' && typeof textEl.setOrigin === 'function') {
+				const origin = textEl.getOrigin();
+				textEl.setOrigin(origin.x + dx, origin.y + dy, origin.rotation);
+			}
 		}
 		if (typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
 			el.setPoints(el.getPoints().map((p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy })));
@@ -7296,6 +7979,7 @@ export class KicadRenderSession {
 			this.drawEditPreview(renderer);
 			this.drawBoardHighlight(renderer);
 			this.drawZoneEditHandles(renderer);
+			this.drawDimensionEditHandles(renderer);
 			this.drawSelectionResizeHandles(renderer);
 			this.drawSelectionCurveAnchors(renderer);
 			this.drawBoardCrosshair(renderer);
@@ -7571,6 +8255,38 @@ export class KicadRenderSession {
 				}
 				break;
 			}
+			case 'dimension': {
+				if (p.points.length === 0) {
+					drawCrosshair(renderer, p.cursor, color);
+					break;
+				}
+				if (p.points.length === 1) {
+					renderer.line([p.points[0]!, p.cursor], { strokeColor: color, strokeWidth: 0.1 });
+					break;
+				}
+				const [first, second] = p.points;
+				const dx = second!.x - first!.x;
+				const dy = second!.y - first!.y;
+				const length = Math.hypot(dx, dy);
+				if (length === 0) {
+					drawCrosshair(renderer, p.cursor, color);
+					break;
+				}
+				const orientation = Math.abs(dx) >= Math.abs(dy) ? 0 : 1;
+				const height = p.type === 'orthogonal'
+					? (orientation === 0 ? p.cursor.y - first!.y : p.cursor.x - first!.x)
+					: ((p.cursor.x - first!.x) * -dy + (p.cursor.y - first!.y) * dx) / length;
+				const lineStart = p.type === 'orthogonal'
+					? (orientation === 0 ? new Vec2(first!.x, first!.y + height) : new Vec2(first!.x + height, first!.y))
+					: new Vec2(first!.x - dy / length * height, first!.y + dx / length * height);
+				const lineEnd = p.type === 'orthogonal'
+					? (orientation === 0 ? new Vec2(second!.x, second!.y + height) : new Vec2(second!.x + height, second!.y))
+					: new Vec2(second!.x - dy / length * height, second!.y + dx / length * height);
+				renderer.line([first!, lineStart], { strokeColor: color, strokeWidth: 0.1 });
+				renderer.line([second!, lineEnd], { strokeColor: color, strokeWidth: 0.1 });
+				renderer.line([lineStart, lineEnd], { strokeColor: color, strokeWidth: 0.1 });
+				break;
+			}
 			case 'text-box': {
 				renderer.rect(new Vec2(p.x, p.y), p.width, p.height, { strokeColor: color, strokeWidth: 0.15 });
 				if (p.text) {
@@ -7783,6 +8499,7 @@ export class KicadRenderSession {
 		const cx = box.x + box.width / 2;
 		const cy = box.y + box.height / 2;
 		const color = '#ffcc00';
+		const background = this.documentType === 'board' ? boardBackgroundColor : schematicBackgroundColor;
 		const deviceScale = window.devicePixelRatio || 1;
 		const lineWidth = deviceScale / this.camera.zoom;
 		const size = 7 * deviceScale / this.camera.zoom;
@@ -7796,7 +8513,7 @@ export class KicadRenderSession {
 		]) {
 			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
 				fillColor: color,
-				strokeColor: schematicBackgroundColor,
+				strokeColor: background,
 				strokeWidth: lineWidth
 			});
 		}
@@ -7835,6 +8552,35 @@ export class KicadRenderSession {
 				fillColor: color, strokeColor: boardBackgroundColor, strokeWidth: lineWidth
 			});
 		}
+	}
+
+	/** The 5 real-KiCad dimension point-editor handles (see
+	 *  getDimensionEditAnchors' own doc comment for what each one does) —
+	 *  drawn whenever either of a dimension's own two paint sub-items (its
+	 *  `:line` or its independently-selectable `:text`) is the current
+	 *  single selection, so grabbing the text handle works the same whether
+	 *  you'd selected the crossbar or the label itself. */
+	protected drawDimensionEditHandles(renderer: Renderer): void {
+		if (this.documentType !== 'board' || this.selectedIds.size !== 1
+			|| !Number.isFinite(this.camera.zoom) || this.camera.zoom <= 0) {
+			return;
+		}
+		const anchors = this.getDimensionEditAnchors([...this.selectedIds][0]!);
+		if (!anchors) {
+			return;
+		}
+		const color = '#ffcc00';
+		const deviceScale = window.devicePixelRatio || 1;
+		const lineWidth = deviceScale / this.camera.zoom;
+		const size = 7 * deviceScale / this.camera.zoom;
+		for (const point of [...anchors.measured, ...anchors.crossbar]) {
+			renderer.rect(new Vec2(point.x - size / 2, point.y - size / 2), size, size, {
+				fillColor: color, strokeColor: boardBackgroundColor, strokeWidth: lineWidth
+			});
+		}
+		renderer.rect(new Vec2(anchors.text.x - size / 2, anchors.text.y - size / 2), size, size, {
+			fillColor: color, strokeColor: boardBackgroundColor, strokeWidth: lineWidth
+		});
 	}
 
 	/** Mirrors KiCad's EDA_CIRCLE_POINT_EDIT_BEHAVIOR (center + radius) and

@@ -334,7 +334,7 @@ export class Canvas2dRenderer implements Renderer {
 		}
 	}
 
-	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number): void {
+	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number, corners?: [Vec2, Vec2, Vec2, Vec2]): void {
 		let bitmap = this.images.get(image.data);
 		if (!bitmap) {
 			bitmap = new Image();
@@ -349,7 +349,19 @@ export class Canvas2dRenderer implements Renderer {
 		if (this.batching) {
 			this.commitBatches();
 		}
-		this.ctx.drawImage(bitmap, topLeft.x, topLeft.y, width, height);
+		if (!corners) {
+			this.ctx.drawImage(bitmap, topLeft.x, topLeft.y, width, height);
+			return;
+		}
+		const [topLeftCorner, topRight, bottomLeft] = corners;
+		this.ctx.save();
+		this.ctx.transform(
+			(topRight.x - topLeftCorner.x) / width, (topRight.y - topLeftCorner.y) / width,
+			(bottomLeft.x - topLeftCorner.x) / height, (bottomLeft.y - topLeftCorner.y) / height,
+			topLeftCorner.x, topLeftCorner.y,
+		);
+		this.ctx.drawImage(bitmap, 0, 0, width, height);
+		this.ctx.restore();
 	}
 
 	protected appendRing(path: Path2D, points: Vec2[]): void {

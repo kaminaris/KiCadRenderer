@@ -68,6 +68,7 @@ export interface CachedImageJob {
 export interface RawImageJob {
 	texture: WebGLTexture;
 	x: number; y: number; width: number; height: number;
+	corners?: [Vec2, Vec2, Vec2, Vec2];
 	opacity: number;
 }
 
@@ -319,8 +320,14 @@ export class WebGLRenderer implements Renderer {
 
 	protected bakeImageJob(job: RawImageJob): CachedImageJob {
 		const gl = this.gl;
-		const x1 = job.x + job.width, y1 = job.y + job.height;
-		const positions = [job.x, job.y, x1, job.y, x1, y1, job.x, job.y, x1, y1, job.x, y1];
+		const corners = job.corners ?? [
+			new Vec2(job.x, job.y), new Vec2(job.x + job.width, job.y),
+			new Vec2(job.x + job.width, job.y + job.height), new Vec2(job.x, job.y + job.height),
+		];
+		const positions = [
+			corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y,
+			corners[0].x, corners[0].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y,
+		];
 		// UNPACK_FLIP_Y_WEBGL makes v=0 correspond to the image's top row.
 		const texCoords = [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1];
 		const positionBuffer = gl.createBuffer()!;
@@ -409,7 +416,7 @@ export class WebGLRenderer implements Renderer {
 		}
 	}
 
-	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number): void {
+	image(image: EmbeddedImage, topLeft: Vec2, width: number, height: number, corners?: [Vec2, Vec2, Vec2, Vec2]): void {
 		if (!this.buildingStatic || !(width > 0) || !(height > 0)) {
 			return;
 		}
@@ -422,7 +429,7 @@ export class WebGLRenderer implements Renderer {
 		// Keep image draw calls interleaved with regular vector geometry instead
 		// of drawing all textures in a final overlay pass.
 		this.flushPendingRegular();
-		this.buildCommands.push({ kind: 'image', job: { texture, x: topLeft.x, y: topLeft.y, width, height, opacity: this.currentOpacity } });
+		this.buildCommands.push({ kind: 'image', job: { texture, x: topLeft.x, y: topLeft.y, width, height, corners, opacity: this.currentOpacity } });
 	}
 
 	protected loadImage(source: EmbeddedImage): ImageRecord {

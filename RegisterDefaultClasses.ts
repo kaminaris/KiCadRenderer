@@ -18,13 +18,13 @@ import { KicadElementVia }       from '@kicad-io/KicadElementVia';
 import { KicadElementPad }       from '@kicad-io/KicadElementPad';
 import { KicadElementZone }      from '@kicad-io/KicadElementZone';
 import { KicadElementLayers }    from '@kicad-io/KicadElementLayers';
-import { KicadElementGrLine, KicadElementGrRect, KicadElementFpLine, KicadElementFpRect } from '@kicad-io/KicadElementStartEnd';
+import { KicadElementGrLine, KicadElementGrRect, KicadElementGrVector, KicadElementFpLine, KicadElementFpRect } from '@kicad-io/KicadElementStartEnd';
 import { KicadElementGrArc, KicadElementFpArc, KicadElementTrackArc } from '@kicad-io/KicadElementArc';
-import { KicadElementGrCircle, KicadElementFpCircle }  from '@kicad-io/KicadElementCircle';
+import { KicadElementGrCircle, KicadElementFpCircle, KicadElementGrEllipse, KicadElementFpEllipse, KicadElementGrEllipseArc, KicadElementFpEllipseArc }  from '@kicad-io/KicadElementCircle';
 import { KicadElementDimension } from '@kicad-io/KicadElementDimension';
-import { KicadElementGrText, KicadElementGrTextBox, KicadElementFpText, KicadElementText, KicadElementTextBox } from '@kicad-io/KicadElementText';
+import { KicadElementGrText, KicadElementGrTextBox, KicadElementFpText, KicadElementFpTextBox, KicadElementText, KicadElementTextBox } from '@kicad-io/KicadElementText';
 import { KicadElementFpPoly, KicadElementGrPoly } from '@kicad-io/KicadElementPolygon';
-import { KicadElementGrCurve } from '@kicad-io/KicadElementPolyline';
+import { KicadElementFpCurve, KicadElementGrCurve } from '@kicad-io/KicadElementPolyline';
 
 import { KicadElementWire }       from '@kicad-io/KicadElementWire';
 import { KicadElementBus, KicadElementBusEntry }        from '@kicad-io/KicadElementBus';
@@ -40,6 +40,9 @@ import { KicadElementNetclassFlag } from '@kicad-io/KicadElementNetclassFlag';
 import { KicadElementRuleArea } from '@kicad-io/KicadElementRuleArea';
 import { KicadElementTable } from '@kicad-io/KicadElementTable';
 import { KicadElementImage } from '@kicad-io/KicadElementImage';
+import { KicadElementTarget } from '@kicad-io/KicadElementTarget';
+import { KicadElementPoint } from '@kicad-io/KicadElementPoint';
+import { KicadElementBarcode } from '@kicad-io/KicadElementBarcode';
 import { KicadElementRectangle } from '@kicad-io/KicadElementStartEnd';
 import { KicadElementCircle as KicadElementSymCircle } from '@kicad-io/KicadElementCircle';
 import { KicadElementArc as KicadElementSymArc }       from '@kicad-io/KicadElementArc';
@@ -66,11 +69,17 @@ export function registerDefaultKicadClasses(): void {
 		Zone: KicadElementZone,
 		Layers: KicadElementLayers,
 		GrLine: KicadElementGrLine,
+		GrVector: KicadElementGrVector,
 		GrArc: KicadElementGrArc,
 		GrRect: KicadElementGrRect,
 		GrCircle: KicadElementGrCircle,
 		GrPoly: KicadElementGrPoly,
 		GrCurve: KicadElementGrCurve,
+		FpCurve: KicadElementFpCurve,
+		GrEllipse: KicadElementGrEllipse,
+		FpEllipse: KicadElementFpEllipse,
+		GrEllipseArc: KicadElementGrEllipseArc,
+		FpEllipseArc: KicadElementFpEllipseArc,
 		FpLine: KicadElementFpLine,
 		FpRect: KicadElementFpRect,
 		FpCircle: KicadElementFpCircle,
@@ -80,7 +89,13 @@ export function registerDefaultKicadClasses(): void {
 		GrText: KicadElementGrText,
 		GrTextBox: KicadElementGrTextBox,
 		FpText: KicadElementFpText,
+		FpTextBox: KicadElementFpTextBox,
+		Table: KicadElementTable,
 		TrackArc: KicadElementTrackArc,
+		Image: KicadElementImage,
+		Target: KicadElementTarget,
+		Point: KicadElementPoint,
+		Barcode: KicadElementBarcode,
 	});
 
 	registerSchematicIoClasses({

@@ -1,12 +1,16 @@
 import { Vec2 } from '../math/Vec2';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
-import { Renderer } from '../render/Renderer';
-import { styleForLayer, colorForLayer, boardBackgroundColor, boardOutlineAreaColor, viaHoleWallColor, viaHoleColor, zoneFillAlpha, withAlpha } from './LayerColors';
+import { type EmbeddedImage, Renderer } from '../render/Renderer';
+import { styleForLayer, colorForLayer, boardBackgroundColor, boardOutlineAreaColor, viaHoleWallColor, viaHoleColor, pointCrossColor, zoneFillAlpha, withAlpha } from './LayerColors';
 import { layerPaintOrder } from './LayerOrder';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, type StrokeTextGeometry } from './TextPaint';
 import { PaintedShape, shapeToBBox, bboxesIntersect } from './PaintedShape';
-import { buildBoardOutlineRingsMm } from './BoardZoneFill';
+import { buildBoardOutlineRingsMm, fromClipperPath, toClipperPath } from './BoardZoneFill';
+import { getClipperEngine } from './ClipperEngine';
+import { EndType, JoinType } from '@clipper2-ts/offset';
+import { embeddedImageInfo } from './EmbeddedImage';
+import { getBoardBarcodeEncoding } from './BarcodeEncoder';
 
 // KicadBoard/KicadElementFootprint/etc. are only available once the
 // @kicad-io submodule is resolved via the @kicad-io/* path alias in the
@@ -17,7 +21,7 @@ import { buildBoardOutlineRingsMm } from './BoardZoneFill';
 export interface PaintedItem {
 	id: string;
 	layer: string;
-	kind: 'pad' | 'track' | 'via' | 'footprint-ref' | 'footprint' | 'zone' | 'graphic';
+	kind: 'pad' | 'track' | 'via' | 'footprint-ref' | 'footprint' | 'zone' | 'graphic' | 'image';
 	// Precise shape for hit-testing; bbox is derived from it and used only
 	// as a broad-phase filter (see paint/HitTest.ts). Zones don't
 	// participate in hit-testing for the spike (large fills would dominate
@@ -238,12 +242,49 @@ export class BoardPainter {
 			}
 		}
 
+		if (getImageClass()) {
+			const boardVersion = getBoardVersion(board.rootElement);
+			const images = board.rootElement.findChildrenByClass(getImageClass());
+			for (const image of images) {
+				const item = this.buildBoardImage(image, boardVersion);
+				if (item) pushItem(item);
+			}
+		}
+
+		if (getTargetClass()) {
+			const targets = board.rootElement.findChildrenByClass(getTargetClass());
+			for (const target of targets) {
+				const item = this.buildTarget(target);
+				if (item) pushItem(item);
+			}
+		}
+
+		if (getPointClass()) {
+			const points = board.rootElement.findChildrenByClass(getPointClass());
+			for (const point of points) {
+				const item = this.buildPoint(point);
+				if (item) pushItem(item);
+			}
+		}
+
+		if (getBarcodeClass()) {
+			for (const barcode of board.rootElement.findChildrenByClass(getBarcodeClass())) {
+				const item = this.buildBarcode(barcode);
+				if (item) pushItem(item);
+			}
+		}
+
 		// Board-level graphics can live on any active layer (not only Edge.Cuts).
 		// Keeping Edge.Cuts in this ordinary graphic pass also makes a newly
 		// placed board outline behave just like the original imported one.
 		const graphicLines = board.rootElement.findChildrenByClass(getGrLineClass());
 		for (const line of graphicLines) {
 			pushItem(this.buildGrLine(line));
+		}
+		if (getGrVectorClass()) {
+			for (const vector of board.rootElement.findChildrenByClass(getGrVectorClass())) {
+				pushItem(this.buildGrLine(vector));
+			}
 		}
 
 		const graphicArcs = board.rootElement.findChildrenByClass(getGrArcClass());
@@ -275,6 +316,18 @@ export class BoardPainter {
 			const item = this.buildGrCurve(curve);
 			if (item) pushItem(item);
 		}
+		if (getGrEllipseClass()) {
+			for (const ellipse of board.rootElement.findChildrenByClass(getGrEllipseClass())) {
+				const item = this.buildEllipse(ellipse, false);
+				if (item) pushItem(item);
+			}
+		}
+		if (getGrEllipseArcClass()) {
+			for (const ellipse of board.rootElement.findChildrenByClass(getGrEllipseArcClass())) {
+				const item = this.buildEllipse(ellipse, true);
+				if (item) pushItem(item);
+			}
+		}
 
 		if (getDimensionClass()) {
 			const dimensions = board.rootElement.findChildrenByClass(getDimensionClass());
@@ -304,6 +357,11 @@ export class BoardPainter {
 			for (const textBox of textBoxes) {
 				const item = this.buildGrTextBox(textBox);
 				if (item) pushItem(item);
+			}
+		}
+		if (getTableClass()) {
+			for (const table of board.rootElement.findChildrenByClass(getTableClass())) {
+				for (const item of this.buildTable(table)) pushItem(item);
 			}
 		}
 
@@ -668,10 +726,15 @@ export class BoardPainter {
 		const layer = getCopperItemLayer(arc);
 		const width = typeof arc.getWidth === 'function' ? arc.getWidth() : 0.25;
 		const id = arc.getUuid() ?? `track-arc:${ layer }:${ centerX },${ centerY }`;
-		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius };
+		// filled: false keeps hit-testing to a ring around the arc's radius
+		// (matching SchematicPainter.buildSchCircle's same fix) — without it
+		// the whole disc the arc lies on would steal clicks from anything
+		// drawn inside it, and clicking anywhere in that disc (not just near
+		// the visible curve) would select the arc.
+		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius, filled: false, strokeWidth: width };
 
 		const items: PaintedItem[] = [{
-			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			id, layer, kind: 'track', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
 			netId: typeof arc.getNetId === 'function' ? arc.getNetId() : null,
 			netName: typeof arc.getNetName === 'function' ? arc.getNetName() : null,
 			draw: (renderer, color) => {
@@ -904,6 +967,19 @@ export class BoardPainter {
 		// these were entirely missing before, which is most of why rendered
 		// footprints looked like bare pad clusters instead of real parts.
 		if (typeof footprint.findChildrenByClass === 'function') {
+			if (getPointClass()) {
+				for (const point of footprint.findChildrenByClass(getPointClass())) {
+					const item = this.buildPoint(point, footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+			}
+			if (getImageClass()) {
+				const boardVersion = getBoardVersion(board.rootElement);
+				for (const image of footprint.findChildrenByClass(getImageClass())) {
+					const item = this.buildBoardImage(image, boardVersion, footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+			}
 			if (getFpLineClass()) {
 				for (const line of footprint.findChildrenByClass(getFpLineClass())) {
 					items.push(this.buildFpLine(line, footprintMatrix, footprintId));
@@ -945,6 +1021,35 @@ export class BoardPainter {
 					if (item) {
 						items.push(item);
 					}
+				}
+			}
+			if (getFpCurveClass()) {
+				for (const curve of footprint.findChildrenByClass(getFpCurveClass())) {
+					const item = this.buildCurve(curve, footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+			}
+			if (getFpEllipseClass()) {
+				for (const ellipse of footprint.findChildrenByClass(getFpEllipseClass())) {
+					const item = this.buildEllipse(ellipse, false, footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+			}
+			if (getFpEllipseArcClass()) {
+				for (const ellipse of footprint.findChildrenByClass(getFpEllipseArcClass())) {
+					const item = this.buildEllipse(ellipse, true, footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+			}
+			if (getFpTextBoxClass()) {
+				for (const textBox of footprint.findChildrenByClass(getFpTextBoxClass())) {
+					const item = this.buildPcbTextBox(textBox, footprintMatrix, footprintId, origin.rotation ?? 0, false);
+					if (item) items.push(item);
+				}
+			}
+			if (getTableClass()) {
+				for (const table of footprint.findChildrenByClass(getTableClass())) {
+					items.push(...this.buildTable(table, footprintMatrix, footprintId, origin.rotation ?? 0));
 				}
 			}
 		}
@@ -1456,11 +1561,7 @@ export class BoardPainter {
 			const id = `${ padId }:${ layer }`;
 			const common = { id, layer, kind: 'graphic' as const, hitTestable: false, element: pad };
 			if (pad.shape === 'custom') {
-				// PAD::TransformShapeToPolygon offsets custom primitives too. The
-				// renderer currently has only their polygon subset, so retain that
-				// exact base shape here; their offset is the remaining custom-pad
-				// parity item rather than silently replacing it with a rectangle.
-				const rings = getCustomPadLocalRings(pad)
+				const rings = offsetCustomPadLocalRings(getCustomPadLocalRings(pad), margin)
 					.map(ring => ring.map(point => fullMatrix.transform(point)));
 				if (rings.length === 0) {
 					continue;
@@ -1720,7 +1821,7 @@ export class BoardPainter {
 		}
 		const viaLayers = getElementLayers(via);
 		const maskMargin = getBoardMaskExpansion(board);
-		for (const layer of getViaMaskLayers(viaLayers)) {
+		for (const layer of getViaMaskLayers(via, board, viaLayers)) {
 			const radius = Math.max(0, outerRadius + maskMargin);
 			if (radius <= 0) {
 				continue;
@@ -1795,7 +1896,7 @@ export class BoardPainter {
 		const shape: PaintedShape = { type: 'segment', x1: start.x, y1: start.y, x2: end.x, y2: end.y, width };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: line,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: line,
 			draw: (renderer, color) => {
 				renderer.line([new Vec2(start.x, start.y), new Vec2(end.x, end.y)], { strokeColor: color, strokeWidth: width || 0.1 });
 			},
@@ -1810,10 +1911,11 @@ export class BoardPainter {
 		const layer = arc.getLayer();
 		const width = typeof arc.getStroke === 'function' ? arc.getStroke().width : 0.1;
 		const id = arc.getUuid() ?? `gr-arc:${ layer }:${ centerX },${ centerY }`;
-		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius };
+		// filled: false — same reasoning as buildTrackArc's own comment.
+		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius, filled: false, strokeWidth: width };
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
 			draw: (renderer, color) => {
 				renderer.arc(new Vec2(centerX, centerY), radius, startAngle, endAngle, { strokeColor: color, strokeWidth: width || 0.1 });
 			},
@@ -1887,17 +1989,31 @@ export class BoardPainter {
 		const orientation: number = typeof dim.getOrientation === 'function' ? (dim.getOrientation() ?? 0) : 0;
 		const items: PaintedItem[] = [];
 		const id = dim.getUuid() ?? `dim:${ points[0]?.x },${ points[0]?.y }`;
-		const strokeWidth = 0.1;
-		const arrowLength = 1.27;
+		const strokeWidth = typeof dim.getLineThickness === 'function' ? dim.getLineThickness() : 0.1;
+		const arrowLength = typeof dim.getArrowLength === 'function' ? dim.getArrowLength() : 1.27;
+		const arrowDirection = typeof dim.getArrowDirection === 'function' ? dim.getArrowDirection() : 'outward';
+		// Gap between the measured point and where the extension line starts
+		// drawing, and how far the extension line continues PAST the
+		// crossbar — real KiCad's PCB_DIM_ALIGNED::updateGeometry /
+		// PCB_DIM_ORTHOGONAL::updateGeometry (pcb_dimension.cpp), ported
+		// here as "offset/overshoot along the same perpendicular direction
+		// the crossbar itself is already offset along" rather than
+		// replicating VECTOR2I::Resize's sign handling verbatim.
+		const extensionOffset = typeof dim.getExtensionOffset === 'function' ? dim.getExtensionOffset() : 0.5;
+		const extensionOvershoot = typeof dim.getExtensionHeight === 'function' ? dim.getExtensionHeight() : 0.5;
 
 		if (points.length >= 2) {
 			const [p1, p2] = points;
 			// The dimension line's two endpoints, offset from the measured
 			// points by `height` along the perpendicular direction.
 			let lineStart: Vec2, lineEnd: Vec2;
+			let extDirX: number, extDirY: number;
+			const signHeight = height < 0 ? -1 : 1;
 			if (dimType === 'orthogonal') {
 				lineStart = orientation === 1 ? new Vec2(p1.x + height, p1.y) : new Vec2(p1.x, p1.y + height);
 				lineEnd = orientation === 1 ? new Vec2(p2.x + height, p2.y) : new Vec2(p2.x, p2.y + height);
+				extDirX = orientation === 1 ? signHeight : 0;
+				extDirY = orientation === 1 ? 0 : signHeight;
 			}
 			else {
 				const dx = p2.x - p1.x, dy = p2.y - p1.y;
@@ -1909,19 +2025,69 @@ export class BoardPainter {
 				const nx = -dy / dist, ny = dx / dist;
 				lineStart = new Vec2(p1.x + nx * height, p1.y + ny * height);
 				lineEnd = new Vec2(p2.x + nx * height, p2.y + ny * height);
+				extDirX = nx * signHeight;
+				extDirY = ny * signHeight;
 			}
 
+			const ext1Start = new Vec2(p1.x + extDirX * extensionOffset, p1.y + extDirY * extensionOffset);
+			const ext1End = new Vec2(lineStart.x + extDirX * extensionOvershoot, lineStart.y + extDirY * extensionOvershoot);
+			const ext2Start = new Vec2(p2.x + extDirX * extensionOffset, p2.y + extDirY * extensionOffset);
+			const ext2End = new Vec2(lineEnd.x + extDirX * extensionOvershoot, lineEnd.y + extDirY * extensionOvershoot);
+
+			// Outward (default): arrowhead tips sit AT the crossbar ends,
+			// splayed away from the opposite end — real KiCad's default.
+			// Inward: same tip position, legs splayed the other way (drawn
+			// by reflecting the "away from" point through the tip — see
+			// arrowheadSegments' own doc comment for why swapping tip/
+			// awayFrom isn't equivalent to this).
+			const arrows = arrowDirection === 'inward'
+				? [
+					...arrowheadSegments(lineStart, new Vec2(2 * lineStart.x - lineEnd.x, 2 * lineStart.y - lineEnd.y), arrowLength),
+					...arrowheadSegments(lineEnd, new Vec2(2 * lineEnd.x - lineStart.x, 2 * lineEnd.y - lineStart.y), arrowLength),
+				]
+				: [
+					...arrowheadSegments(lineStart, lineEnd, arrowLength),
+					...arrowheadSegments(lineEnd, lineStart, arrowLength),
+				];
 			const segments: [Vec2, Vec2][] = [
-				[new Vec2(p1.x, p1.y), lineStart],
-				[new Vec2(p2.x, p2.y), lineEnd],
+				[ext1Start, ext1End],
+				[ext2Start, ext2End],
 				[lineStart, lineEnd],
-				...arrowheadSegments(lineStart, lineEnd, arrowLength),
-				...arrowheadSegments(lineEnd, lineStart, arrowLength),
+				...arrows,
 			];
-			const bbox = boundsOfPoints([p1, p2, { x: lineStart.x, y: lineStart.y }, { x: lineEnd.x, y: lineEnd.y }]);
+			const bbox = boundsOfPoints([
+				p1, p2, { x: lineStart.x, y: lineStart.y }, { x: lineEnd.x, y: lineEnd.y },
+				{ x: ext1End.x, y: ext1End.y }, { x: ext2End.x, y: ext2End.y },
+			]);
+			// Hit-tests the actual drawn path (extension line 1 -> crossbar ->
+			// extension line 2), not the loose bbox — an open (unfilled)
+			// polyline so a click only registers near a real drawn segment,
+			// matching how a bare gr_line/gr_rect already gets selected
+			// (`shapeContainsPoint`'s edge-only branch for `filled: false`).
+			// `element` stays the whole dimension (not just this one segment
+			// chain) so a click anywhere on the line assembly selects/moves
+			// the WHOLE dimension, text included — see translateElementGeometry's
+			// KicadElementDimension branch, which is what keeps the text
+			// riding along.
 			items.push({
 				id: `${ id }:line`, layer, kind: 'graphic',
-				shape: { type: 'rect', ...bbox }, bbox, hitTestable: false, element: dim,
+				shape: {
+					type: 'polygon',
+					// Traces the actual drawn path: extension 1 (with its own
+					// gap+overshoot) -> crossbar -> extension 2. `ext1End`/
+					// `ext2End` sit just past `lineStart`/`lineEnd` (the
+					// overshoot), so the short backtrack from there to the
+					// crossbar's own start/end is a few tenths of a mm at
+					// most — harmless for hit-testing, not a stray diagonal
+					// through empty space.
+					points: [
+						{ x: ext1Start.x, y: ext1Start.y }, { x: ext1End.x, y: ext1End.y },
+						{ x: lineStart.x, y: lineStart.y }, { x: lineEnd.x, y: lineEnd.y },
+						{ x: ext2End.x, y: ext2End.y }, { x: ext2Start.x, y: ext2Start.y },
+					],
+					closed: false, filled: false, strokeWidth,
+				},
+				bbox, hitTestable: true, element: dim,
 				draw: (renderer, color) => {
 					for (const [a, b] of segments) {
 						renderer.line([a, b], { strokeColor: color, strokeWidth });
@@ -1949,7 +2115,15 @@ export class BoardPainter {
 				id: `${ id }:text`, layer, kind: 'graphic',
 				shape: { type: 'rect', x: textWorld.x - textSize, y: textWorld.y - textSize, w: textSize * 2, h: textSize * 2 },
 				bbox: { x: textWorld.x - textSize, y: textWorld.y - textSize, w: textSize * 2, h: textSize * 2 },
-				hitTestable: false, element: dim,
+				// `element` is the TEXT sub-node itself, not the whole
+				// dimension — real KiCad lets you grab just the label and
+				// drag it independently of the measured geometry (manual
+				// text-position mode); pointing this at `textEl` means the
+				// existing generic getOrigin/setOrigin drag path
+				// (translateElementGeometry) already does exactly that with
+				// no dimension-specific code, since it only touches this one
+				// child's own origin.
+				hitTestable: true, element: textEl,
 				draw: (renderer, color) => {
 					drawStrokeTextGeometry(renderer, geometry, color);
 				},
@@ -1985,7 +2159,17 @@ export class BoardPainter {
 	/** Pcbnew `gr_text_box`: a start/end rectangle with optional border and
 	 * multiline text laid out inside its four margins. */
 	protected buildGrTextBox(textBox: any): PaintedItem | null {
-		if (!textBox.value || typeof textBox.getStartEnd !== 'function') return null;
+		return this.buildPcbTextBox(textBox, null);
+	}
+
+	/** Shared PCB_TEXTBOX renderer for gr_text_box, fp_text_box and the text
+	 * part of a table cell.  Box coordinates are in the owning footprint's
+	 * library frame when a matrix is provided. */
+	protected buildPcbTextBox(
+		textBox: any, footprintMatrix: Matrix3 | null, footprintId?: string,
+		footprintRotation = 0, hitTestable = true, forceBorder?: boolean,
+	): PaintedItem | null {
+		if (typeof textBox.getStartEnd !== 'function') return null;
 		const { start, end } = textBox.getStartEnd();
 		const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
 		const width = Math.abs(end.x - start.x), height = Math.abs(end.y - start.y);
@@ -2002,17 +2186,265 @@ export class BoardPainter {
 		const contentWidth = Math.max(0, width - marginLeft - marginRight);
 		const contentHeight = Math.max(0, height - marginTop - marginBottom);
 		const justify = typeof textBox.getAnchorPoint === 'function' ? textBox.getAnchorPoint() : { x: 0, y: 0.5 };
-		const textPosition = new Vec2(x + marginLeft + contentWidth * justify.x, y + marginTop + contentHeight * justify.y);
-		const geometry = computeStrokeTextGeometry(textBox.value, textPosition, textSize, 0, isBack, font.thickness || 0.15, justify);
-		const border = textBox.getSimpleChildValue?.('border') !== false;
+		const localAngle = Number(readChildValue(textBox, 'angle') ?? 0);
+		const angleRad = localAngle * Math.PI / 180;
+		const center = new Vec2(x + width / 2, y + height / 2);
+		const rotate = (point: Vec2) => rotateAround(point, center, angleRad);
+		const toWorld = (point: Vec2) => footprintMatrix ? footprintMatrix.transform(point) : point;
+		const worldCorners = [
+			new Vec2(x, y), new Vec2(x + width, y), new Vec2(x + width, y + height), new Vec2(x, y + height),
+		].map(rotate).map(toWorld);
+		const localTextPosition = rotate(new Vec2(
+			x + marginLeft + contentWidth * justify.x,
+			y + marginTop + contentHeight * justify.y,
+		));
+		const textPosition = toWorld(localTextPosition);
+		const textAngle = localAngle + footprintRotation;
+		const geometry = textBox.value
+			? computeStrokeTextGeometry(textBox.value, textPosition, textSize, textAngle, isBack, font.thickness || 0.15, justify)
+			: null;
+		const border = forceBorder ?? textBox.getSimpleChildValue?.('border') !== false;
 		const strokeWidth = typeof textBox.getStroke === 'function' ? textBox.getStroke().width : 0.1;
-		const id = textBox.getUuid?.() ?? `gr-text-box:${ layer }:${ x },${ y }`;
-		const bbox = { x, y, w: width, h: height };
+		const rawId = textBox.getUuid?.() ?? `text-box:${ layer }:${ x },${ y }`;
+		const id = footprintId ? `${ footprintId }:${ rawId }` : rawId;
+		const bbox = boundsOfPoints(worldCorners.map(point => ({ x: point.x, y: point.y })));
 		return {
-			id, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: textBox,
+			id, layer, kind: 'graphic', shape: { type: 'polygon', points: worldCorners.map(point => ({ x: point.x, y: point.y })) }, bbox, hitTestable, element: textBox,
 			draw: (renderer, color) => {
-				if (border) renderer.rect(new Vec2(x, y), width, height, { strokeColor: color, strokeWidth: strokeWidth || 0.1 });
-				drawStrokeTextGeometry(renderer, geometry, color);
+				if (border) renderer.polygon(worldCorners, { strokeColor: color, strokeWidth: strokeWidth || 0.1 });
+				if (geometry) drawStrokeTextGeometry(renderer, geometry, color);
+			},
+		};
+	}
+
+	/** PCB_TABLE is a container: cells provide the text boxes, while this
+	 * method adds the table-owned outer border and internal separators. */
+	protected buildTable(table: any, footprintMatrix: Matrix3 | null = null, footprintId?: string, footprintRotation = 0): PaintedItem[] {
+		const cellsRoot = table.findFirstChildByName?.('cells');
+		const cells = cellsRoot?.findChildrenByName?.('table_cell') ?? [];
+		if (!cells.length) return [];
+		const layer = typeof table.getLayer === 'function' ? table.getLayer() : 'F.SilkS';
+		const tableId = table.getUuid?.() ?? `table:${ cells[0]?.getUuid?.() ?? 'anonymous' }`;
+		const id = footprintId ? `${ footprintId }:${ tableId }` : tableId;
+		const columnCount = Math.max(1, Math.round(Number(readChildValue(table, 'column_count') ?? 1)));
+		const border = table.findFirstChildByName?.('border');
+		const separators = table.findFirstChildByName?.('separators');
+		const enabled = (owner: any, name: string) => readChildValue(owner, name) === true || readChildValue(owner, name) === 'yes';
+		const strokeWidth = (owner: any) => Number(owner?.findFirstChildByName?.('stroke')?.getWidth?.() ?? 0.1) || 0.1;
+		const borderWidth = strokeWidth(border);
+		const separatorWidth = strokeWidth(separators);
+		const toWorld = (point: Vec2) => footprintMatrix ? footprintMatrix.transform(point) : point;
+		const items: PaintedItem[] = [];
+		const cellData: Array<{ cell: any; start: Vec2; end: Vec2; row: number; col: number }> = [];
+		for (let index = 0; index < cells.length; index++) {
+			const cell = cells[index]!;
+			if (typeof cell.getStartEnd !== 'function') continue;
+			const { start, end } = cell.getStartEnd();
+			cellData.push({ cell, start: new Vec2(start.x, start.y), end: new Vec2(end.x, end.y), row: Math.floor(index / columnCount), col: index % columnCount });
+			const textItem = this.buildPcbTextBox(cell, footprintMatrix, footprintId, footprintRotation, false, false);
+			if (textItem) items.push(textItem);
+		}
+		if (!cellData.length) return items;
+		const lineSegments: Array<{ a: Vec2; b: Vec2; width: number }> = [];
+		const addLine = (a: Vec2, b: Vec2, width: number) => lineSegments.push({ a: toWorld(a), b: toWorld(b), width });
+		const minX = Math.min(...cellData.map(data => Math.min(data.start.x, data.end.x)));
+		const minY = Math.min(...cellData.map(data => Math.min(data.start.y, data.end.y)));
+		const maxX = Math.max(...cellData.map(data => Math.max(data.start.x, data.end.x)));
+		const maxY = Math.max(...cellData.map(data => Math.max(data.start.y, data.end.y)));
+		const rowCount = Math.ceil(cells.length / columnCount);
+		for (const data of cellData) {
+			const x1 = Math.min(data.start.x, data.end.x), y1 = Math.min(data.start.y, data.end.y);
+			const x2 = Math.max(data.start.x, data.end.x), y2 = Math.max(data.start.y, data.end.y);
+			const span = data.cell.findFirstChildByName?.('span')?.attributes ?? [];
+			const colSpan = Math.max(1, Number(span[0]?.value) || 1);
+			const rowSpan = Math.max(1, Number(span[1]?.value) || 1);
+			if (data.col + colSpan < columnCount && (enabled(separators, 'cols') || (data.row === 0 && enabled(border, 'header')))) {
+				addLine(new Vec2(x2, y1), new Vec2(x2, y2), data.row === 0 && enabled(border, 'header') ? borderWidth : separatorWidth);
+			}
+			if (data.row + rowSpan < rowCount && (enabled(separators, 'rows') || (data.row === 0 && enabled(border, 'header')))) {
+				addLine(new Vec2(x1, y2), new Vec2(x2, y2), data.row === 0 && enabled(border, 'header') ? borderWidth : separatorWidth);
+			}
+		}
+		if (enabled(border, 'external')) {
+			addLine(new Vec2(minX, minY), new Vec2(maxX, minY), borderWidth);
+			addLine(new Vec2(maxX, minY), new Vec2(maxX, maxY), borderWidth);
+			addLine(new Vec2(maxX, maxY), new Vec2(minX, maxY), borderWidth);
+			addLine(new Vec2(minX, maxY), new Vec2(minX, minY), borderWidth);
+		}
+		const corners = [new Vec2(minX, minY), new Vec2(maxX, minY), new Vec2(maxX, maxY), new Vec2(minX, maxY)].map(toWorld);
+		const bbox = boundsOfPoints(corners.map(point => ({ x: point.x, y: point.y })));
+		items.push({
+			id: `${ id }:borders`, layer, kind: 'graphic', shape: { type: 'polygon', points: corners.map(point => ({ x: point.x, y: point.y })) }, bbox,
+			hitTestable: !footprintId, element: table,
+			draw: (renderer, color) => {
+				for (const line of lineSegments) renderer.line([line.a, line.b], { strokeColor: color, strokeWidth: line.width });
+			},
+		});
+		return items;
+	}
+
+	/** Pcbnew reference images are centered on `(at ...)`, kept on their
+	 * associated board layer, and sized from encoded pixels at image PPI. */
+	protected buildBoardImage(image: any, boardVersion: number, footprintMatrix: Matrix3 | null = null, footprintId?: string): PaintedItem | null {
+		const data: string | undefined = typeof image.getData === 'function' ? image.getData() : undefined;
+		if (!data) return null;
+		const info = embeddedImageInfo(data);
+		if (!info) return null;
+		const origin = typeof image.getOrigin === 'function' ? image.getOrigin() : { x: 0, y: 0 };
+		const scale = typeof image.getScale === 'function' ? image.getScale() : 1;
+		const effectivePpi = boardVersion > 0 && boardVersion < 20260623 ? info.legacyPpi : info.ppi;
+		const pixelSizeMm = 25.4 / effectivePpi;
+		const imageScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+		const width = info.width * pixelSizeMm * imageScale;
+		const height = info.height * pixelSizeMm * imageScale;
+		if (!(width > 0) || !(height > 0)) return null;
+		const x = origin.x - width / 2;
+		const y = origin.y - height / 2;
+		const localCorners: [Vec2, Vec2, Vec2, Vec2] = [
+			new Vec2(x, y), new Vec2(x + width, y), new Vec2(x + width, y + height), new Vec2(x, y + height),
+		];
+		const corners = (footprintMatrix ? localCorners.map(point => footprintMatrix.transform(point)) : localCorners) as [Vec2, Vec2, Vec2, Vec2];
+		const layer = typeof image.getLayer === 'function' ? image.getLayer() || 'F.Cu' : 'F.Cu';
+		const rawId = image.getUuid?.() ?? `image:${ layer }:${ origin.x },${ origin.y }`;
+		const id = footprintId ? `${ footprintId }:${ rawId }` : rawId;
+		const shape: PaintedShape = footprintMatrix
+			? { type: 'polygon', points: corners.map(point => ({ x: point.x, y: point.y })), filled: true }
+			: { type: 'rect', x, y, w: width, h: height, filled: true };
+		const embedded: EmbeddedImage = { data, mimeType: info.mimeType };
+		return {
+			id, layer, kind: 'image', shape, bbox: shapeToBBox(shape), hitTestable: !footprintId, element: image,
+			draw: renderer => renderer.image(embedded, new Vec2(x, y), width, height, footprintMatrix ? corners : undefined),
+		};
+	}
+
+	/** Mirrors PCB_BARCODE::ComputeBarcode/rescaleSymbolPoly: Zint supplies a
+	 * local rectangle list, which Pcbnew independently scales on each axis to
+	 * the saved `(size ...)` and centers at `(at ...)`. */
+	protected buildBarcode(barcode: any): PaintedItem | null {
+		const type = String(barcode.getBarcodeType?.() ?? barcode.getSimpleChildValue?.('type') ?? 'qr').toLowerCase();
+		if (type !== 'code39' && type !== 'code128' && type !== 'datamatrix' && type !== 'qr' && type !== 'microqr') {
+			return null;
+		}
+		const text = String(barcode.getBarcodeText?.() ?? barcode.findFirstChildByName?.('text')?.value ?? '');
+		if (!text) return null;
+		const errorCorrection = String(barcode.getErrorCorrection?.() ?? barcode.getSimpleChildValue?.('ecc_level') ?? 'L').toUpperCase();
+		const encoding = getBoardBarcodeEncoding({
+			type, text, errorCorrection: errorCorrection === 'M' || errorCorrection === 'Q' || errorCorrection === 'H' ? errorCorrection : 'L',
+		});
+		if (!encoding || encoding.width <= 0 || encoding.height <= 0) return null;
+		const origin = barcode.getOrigin?.() ?? { x: 0, y: 0, rotation: 0 };
+		const size = barcode.getSize?.() ?? { width: 40, height: 40 };
+		const width = Math.max(0.01, Number(size.width) || 40);
+		const height = Math.max(0.01, Number(size.height) || 40);
+		const scaleX = width / encoding.width;
+		const scaleY = height / encoding.height;
+		const angle = (Number(origin.rotation) || 0) * Math.PI / 180;
+		const sin = Math.sin(angle), cos = Math.cos(angle);
+		const transform = (x: number, y: number) => new Vec2(
+			origin.x + x * cos + y * sin,
+			origin.y - x * sin + y * cos,
+		);
+		const rectangles = encoding.rectangles.map(rect => {
+			const x = (rect.x + rect.width / 2 - encoding.width / 2) * scaleX;
+			const y = (rect.y + rect.height / 2 - encoding.height / 2) * scaleY;
+			const halfWidth = rect.width * scaleX / 2;
+			const halfHeight = rect.height * scaleY / 2;
+			return [transform(x - halfWidth, y - halfHeight), transform(x + halfWidth, y - halfHeight), transform(x + halfWidth, y + halfHeight), transform(x - halfWidth, y + halfHeight)] as [Vec2, Vec2, Vec2, Vec2];
+		});
+		const layer = barcode.getLayer?.() || 'F.SilkS';
+		const rawId = barcode.getUuid?.() ?? `barcode:${ layer }:${ origin.x },${ origin.y }`;
+		const symbolCorners = rectangles.flat();
+		if (!symbolCorners.length) return null;
+		const symbolBBox = boundsOfPoints(symbolCorners.map(point => ({ x: point.x, y: point.y })));
+		const textHeight = Math.max(0.01, Number(barcode.getTextHeight?.() ?? barcode.getSimpleChildValue?.('text_height') ?? 1));
+		const textVisible = !(barcode.isTextHidden?.() ?? barcode.getSimpleChildValue?.('hide') === true);
+		const textAnchor = transform(0, height / 2 + 1 + textHeight / 2);
+		const textGeometry = textVisible
+			? computeStrokeTextGeometry(text, textAnchor, textHeight, Number(origin.rotation) || 0, layer.startsWith('B.'), textHeight / 6, { x: 0.5, y: 0.5 })
+			: null;
+		const textBBox = textGeometry ? getStrokeTextBounds(textGeometry) : null;
+		const fullBBox = textBBox ? boundsOfPoints([
+			{ x: symbolBBox.x, y: symbolBBox.y }, { x: symbolBBox.x + symbolBBox.w, y: symbolBBox.y + symbolBBox.h },
+			{ x: textBBox.x, y: textBBox.y }, { x: textBBox.x + textBBox.w, y: textBBox.y + textBBox.h },
+		]) : symbolBBox;
+		const knockout = barcode.isKnockout?.() ?? barcode.getSimpleChildValue?.('knockout') === true;
+		const margins = barcode.getMargins?.() ?? { x: 0, y: 0 };
+		const minMargin = Math.ceil(Math.min(width, height)) / 10;
+		const marginX = Math.max(Number(margins.x) || 0, minMargin);
+		const marginY = Math.max(Number(margins.y) || 0, minMargin);
+		const bbox = knockout
+			? { x: fullBBox.x - marginX, y: fullBBox.y - marginY, w: fullBBox.w + marginX * 2, h: fullBBox.h + marginY * 2 }
+			: fullBBox;
+		return {
+			id: rawId, layer, kind: 'graphic', shape: { type: 'rect', ...bbox }, bbox, hitTestable: true, element: barcode,
+			draw: (renderer, color) => {
+				if (knockout) renderer.rect(new Vec2(bbox.x, bbox.y), bbox.w, bbox.h, { fillColor: color });
+				for (const rectangle of rectangles) renderer.polygon(rectangle, { fillColor: knockout ? boardBackgroundColor : color });
+				if (textGeometry) drawStrokeTextGeometry(renderer, textGeometry, knockout ? boardBackgroundColor : color);
+			},
+		};
+	}
+
+	/** Direct port of PCB_PAINTER::draw(const PCB_TARGET*): its two cross
+	 * strokes and center ring share one selectable target bounding box. */
+	protected buildTarget(target: any): PaintedItem | null {
+		const origin = typeof target.getOrigin === 'function' ? target.getOrigin() : { x: 0, y: 0 };
+		const size = Number(typeof target.getSize === 'function' ? target.getSize() : readChildValue(target, 'size') ?? 5);
+		const width = Number(typeof target.getWidth === 'function' ? target.getWidth() : readChildValue(target, 'width') ?? 0.2);
+		if (!(size > 0) || !(width >= 0)) return null;
+		const isX = typeof target.getShape === 'function' ? target.getShape() === 'x' : target.attributes?.[0]?.value === 'x';
+		const arm = isX ? (2 * size) / 3 : size / 2;
+		const radius = isX ? size / 2 : size / 3;
+		const rotate = isX ? Math.PI / 4 : 0;
+		const endpoint = (sign: number) => new Vec2(
+			origin.x + sign * arm * Math.cos(rotate),
+			origin.y + sign * arm * Math.sin(rotate),
+		);
+		const perpendicular = (sign: number) => new Vec2(
+			origin.x - sign * arm * Math.sin(rotate),
+			origin.y + sign * arm * Math.cos(rotate),
+		);
+		const center = new Vec2(origin.x, origin.y);
+		const layer = typeof target.getLayer === 'function' ? target.getLayer() || 'Edge.Cuts' : 'Edge.Cuts';
+		const id = target.getUuid?.() ?? `target:${ layer }:${ origin.x },${ origin.y }`;
+		const shape: PaintedShape = { type: 'rect', x: origin.x - size / 2, y: origin.y - size / 2, w: size, h: size };
+		return {
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: target,
+			draw: (renderer, color) => {
+				renderer.line([endpoint(-1), endpoint(1)], { strokeColor: color, strokeWidth: width });
+				renderer.line([perpendicular(-1), perpendicular(1)], { strokeColor: color, strokeWidth: width });
+				renderer.circle(center, radius, { strokeColor: color, strokeWidth: width });
+			},
+		};
+	}
+
+	/** PCB_PAINTER::draw(const PCB_POINT*): a magenta X on the synthetic
+	 * points overlay, plus a ring taking the point's own board-layer color. */
+	protected buildPoint(point: any, footprintMatrix?: Matrix3, footprintId?: string): PaintedItem | null {
+		const local = typeof point.getOrigin === 'function' ? point.getOrigin() : { x: 0, y: 0 };
+		const size = Number(typeof point.getSize === 'function' ? point.getSize() : readChildValue(point, 'size') ?? 1);
+		if (!(size > 0)) return null;
+		const half = size / 2;
+		const center = footprintMatrix
+			? footprintMatrix.transform(new Vec2(local.x, local.y))
+			: new Vec2(local.x, local.y);
+		// PCB_PAINTER translates to a point's board position before drawing its
+		// X, so a footprint rotation moves the point but does not rotate marker.
+		const a = new Vec2(center.x - half, center.y - half);
+		const b = new Vec2(center.x + half, center.y + half);
+		const c = new Vec2(center.x + half, center.y - half);
+		const d = new Vec2(center.x - half, center.y + half);
+		const layer = typeof point.getLayer === 'function' ? point.getLayer() || 'F.Fab' : 'F.Fab';
+		const rawId = point.getUuid?.() ?? `point:${ layer }:${ local.x },${ local.y }`;
+		const id = footprintId ? `${ footprintId }:${ rawId }` : rawId;
+		const shape: PaintedShape = { type: 'rect', x: center.x - half, y: center.y - half, w: size, h: size };
+		return {
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: point,
+			draw: (renderer, color) => {
+				const crossColor = color === '#ffcc00' ? color : pointCrossColor;
+				renderer.line([a, b], { strokeColor: crossColor, strokeWidth: 0.05 });
+				renderer.line([c, d], { strokeColor: crossColor, strokeWidth: 0.05 });
+				renderer.circle(center, size / 4, { strokeColor: color, strokeWidth: 0.05 });
 			},
 		};
 	}
@@ -2041,20 +2473,53 @@ export class BoardPainter {
 	}
 
 	protected buildGrCurve(curve: any): PaintedItem | null {
+		return this.buildCurve(curve, null);
+	}
+
+	protected buildCurve(curve: any, footprintMatrix: Matrix3 | null, footprintId?: string): PaintedItem | null {
 		const points: Array<{ x: number; y: number }> = typeof curve.getPoints === 'function' ? curve.getPoints() : [];
 		if (points.length !== 4) return null;
 		const layer = curve.getLayer();
 		const width = typeof curve.getStroke === 'function' ? curve.getStroke().width : 0.1;
-		const id = curve.getUuid() ?? `gr-curve:${ layer }:${ points[0]!.x },${ points[0]!.y }`;
+		const rawId = curve.getUuid() ?? `curve:${ layer }:${ points[0]!.x },${ points[0]!.y }`;
+		const id = footprintId ? `${ footprintId }:${ rawId }` : rawId;
 		const shapePoints = cubicBezierToPolyline(points.map(point => new Vec2(point.x, point.y)) as [Vec2, Vec2, Vec2, Vec2]);
+		const worldPoints = footprintMatrix ? shapePoints.map(point => footprintMatrix.transform(point)) : shapePoints;
 		// A gr_curve is an open bezier stroke, never a closed fillable area
 		// (matches buildSchBezier's identical always-unfilled treatment) —
 		// still needs `filled: false` explicit so hit-testing stays edge-only
 		// instead of PaintedShape's filled-by-default fallback.
-		const shape: PaintedShape = { type: 'polygon', points: shapePoints.map(point => ({ x: point.x, y: point.y })), filled: false, closed: false, strokeWidth: width };
+		const shape: PaintedShape = { type: 'polygon', points: worldPoints.map(point => ({ x: point.x, y: point.y })), filled: false, closed: false, strokeWidth: width };
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: curve,
-			draw: (renderer, color) => renderer.line(shapePoints, { strokeColor: color, strokeWidth: width || 0.1 }),
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: !footprintId, element: curve,
+			draw: (renderer, color) => renderer.line(worldPoints, { strokeColor: color, strokeWidth: width || 0.1 }),
+		};
+	}
+
+	protected buildEllipse(ellipse: any, isArc: boolean, footprintMatrix: Matrix3 | null = null, footprintId?: string): PaintedItem | null {
+		const centerEl = ellipse.findFirstChildByName?.('center');
+		const center = new Vec2(Number(centerEl?.x ?? centerEl?.attributes?.[0]?.value), Number(centerEl?.y ?? centerEl?.attributes?.[1]?.value));
+		const major = readChildNumber(ellipse, 'major_radius') ?? 0;
+		const minor = readChildNumber(ellipse, 'minor_radius') ?? 0;
+		if (!Number.isFinite(center.x) || !Number.isFinite(center.y) || !(major > 0) || !(minor > 0)) return null;
+		const rotation = (readChildNumber(ellipse, 'rotation_angle') ?? 0) * Math.PI / 180;
+		const start = isArc ? (readChildNumber(ellipse, 'start_angle') ?? 0) * Math.PI / 180 : 0;
+		let end = isArc ? (readChildNumber(ellipse, 'end_angle') ?? 360) * Math.PI / 180 : Math.PI * 2;
+		if (isArc && end <= start) end += Math.PI * 2;
+		const localPoints = ellipsePolyline(center, major, minor, rotation, start, end, isArc ? 48 : 64);
+		const points = footprintMatrix ? localPoints.map(point => footprintMatrix.transform(point)) : localPoints;
+		const layer = ellipse.getLayer?.() || 'F.SilkS';
+		const width = ellipse.getStroke?.().width || 0.1;
+		const rawId = ellipse.getUuid?.() ?? `ellipse:${ layer }:${ center.x },${ center.y }`;
+		const id = footprintId ? `${ footprintId }:${ rawId }` : rawId;
+		const fill = ellipse.getSimpleChildValue?.('fill');
+		const filled = !isArc && (fill === true || fill === 'yes' || fill === 'solid');
+		const shape: PaintedShape = { type: 'polygon', points: points.map(point => ({ x: point.x, y: point.y })), filled, closed: !isArc, strokeWidth: width };
+		return {
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: !footprintId, element: ellipse,
+			draw: (renderer, color) => filled
+				? renderer.polygon(points, { fillColor: color, strokeColor: color, strokeWidth: width })
+				: renderer.line(isArc ? points : [...points, points[0]!], { strokeColor: color, strokeWidth: width }),
 		};
 	}
 }
@@ -2380,6 +2845,7 @@ function getPadTechnicalMargin(
 	if (!hasCopper || (!layer.endsWith('.Mask') && !layer.endsWith('.Paste'))) {
 		return { x: 0, y: 0 };
 	}
+
 	const setup = typeof board?.rootElement?.findFirstChildByName === 'function'
 		? board.rootElement.findFirstChildByName('setup')
 		: undefined;
@@ -2405,15 +2871,42 @@ function getPadTechnicalMargin(
 	};
 }
 
-function getViaMaskLayers(layers: readonly string[]): Array<'F.Mask' | 'B.Mask'> {
+function readNestedBoolean(element: any, group: string, side: 'front' | 'back'): boolean | undefined {
+	const groupElement = typeof element?.findFirstChildByName === 'function'
+		? element.findFirstChildByName(group)
+		: undefined;
+	const value = readChildValue(groupElement, side);
+	if (value === undefined) return undefined;
+	return value === true || value === 'yes';
+}
+
+function getViaMaskLayers(via: any, board: any, layers: readonly string[]): Array<'F.Mask' | 'B.Mask'> {
 	const result: Array<'F.Mask' | 'B.Mask'> = [];
-	// A normal through via is exposed unless its board setup tents that side.
-	// This lightweight model does not yet parse the tenting flags, so explicit
-	// mask layers take precedence and the ordinary external-copper pair uses
-	// KiCad's default exposed-via behavior.
-	if (layers.includes('F.Mask') || (!layers.includes('B.Mask') && layers.includes('F.Cu'))) result.push('F.Mask');
-	if (layers.includes('B.Mask') || (!layers.includes('F.Mask') && layers.includes('B.Cu'))) result.push('B.Mask');
+	// PCB_VIA::IsTented resolves an optional via-padstack setting against the
+	// board setup's `(tenting (front ...) (back ...))` defaults. A tented side
+	// has solder mask covering it, so there is no aperture to paint there.
+	const frontTented = readNestedBoolean(via, 'tenting', 'front')
+		?? readNestedBoolean(board?.rootElement?.findFirstChildByName?.('setup'), 'tenting', 'front')
+		?? false;
+	const backTented = readNestedBoolean(via, 'tenting', 'back')
+		?? readNestedBoolean(board?.rootElement?.findFirstChildByName?.('setup'), 'tenting', 'back')
+		?? false;
+	if (layers.includes('F.Cu') && !frontTented) result.push('F.Mask');
+	if (layers.includes('B.Cu') && !backTented) result.push('B.Mask');
 	return result;
+}
+
+function ellipsePolyline(center: Vec2, major: number, minor: number, rotation: number, start: number, end: number, steps: number): Vec2[] {
+	const points: Vec2[] = [];
+	const cos = Math.cos(rotation);
+	const sin = Math.sin(rotation);
+	for (let index = 0; index <= steps; index++) {
+		const angle = start + (end - start) * index / steps;
+		const x = major * Math.cos(angle);
+		const y = minor * Math.sin(angle);
+		points.push(new Vec2(center.x + x * cos - y * sin, center.y + x * sin + y * cos));
+	}
+	return points;
 }
 
 // Lazily require the @kicad-io classes so this module doesn't need a
@@ -2421,13 +2914,13 @@ function getViaMaskLayers(layers: readonly string[]): Array<'F.Mask' | 'B.Mask'>
 // (which has the @kicad-io/* path alias configured) passes real instances
 // in; these helpers only need the *classes* for findChildrenByClass()
 // lookups, resolved from the same module the caller already imported.
-let _Footprint: any, _Segment: any, _Via: any, _Pad: any, _Zone: any, _Layers: any, _GrLine: any, _GrArc: any, _GrRect: any, _GrCircle: any, _GrPoly: any, _GrCurve: any;
-let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _FpPoly: any, _Dimension: any, _GrText: any, _GrTextBox: any, _FpText: any, _TrackArc: any;
+let _Footprint: any, _Segment: any, _Via: any, _Pad: any, _Zone: any, _Layers: any, _GrLine: any, _GrVector: any, _GrArc: any, _GrRect: any, _GrCircle: any, _GrPoly: any, _GrCurve: any, _GrEllipse: any, _GrEllipseArc: any;
+let _FpLine: any, _FpRect: any, _FpCircle: any, _FpArc: any, _FpPoly: any, _FpCurve: any, _FpEllipse: any, _FpEllipseArc: any, _Dimension: any, _GrText: any, _GrTextBox: any, _FpText: any, _FpTextBox: any, _Table: any, _TrackArc: any, _Image: any, _Target: any, _Point: any, _Barcode: any;
 export function registerKicadIoClasses(classes: {
 	Footprint: any; Segment: any; Via: any; Pad: any; Zone: any;
-	Layers: any; GrLine: any; GrArc: any; GrRect: any; GrCircle: any; GrPoly: any; GrCurve: any;
-	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; FpPoly?: any; Dimension?: any; GrText?: any; GrTextBox?: any; FpText?: any;
-	TrackArc?: any;
+	Layers: any; GrLine: any; GrVector?: any; GrArc: any; GrRect: any; GrCircle: any; GrPoly: any; GrCurve: any; GrEllipse?: any; GrEllipseArc?: any;
+	FpLine?: any; FpRect?: any; FpCircle?: any; FpArc?: any; FpPoly?: any; FpCurve?: any; FpEllipse?: any; FpEllipseArc?: any; Dimension?: any; GrText?: any; GrTextBox?: any; FpText?: any; FpTextBox?: any; Table?: any;
+	TrackArc?: any; Image?: any; Target?: any; Point?: any; Barcode?: any;
 }): void {
 	_Footprint = classes.Footprint;
 	_Segment = classes.Segment;
@@ -2436,21 +2929,33 @@ export function registerKicadIoClasses(classes: {
 	_Zone = classes.Zone;
 	_Layers = classes.Layers;
 	_GrLine = classes.GrLine;
+	_GrVector = classes.GrVector;
 	_GrArc = classes.GrArc;
 	_GrRect = classes.GrRect;
 	_GrCircle = classes.GrCircle;
 	_GrPoly = classes.GrPoly;
 	_GrCurve = classes.GrCurve;
+	_GrEllipse = classes.GrEllipse;
+	_GrEllipseArc = classes.GrEllipseArc;
 	_FpLine = classes.FpLine;
 	_FpRect = classes.FpRect;
 	_FpCircle = classes.FpCircle;
 	_FpArc = classes.FpArc;
 	_FpPoly = classes.FpPoly;
+	_FpCurve = classes.FpCurve;
+	_FpEllipse = classes.FpEllipse;
+	_FpEllipseArc = classes.FpEllipseArc;
 	_Dimension = classes.Dimension;
 	_GrText = classes.GrText;
 	_GrTextBox = classes.GrTextBox;
 	_FpText = classes.FpText;
+	_FpTextBox = classes.FpTextBox;
+	_Table = classes.Table;
 	_TrackArc = classes.TrackArc;
+	_Image = classes.Image;
+	_Target = classes.Target;
+	_Point = classes.Point;
+	_Barcode = classes.Barcode;
 }
 function getFootprintClass() { return _Footprint; }
 function getSegmentClass() { return _Segment; }
@@ -2459,21 +2964,38 @@ function getPadClass() { return _Pad; }
 function getZoneClass() { return _Zone; }
 function getLayersClass() { return _Layers; }
 function getGrLineClass() { return _GrLine; }
+function getGrVectorClass() { return _GrVector; }
 function getGrArcClass() { return _GrArc; }
 function getGrRectClass() { return _GrRect; }
 function getGrCircleClass() { return _GrCircle; }
 function getGrPolyClass() { return _GrPoly; }
 function getGrCurveClass() { return _GrCurve; }
+function getGrEllipseClass() { return _GrEllipse; }
+function getGrEllipseArcClass() { return _GrEllipseArc; }
 function getFpLineClass() { return _FpLine; }
 function getFpRectClass() { return _FpRect; }
 function getFpCircleClass() { return _FpCircle; }
 function getFpArcClass() { return _FpArc; }
 function getFpPolyClass() { return _FpPoly; }
+function getFpCurveClass() { return _FpCurve; }
+function getFpEllipseClass() { return _FpEllipse; }
+function getFpEllipseArcClass() { return _FpEllipseArc; }
 function getDimensionClass() { return _Dimension; }
 function getGrTextClass() { return _GrText; }
 function getGrTextBoxClass() { return _GrTextBox; }
 function getFpTextClass() { return _FpText; }
+function getFpTextBoxClass() { return _FpTextBox; }
+function getTableClass() { return _Table; }
 function getTrackArcClass() { return _TrackArc; }
+function getImageClass() { return _Image; }
+function getTargetClass() { return _Target; }
+function getPointClass() { return _Point; }
+function getBarcodeClass() { return _Barcode; }
+
+function getBoardVersion(root: any): number {
+	const version = root?.findFirstChildByName?.('version');
+	return typeof version?.value === 'number' ? version.value : Number(version?.attributes?.[0]?.value ?? 0);
+}
 
 /** Matches PCB_TEXT::GetDrawRotation() for text owned by a footprint. */
 function footprintTextDrawAngle(text: any, footprintRotation: number): number {
@@ -2498,6 +3020,15 @@ function footprintTextDrawAngle(text: any, footprintRotation: number): number {
 
 function normalizeAngle(rotation: number): number {
 	return ((rotation + 180) % 360 + 360) % 360 - 180;
+}
+
+function rotateAround(point: Vec2, center: Vec2, radians: number): Vec2 {
+	if (radians === 0) return point;
+	const x = point.x - center.x;
+	const y = point.y - center.y;
+	const cos = Math.cos(radians);
+	const sin = Math.sin(radians);
+	return new Vec2(center.x + x * cos - y * sin, center.y + x * sin + y * cos);
 }
 
 /**
@@ -2540,6 +3071,38 @@ function getCustomPadLocalRings(pad: any): Vec2[][] {
 		}
 	}
 	return rings;
+}
+
+/**
+ * Pcbnew offsets the complete custom-pad polygon before flashing it onto a
+ * technical layer. Clipper accepts an isotropic delta, so scale the local
+ * axes first when paste settings produce different X/Y margins; scaling back
+ * afterwards preserves the requested aperture extents in both directions.
+ */
+function offsetCustomPadLocalRings(
+	rings: Vec2[][], margin: { x: number; y: number },
+): Vec2[][] {
+	if (rings.length === 0 || (Math.abs(margin.x) < 1e-9 && Math.abs(margin.y) < 1e-9)) {
+		return rings;
+	}
+
+	const sameDirection = margin.x * margin.y >= 0;
+	const scaleX = Math.abs(margin.x);
+	const scaleY = Math.abs(margin.y);
+	if (!sameDirection || scaleX < 1e-9 || scaleY < 1e-9) {
+		return rings;
+	}
+
+	const normalized = rings.map(ring => toClipperPath(ring.map(point => ({
+		x: point.x / scaleX,
+		y: point.y / scaleY,
+	}))));
+	const deltaNm = Math.sign(margin.x) * 1_000_000;
+	return getClipperEngine()
+		.inflatePaths(normalized, deltaNm, JoinType.Round, EndType.Polygon)
+		.map(fromClipperPath)
+		.filter(ring => ring.length >= 3)
+		.map(ring => ring.map(point => new Vec2(point.x * scaleX, point.y * scaleY)));
 }
 
 /** Second attribute on `(layer "F.SilkS" knockout)` — WithLayer's getLayer()
