@@ -122,6 +122,10 @@ export type { FillBatch, StrokeBatch } from './render/Canvas2dRenderer';
 export { WebGLRenderer } from './render/WebGLRenderer';
 export type { CachedStencilJob, RawStencilJob } from './render/WebGLRenderer';
 
+export { sceneToSvg } from './svgExporter';
+export { computeWireBend } from './utils';
+export { pushUndoSnapshot, clearUndoRedo, canUndo, canRedo, undo, redo, cancelLatestUndoSnapshot, getUndoStackDebug, beginBatch, endBatch, commitAstMutation } from './state';
+
 // Math
 export { Angle } from './math/Angle';
 export type { AngleLike } from './math/Angle';
