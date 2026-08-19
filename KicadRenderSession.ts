@@ -8,133 +8,133 @@
 // event wiring (pointer/wheel/click), and any UI (layer checklist, status
 // text) — this class owns camera state, scene building, and painting.
 
-import { KicadParser } from '@kicad-io/KicadParser';
+import { KicadParser }                from '@kicad-io/KicadParser';
 import { onBoardBarcodeEncoderReady } from './paint/BarcodeEncoder';
 import {
 	KicadElementWire
-}                      from '@kicad-io/KicadElementWire';
+}                                     from '@kicad-io/KicadElementWire';
 import {
 	KicadElementBus, KicadElementBusEntry
-}                      from '@kicad-io/KicadElementBus';
+}                                     from '@kicad-io/KicadElementBus';
 import {
 	KicadElementJunction
-}                      from '@kicad-io/KicadElementJunction';
+}                                     from '@kicad-io/KicadElementJunction';
 import {
 	KicadElementNoConnect
-}                      from '@kicad-io/KicadElementNoConnect';
+}                                     from '@kicad-io/KicadElementNoConnect';
 import {
 	KicadElementRectangle, KicadElementGrLine, KicadElementGrRect, KicadElementFpLine, KicadElementFpRect
-}                      from '@kicad-io/KicadElementStartEnd';
+}                                     from '@kicad-io/KicadElementStartEnd';
 import {
 	KicadElementCircle, KicadElementGrCircle, KicadElementFpCircle
-}                      from '@kicad-io/KicadElementCircle';
+}                                     from '@kicad-io/KicadElementCircle';
 import {
 	KicadElementArc, KicadElementGrArc, KicadElementFpArc
-}                      from '@kicad-io/KicadElementArc';
+}                                     from '@kicad-io/KicadElementArc';
 import {
 	KicadElementPolyline, KicadElementBezier, KicadElementGrCurve
-}                      from '@kicad-io/KicadElementPolyline';
+}                                     from '@kicad-io/KicadElementPolyline';
 import {
 	KicadElementGrPoly, KicadElementPolygon, type GrShapeFillMode
-}                      from '@kicad-io/KicadElementPolygon';
+}                                     from '@kicad-io/KicadElementPolygon';
 import {
 	type KicadStrokeType
-}                      from '@kicad-io/KicadElementStroke';
+}                                     from '@kicad-io/KicadElementStroke';
 import {
 	KicadElementAt
-}                      from '@kicad-io/KicadElementAt';
+}                                     from '@kicad-io/KicadElementAt';
 import {
 	KicadElement
-}                      from '@kicad-io/KicadElement';
+}                                     from '@kicad-io/KicadElement';
 import {
 	KicadElementSize
-}                      from '@kicad-io/KicadElementSize';
+}                                     from '@kicad-io/KicadElementSize';
 import {
 	KicadElementTable, KicadElementTableCell
-}                      from '@kicad-io/KicadElementTable';
+}                                     from '@kicad-io/KicadElementTable';
 import {
 	KicadElementRuleArea
-}                      from '@kicad-io/KicadElementRuleArea';
+}                                     from '@kicad-io/KicadElementRuleArea';
 import {
 	KicadElementGroup
-}                      from '@kicad-io/KicadElementGroup';
+}                                     from '@kicad-io/KicadElementGroup';
 import {
 	KicadElementData
-}                      from '@kicad-io/KicadElementData';
+}                                     from '@kicad-io/KicadElementData';
 import {
 	KicadElementImage
-}                      from '@kicad-io/KicadElementImage';
+}                                     from '@kicad-io/KicadElementImage';
 import {
 	KicadElementBarcode
-}                      from '@kicad-io/KicadElementBarcode';
+}                                     from '@kicad-io/KicadElementBarcode';
 import {
 	KicadElementText, KicadElementTextBox, KicadElementLabel, KicadElementGrText, KicadElementGrTextBox
-}                      from '@kicad-io/KicadElementText';
+}                                     from '@kicad-io/KicadElementText';
 import {
 	KicadElementGlobalLabel, type KicadGlobalLabelShape
-}                      from '@kicad-io/KicadElementGlobalLabel';
+}                                     from '@kicad-io/KicadElementGlobalLabel';
 import {
 	KicadElementHierarchicalLabel, type KicadHierarchicalLabelShape
-}                      from '@kicad-io/KicadElementHierarchicalLabel';
+}                                     from '@kicad-io/KicadElementHierarchicalLabel';
 import {
 	KicadElementNetclassFlag, type KicadDirectiveLabelShape
-}                      from '@kicad-io/KicadElementNetclassFlag';
+}                                     from '@kicad-io/KicadElementNetclassFlag';
 import {
 	KicadElementSymbol
-}                      from '@kicad-io/KicadElementSymbol';
+}                                     from '@kicad-io/KicadElementSymbol';
 import {
 	KicadElementProperty
-}                      from '@kicad-io/KicadElementProperty';
+}                                     from '@kicad-io/KicadElementProperty';
 import {
 	KicadElementFootprint
-}                      from '@kicad-io/KicadElementFootprint';
+}                                     from '@kicad-io/KicadElementFootprint';
 import {
 	KicadElementPad
-}                      from '@kicad-io/KicadElementPad';
+}                                     from '@kicad-io/KicadElementPad';
 import {
 	KicadElementNet
-}                      from '@kicad-io/KicadElementNet';
+}                                     from '@kicad-io/KicadElementNet';
 import {
 	KicadElementSegment
-}                      from '@kicad-io/KicadElementStartEnd';
+}                                     from '@kicad-io/KicadElementStartEnd';
 import {
 	KicadElementVia
-}                      from '@kicad-io/KicadElementVia';
+}                                     from '@kicad-io/KicadElementVia';
 import {
 	KicadElementZone,
 	type ZoneHatchStyle, type ZonePadConnectionType, type ZoneSmoothingType, type ZoneIslandRemovalMode,
 	type RuleAreaKeepoutSettings
-}                      from '@kicad-io/KicadElementZone';
+}                                     from '@kicad-io/KicadElementZone';
 import {
 	KicadElementDimension
-}                      from '@kicad-io/KicadElementDimension';
+}                                     from '@kicad-io/KicadElementDimension';
 import {
 	KicadElementSheet
-}                      from '@kicad-io/KicadElementSheet';
+}                                     from '@kicad-io/KicadElementSheet';
 import {
 	KicadElementPin
-}                      from '@kicad-io/KicadElementPin';
+}                                     from '@kicad-io/KicadElementPin';
 import {
 	KicadElementLibSymbols
-}                      from '@kicad-io/KicadElementLibSymbols';
+}                                     from '@kicad-io/KicadElementLibSymbols';
 import {
 	KicadElementLibId
-}                      from '@kicad-io/KicadElementString';
+}                                     from '@kicad-io/KicadElementString';
 import {
 	SchematicConnectivityService, type SchematicConnectivitySummary
-}                      from '@kicad-layout/Connectivity';
+}                                     from '@kicad-layout/Connectivity';
 import {
 	KicadElementUnit
-}                      from '@kicad-io/KicadElementNumeric';
+}                                     from '@kicad-io/KicadElementNumeric';
 import {
 	KicadElementDnp
-}                      from '@kicad-io/KicadElementBoolean';
+}                                     from '@kicad-io/KicadElementBoolean';
 import {
 	buildPowerFlag, buildPowerGnd, buildPowerRail
-}                      from '@kicad-io/Builder/PassiveSymbolBuilder';
+}                                     from '@kicad-io/Builder/PassiveSymbolBuilder';
 import {
 	buildPowerSymbolInstance
-}                      from '@kicad-io/Builder/PowerSymbolInstance';
+}                                     from '@kicad-io/Builder/PowerSymbolInstance';
 
 export type { KicadGlobalLabelShape }                 from '@kicad-io/KicadElementGlobalLabel';
 export type { KicadDirectiveLabelShape }              from '@kicad-io/KicadElementNetclassFlag';
@@ -143,6 +143,7 @@ export type { KicadDirectiveLabelShape }              from '@kicad-io/KicadEleme
  *  draws nothing extra; 'full'/'diagonal' are drawn by drawBoardCrosshair. */
 export type CrosshairMode = 'small' | 'full' | 'diagonal';
 import { Vec2 }                                       from './math/Vec2';
+import { Angle }                                      from './math/Angle';
 import { Matrix3 }                                    from './math/Matrix3';
 import { Camera2 }                                    from './math/Camera2';
 import { Renderer }                                   from './render/Renderer';
@@ -159,8 +160,8 @@ import {
 import { boardBackgroundColor, styleForLayer }        from './paint/LayerColors';
 import { layerPaintRank }                             from './paint/LayerOrder';
 import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/BoardRatsnest';
-import { buildCopperGraph, type CopperGraph } from './paint/BoardCopperGraph';
-import { buildInitialTrace } from './router/PnsDragger';
+import { buildCopperGraph, type CopperGraph }         from './paint/BoardCopperGraph';
+import { buildInitialTrace }                          from './router/PnsDragger';
 import {
 	buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath,
 	resolveCopperLayers, ZoneFillJob
@@ -225,7 +226,9 @@ function repairLegacyMalformedZoneText(text: string): string {
 			changed = true;
 			continue;
 		}
-		if (/^\s*\(polygon\s*$/.test(line)) sawPolygon = true;
+		if (/^\s*\(polygon\s*$/.test(line)) {
+			sawPolygon = true;
+		}
 		// A prior compatibility pass may already have named the polygon but
 		// retained the old extra `)` that used to terminate its anonymous
 		// group. That closes the zone before its settings. Remove that close,
@@ -252,9 +255,9 @@ function repairLegacyMalformedZoneText(text: string): string {
 					zoneDepth = 0;
 				}
 			}
-			// A bare board close while the zone itself is still open needs an
-			// inserted zone close first. A zone child close (notably
-			// `filled_polygon`) may share the zone's visual indentation, so use
+				// A bare board close while the zone itself is still open needs an
+				// inserted zone close first. A zone child close (notably
+				// `filled_polygon`) may share the zone's visual indentation, so use
 			// structural depth rather than whitespace to tell them apart.
 			else if (line.trim() === ')' && zoneDepth === 1 && line !== `${ zoneIndent })`) {
 				result.push(`${ zoneIndent })`);
@@ -456,21 +459,46 @@ export interface SelectionCurveAnchors {
 	anchors: { kind: CurveAnchor; x: number; y: number }[];
 }
 
+/** Real KiCad's `LINE_MODE` (`eeschema_settings.h`): `free` draws a single
+ *  segment at any angle; `90` (the default) and `45` auto-insert a bend so
+ *  the drawn path is always two constrained segments instead of one
+ *  arbitrary-angle one. */
+export type SchLineMode = 'free' | '90' | '45';
+
 /**
- * Real KiCad's default wire/bus line mode is "90 degree": when the two
- * endpoints of a segment being drawn aren't already axis-aligned, it
- * auto-inserts a bend so the drawn path is always two orthogonal
- * (horizontal + vertical) segments rather than one diagonal one — never
- * arbitrary angles. The bend point follows whichever axis the cursor has
- * moved further along from `from` (the same "dominant axis" heuristic real
- * KiCad's own line tool uses while dragging, so the preview always matches
- * where the click will actually land). Returns null when `from`/`to` are
- * already aligned — no bend needed, a single straight segment is already
- * orthogonal.
+ * Computes the bend point (if any) for a wire/bus segment being drawn from
+ * `from` to `to` under the given line mode:
+ * - `free`: never bends — a single segment at any angle.
+ * - `90` (real KiCad's default): the bend follows whichever axis the
+ *   cursor has moved further along from `from` (the same "dominant axis"
+ *   heuristic real KiCad's own line tool uses while dragging, so the
+ *   preview always matches where the click will actually land).
+ * - `45`: one leg orthogonal, the other a true 45-degree diagonal covering
+ *   the shorter of the two axis deltas — a simplified, non-posture-tracking
+ *   read of real KiCad's `computeBreakPoint()` (`sch_line_wire_bus_tool.cpp`),
+ *   which additionally remembers the previous segment's direction across a
+ *   whole multi-segment drag to pick between two valid 45-degree "postures";
+ *   this app's wire tool only ever draws one segment per click pair, so
+ *   there's no prior-segment state to consult and a single well-defined
+ *   choice (dominant axis gets the orthogonal leg) suffices.
+ * Returns null whenever no bend is needed — `from`/`to` already satisfy the
+ * mode's constraint with a single straight segment (already axis-aligned
+ * for `90`, already exactly diagonal for `45`, or unconditionally for `free`).
  */
-export function orthogonalWireBend(from: Vec2, to: Vec2): Vec2 | null {
-	if (from.x === to.x || from.y === to.y) {
+export function computeWireBend(from: Vec2, to: Vec2, mode: SchLineMode): Vec2 | null {
+	if (mode === 'free' || from.x === to.x || from.y === to.y) {
 		return null;
+	}
+	if (mode === '45') {
+		const dx = to.x - from.x, dy = to.y - from.y;
+		const adx = Math.abs(dx), ady = Math.abs(dy);
+		if (adx === ady) {
+			return null;
+		}
+		const sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
+		return adx > ady
+			? new Vec2(from.x + sx * (adx - ady), from.y)
+			: new Vec2(from.x, from.y + sy * (ady - adx));
 	}
 	return Math.abs(to.x - from.x) >= Math.abs(to.y - from.y)
 		? new Vec2(to.x, from.y)
@@ -584,6 +612,157 @@ export class KicadRenderSession {
 
 	protected readonly painter = new BoardPainter();
 	protected readonly schematicPainter = new SchematicPainter();
+
+	/** See SchematicPainter.symbolEditMode's own doc comment — call once
+	 *  (true) on a Symbol Editor's own private session, never on the shared
+	 *  schematic/PCB session. */
+	setSymbolEditMode(enabled: boolean): void {
+		this.schematicPainter.symbolEditMode = enabled;
+	}
+
+	/** Real KiCad's eeschema "Show Hidden Pins" toolbar toggle
+	 *  (`SCH_RENDER_SETTINGS::m_ShowHiddenPins`) — force-renders pins marked
+	 *  `hide` in their library definition. Rebuilds the scene since
+	 *  visibility is baked into which vertices got uploaded. */
+	get hiddenPinsVisible(): boolean { return this.schematicPainter.showHiddenPins; }
+
+	setHiddenPinsVisible(visible: boolean): void {
+		if (this.schematicPainter.showHiddenPins === visible) {
+			return;
+		}
+		this.schematicPainter.showHiddenPins = visible;
+		this.geometryDirty = true;
+		this.scheduleRender();
+	}
+
+	/** Real KiCad's eeschema "Line Mode" toolbar toggle (`LINE_MODE`,
+	 *  `eeschema_settings.h`) — see `computeWireBend`'s own doc comment for
+	 *  what each mode does. Only affects the live wire/bus-drawing preview
+	 *  here (`drawEditPreview`'s 'wire' case); the actual committed bend
+	 *  point is computed the same way by the caller (`PointerController`)
+	 *  before calling `addWire`/`addBus`, so both stay in sync as long as
+	 *  callers read the same mode for both. Doesn't affect baked scene
+	 *  geometry, so no `geometryDirty` — just redraws the overlay. */
+	protected lineMode: SchLineMode = '90';
+
+	get currentLineMode(): SchLineMode { return this.lineMode; }
+
+	setLineMode(mode: SchLineMode): void {
+		if (this.lineMode === mode) {
+			return;
+		}
+		this.lineMode = mode;
+		this.scheduleRender();
+	}
+
+	/** Real KiCad's eeschema "Annotate Automatically" toolbar toggle
+	 *  (`EESCHEMA_SETTINGS::m_AnnotatePanel.automatic`) — see
+	 *  `addLibrarySymbolFromText`'s use of this flag and `annotateSchematic`'s
+	 *  own doc comment for what happens on each side of it. Defaults `true`
+	 *  to match this app's own long-standing placement behavior (every
+	 *  placed symbol has always immediately gotten a real reference) —
+	 *  introducing the flag is a no-op until the toggle button is used. */
+	protected annotateAutomatically = true;
+
+	get isAnnotateAutomatically(): boolean { return this.annotateAutomatically; }
+
+	setAnnotateAutomatically(enabled: boolean): void {
+		this.annotateAutomatically = enabled;
+	}
+
+	/**
+	 * Real KiCad's "Annotate Schematic" command (Tools > Annotate Schematic),
+	 * scoped to the CURRENT SHEET only (this session only ever holds one
+	 * sheet's AST at a time — see the project-wide-AST-staleness lesson
+	 * elsewhere in this codebase) and to a single fixed strategy: real
+	 * KiCad's own dialog additionally offers sort-by-X/-Y-position and
+	 * sheet-number-multiplier options, none of which are ported here.
+	 *
+	 * Assigns every symbol instance whose Reference is still an
+	 * un-annotated placeholder (the `"<prefix>?"` shape
+	 * `addLibrarySymbolFromText` writes when Annotate Automatically is off)
+	 * the next free number for its prefix, walked in schematic document
+	 * order. Multi-unit placements are grouped WITHOUT any shared identity
+	 * field (this app's own model has none — see `findSymbolInstanceById`'s
+	 * doc comment: distinct units of one physical part are wholly separate
+	 * AST elements, linked only by sharing a Reference string once
+	 * annotated) via the same bin-packing rule real KiCad's own
+	 * `REFDES_TRACKER::GetNextRefDesForUnits` uses
+	 * (`eeschema/refdes_tracker.cpp`): the lowest number N is reused across
+	 * several placeholders sharing one (libId, Value) pair as long as no
+	 * two of them claim the same unit ordinal at that N — since one
+	 * physical multi-unit placement's units always have DISTINCT unit
+	 * numbers (1, 2, 3…) while two SEPARATE placements of the same part
+	 * both start at unit 1, this reconstructs "which placeholders are one
+	 * physical component" without ever needing an explicit identity link.
+	 * Already-annotated (non-"?") symbols seed the same used-number map so
+	 * a freshly assigned number can never collide with one already on the
+	 * sheet. Returns the count of symbols annotated.
+	 */
+	annotateSchematic(): number {
+		if (!this.schematicRoot?.rootElement) {
+			return 0;
+		}
+		const symbols: KicadElementSymbol[] = this.schematicRoot.rootElement.findChildrenByClass(KicadElementSymbol);
+		type Slot = { libId: string; value: string; units: Set<number> };
+		const usedByPrefix = new Map<string, Map<number, Slot>>();
+		const keyOf = (symbol: KicadElementSymbol) => ({
+			libId: symbol.getLibId() ?? '',
+			value: String(symbol.getAllProperties().Value ?? ''),
+			unit: symbol.getUnitId() || 1
+		});
+		const claim = (prefix: string, num: number, libId: string, value: string, unit: number) => {
+			let byNum = usedByPrefix.get(prefix);
+			if (!byNum) {
+				byNum = new Map();
+				usedByPrefix.set(prefix, byNum);
+			}
+			let slot = byNum.get(num);
+			if (!slot) {
+				slot = { libId, value, units: new Set() };
+				byNum.set(num, slot);
+			}
+			slot.units.add(unit);
+		};
+		for (const symbol of symbols) {
+			const ref = symbol.getReference();
+			if (!ref || ref.endsWith('?')) {
+				continue;
+			}
+			const match = /^(.*?)(\d+)$/.exec(ref);
+			if (!match) {
+				continue;
+			}
+			const { libId, value, unit } = keyOf(symbol);
+			claim(match[1]!, Number(match[2]), libId, value, unit);
+		}
+		let annotated = 0;
+		const toAnnotate = symbols.filter(symbol => symbol.getReference()?.endsWith('?'));
+		if (!toAnnotate.length) {
+			return 0;
+		}
+		this.pushUndoSnapshot('Annotate Schematic');
+		for (const symbol of toAnnotate) {
+			const ref = symbol.getReference()!;
+			const prefix = ref.slice(0, -1);
+			const { libId, value, unit } = keyOf(symbol);
+			const byNum = usedByPrefix.get(prefix);
+			let num = 1;
+			while (true) {
+				const slot = byNum?.get(num);
+				if (!slot || (slot.libId === libId && slot.value === value && !slot.units.has(unit))) {
+					break;
+				}
+				num++;
+			}
+			claim(prefix, num, libId, value, unit);
+			symbol.setProperty('Reference', `${ prefix }${ num }`);
+			annotated++;
+		}
+		this.commitAstMutation();
+		return annotated;
+	}
+
 	protected readonly canvas2d: HTMLCanvasElement;
 	protected readonly canvasGl: HTMLCanvasElement | null;
 	protected readonly canvas2dRenderer: Canvas2dRenderer;
@@ -2028,7 +2207,13 @@ export class KicadRenderSession {
 	 *  check lock state itself — same separation of concerns as every other
 	 *  session method; callers use isBoardElementLocked per id. Returns null
 	 *  for anything that isn't a straight track segment. */
-	assembleTrackLine(paintId: string): { segmentIds: string[]; points: Vec2[]; width: number; layer: string; netId: number | null } | null {
+	assembleTrackLine(paintId: string): {
+		segmentIds: string[];
+		points: Vec2[];
+		width: number;
+		layer: string;
+		netId: number | null
+	} | null {
 		if (this.documentType !== 'board' || !this.scene) {
 			return null;
 		}
@@ -2050,10 +2235,13 @@ export class KicadRenderSession {
 		const fromB = this.walkTrackChainOutward(graph, nodeBIndex, paintId);
 		return {
 			segmentIds: [...fromA.segmentIds.reverse(), paintId, ...fromB.segmentIds],
-			points: [...fromA.points.reverse(), graph.nodes[nodeAIndex]!.point, graph.nodes[nodeBIndex]!.point, ...fromB.points],
+			points: [
+				...fromA.points.reverse(), graph.nodes[nodeAIndex]!.point, graph.nodes[nodeBIndex]!.point,
+				...fromB.points
+			],
 			width: item.shape.width,
 			layer: item.layer,
-			netId: item.netId ?? null,
+			netId: item.netId ?? null
 		};
 	}
 
@@ -2098,7 +2286,8 @@ export class KicadRenderSession {
 				break;
 			}
 			const nextNode = graph.nodes[nextNodeIndex]!;
-			const otherEndIndex = graph.adjacent(nextNodeIndex).find(candidate => graph.nodes[candidate]!.itemId === nextNode.itemId);
+			const otherEndIndex = graph.adjacent(nextNodeIndex)
+				.find(candidate => graph.nodes[candidate]!.itemId === nextNode.itemId);
 			if (otherEndIndex === undefined) {
 				break;
 			}
@@ -2130,8 +2319,10 @@ export class KicadRenderSession {
 	 *  endTrackDragPreview's scene restore is deferred to the next render()
 	 *  tick, which never runs before this synchronous call. This was an
 	 *  actual shipped bug, root-caused against a real user board. */
-	dragTrackLine(oldSegmentIds: string[], newPoints: Vec2[], width: number, layer: string, netId: number | null): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || oldSegmentIds.length === 0 || newPoints.length < 2) {
+	dragTrackLine(
+		oldSegmentIds: string[], newPoints: Vec2[], width: number, layer: string, netId: number | null): boolean {
+		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || oldSegmentIds.length === 0
+			|| newPoints.length < 2) {
 			return false;
 		}
 		const parent = this.boardRoot.rootElement;
@@ -2787,7 +2978,8 @@ export class KicadRenderSession {
 	/** Embed a raster image as a board-level `image` record on the active
 	 * layer.  KiCad stores the same binary payload shape as schematic images,
 	 * with the PCB layer providing its visibility and rendering color context. */
-	addBoardGraphicImage(x: number, y: number, data: string, mimeType: string, layer: string, scale = 1): string | null {
+	addBoardGraphicImage(
+		x: number, y: number, data: string, mimeType: string, layer: string, scale = 1): string | null {
 		if (!this.canAddBoardGraphic() || !data || !mimeType.startsWith('image/')) {
 			return null;
 		}
@@ -2809,12 +3001,24 @@ export class KicadRenderSession {
 	 * deliberately not serialized: Zint regenerates them from these fields. */
 	addBoardBarcode(
 		x: number, y: number, data: {
-			text: string; type: 'code39' | 'code128' | 'datamatrix' | 'qr' | 'microqr'; errorCorrection: 'L' | 'M' | 'Q' | 'H';
-			showText: boolean; textHeightMm: number; widthMm: number; heightMm: number; locked: boolean;
-			layer: string; knockout: boolean; marginXmm: number; marginYmm: number; orientation: number;
+			text: string;
+			type: 'code39' | 'code128' | 'datamatrix' | 'qr' | 'microqr';
+			errorCorrection: 'L' | 'M' | 'Q' | 'H';
+			showText: boolean;
+			textHeightMm: number;
+			widthMm: number;
+			heightMm: number;
+			locked: boolean;
+			layer: string;
+			knockout: boolean;
+			marginXmm: number;
+			marginYmm: number;
+			orientation: number;
 		}
 	): string | null {
-		if (!this.canAddBoardGraphic() || !data.text.trim()) return null;
+		if (!this.canAddBoardGraphic() || !data.text.trim()) {
+			return null;
+		}
 		this.pushUndoSnapshot('Place barcode');
 		const barcode = new KicadElementBarcode();
 		barcode.setOrigin(x, y, data.orientation);
@@ -2822,11 +3026,15 @@ export class KicadRenderSession {
 		barcode.setSize(Math.max(0.01, data.widthMm), Math.max(0.01, data.heightMm));
 		barcode.setBarcodeText(data.text);
 		barcode.setBarcodeType(data.type);
-		if (data.type === 'qr' || data.type === 'microqr') barcode.setErrorCorrection(data.errorCorrection);
+		if (data.type === 'qr' || data.type === 'microqr') {
+			barcode.setErrorCorrection(data.errorCorrection);
+		}
 		barcode.setTextHidden(!data.showText);
 		barcode.setTextHeight(Math.max(0.01, data.textHeightMm));
 		barcode.setKnockout(data.knockout);
-		if (data.knockout) barcode.setMargins(Math.max(0, data.marginXmm), Math.max(0, data.marginYmm));
+		if (data.knockout) {
+			barcode.setMargins(Math.max(0, data.marginXmm), Math.max(0, data.marginYmm));
+		}
 		barcode.setLocked(data.locked);
 		barcode.setUuid();
 		this.boardRoot!.rootElement.addChild(barcode);
@@ -2921,14 +3129,15 @@ export class KicadRenderSession {
 		const unitLabel = unitsMode === 'inch' ? 'in' : unitsMode === 'mils' ? 'mil' : 'mm';
 		const converted = unitsMode === 'inch' ? measuredMm / 25.4
 			: unitsMode === 'mils' ? (measuredMm / 25.4) * 1000
-			: measuredMm;
+				: measuredMm;
 		const precision = dim.getPrecision();
 		let valueStr = converted.toFixed(precision);
 		if (dim.getSuppressZeroes() && valueStr.includes('.')) {
 			valueStr = valueStr.replace(/0+$/, '').replace(/\.$/, '');
 		}
 		const unitsFormat = dim.getUnitsFormat();
-		const suffix = unitsFormat === 'no_suffix' ? '' : unitsFormat === 'paren_suffix' ? ` (${ unitLabel })` : ` ${ unitLabel }`;
+		const suffix = unitsFormat === 'no_suffix' ? '' :
+			unitsFormat === 'paren_suffix' ? ` (${ unitLabel })` : ` ${ unitLabel }`;
 		return `${ dim.getPrefix() }${ valueStr }${ suffix }${ dim.getSuffix() }`;
 	}
 
@@ -3020,7 +3229,7 @@ export class KicadRenderSession {
 		const nx = -dy / dist, ny = dx / dist;
 		return {
 			lineStart: new Vec2(p1.x + nx * height, p1.y + ny * height),
-			lineEnd: new Vec2(p2.x + nx * height, p2.y + ny * height),
+			lineEnd: new Vec2(p2.x + nx * height, p2.y + ny * height)
 		};
 	}
 
@@ -3048,7 +3257,7 @@ export class KicadRenderSession {
 		return {
 			measured: [new Vec2(points[0].x, points[0].y), new Vec2(points[1].x, points[1].y)],
 			crossbar: [crossbar.lineStart, crossbar.lineEnd],
-			text: new Vec2(textOrigin.x, textOrigin.y),
+			text: new Vec2(textOrigin.x, textOrigin.y)
 		};
 	}
 
@@ -3188,8 +3397,15 @@ export class KicadRenderSession {
 		if (this.documentType !== 'board' || !this.scene) {
 			return null;
 		}
-		let best: { point: Vec2; netId: number | null; kind: 'pad' | 'via' | 'track'; width?: number; dist: number } | null = null;
-		const consider = (x: number, y: number, netId: number | null, kind: 'pad' | 'via' | 'track', width?: number) => {
+		let best: {
+			point: Vec2;
+			netId: number | null;
+			kind: 'pad' | 'via' | 'track';
+			width?: number;
+			dist: number
+		} | null = null;
+		const consider = (
+			x: number, y: number, netId: number | null, kind: 'pad' | 'via' | 'track', width?: number) => {
 			if (netFilter != null && netId !== null && netId !== netFilter) {
 				return;
 			}
@@ -3255,7 +3471,7 @@ export class KicadRenderSession {
 			}
 			const corners = [
 				{ x: start.x, y: start.y }, { x: end.x, y: start.y },
-				{ x: end.x, y: end.y }, { x: start.x, y: end.y },
+				{ x: end.x, y: end.y }, { x: start.x, y: end.y }
 			];
 			consider((start.x + end.x) / 2, (start.y + end.y) / 2);
 			for (let i = 0; i < 4; i++) {
@@ -4248,17 +4464,25 @@ export class KicadRenderSession {
 	 * genuinely upgrades its stored board rather than preserving corruption. */
 	private repairMalformedBoardZoneOutlines(root: any): void {
 		const zones = root?.findChildrenByClass?.(KicadElementZone) as KicadElementZone[] | undefined;
-		if (!zones?.length) return;
+		if (!zones?.length) {
+			return;
+		}
 		for (const zone of zones) {
-			if (zone.getPolygon().length > 0) continue;
+			if (zone.getPolygon().length > 0) {
+				continue;
+			}
 			const malformed = zone.children.find(child => child.name === '('
 				&& child.attributes[0]?.value === 'pts');
-			if (!malformed) continue;
+			if (!malformed) {
+				continue;
+			}
 			const points = malformed.children
 				.filter(child => child.name === 'xy')
 				.map(child => ({ x: Number(child.attributes[0]?.value), y: Number(child.attributes[1]?.value) }))
 				.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
-			if (points.length < 3) continue;
+			if (points.length < 3) {
+				continue;
+			}
 			const replacement = new KicadElementPolygon();
 			replacement.setPoints(points);
 			replacement.parent = zone;
@@ -4276,7 +4500,9 @@ export class KicadRenderSession {
 	 * keeps the recovery deliberately narrow. */
 	private repairDetachedBoardZoneFields(root: any): void {
 		const children = root?.children as any[] | undefined;
-		if (!children) return;
+		if (!children) {
+			return;
+		}
 		const zoneFieldNames = new Set([
 			'net', 'net_name', 'layer', 'layers', 'property', 'tstamp', 'uuid', 'hatch', 'priority',
 			'connect_pads', 'min_thickness', 'filled_areas_thickness', 'fill', 'placement', 'keepout',
@@ -4284,7 +4510,9 @@ export class KicadRenderSession {
 		]);
 		for (let index = 0; index < children.length; index++) {
 			const zone = children[index];
-			if (!(zone instanceof KicadElementZone) && zone?.name !== 'zone') continue;
+			if (!(zone instanceof KicadElementZone) && zone?.name !== 'zone') {
+				continue;
+			}
 			const hasOutline = zone.children?.some((child: any) => child.name === 'polygon');
 			const hasLayer = zone.children?.some((child: any) => child.name === 'layer' || child.name === 'layers');
 			const firstDetached = children[index + 1];
@@ -4801,7 +5029,11 @@ export class KicadRenderSession {
 	} | null {
 		const zone = this.findZoneByUuid(paintId);
 		if (zone) {
-			return { id: zone.getUuid() ?? paintId, points: zone.getPolygon(), setPoints: points => zone.setPolygon(points) };
+			return {
+				id: zone.getUuid() ?? paintId,
+				points: zone.getPolygon(),
+				setPoints: points => zone.setPolygon(points)
+			};
 		}
 		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
 			return null;
@@ -4811,7 +5043,11 @@ export class KicadRenderSession {
 		if (!polygon) {
 			return null;
 		}
-		return { id: polygon.getUuid() ?? paintId, points: polygon.getPoints(), setPoints: points => polygon.setPoints(points) };
+		return {
+			id: polygon.getUuid() ?? paintId,
+			points: polygon.getPoints(),
+			setPoints: points => polygon.setPoints(points)
+		};
 	}
 
 	/** Mirrors findZoneByUuid's bare-uuid recovery — buildGrPoly's own paint
@@ -4916,7 +5152,7 @@ export class KicadRenderSession {
 			mode: zone.getPadConnectionType(),
 			thermalGapMm: thermal.gapMm,
 			thermalSpokeWidthMm: thermal.spokeWidthMm,
-			minThicknessMm: zone.getMinThickness(),
+			minThicknessMm: zone.getMinThickness()
 		};
 	}
 
@@ -5132,7 +5368,7 @@ export class KicadRenderSession {
 		return {
 			layers: zone.getLayers(), name: zone.getZoneName(), locked: zone.isLocked(),
 			hatchStyle: hatch.style, hatchPitchMm: hatch.pitchMm,
-			keepout: zone.getKeepoutSettings(),
+			keepout: zone.getKeepoutSettings()
 		};
 	}
 
@@ -5212,7 +5448,8 @@ export class KicadRenderSession {
 		if (!polygon || index < 0 || index >= polygon.points.length) {
 			return false;
 		}
-		polygon.setPoints(polygon.points.map((point, pointIndex) => pointIndex === index ? { x, y } : { x: point.x, y: point.y }));
+		polygon.setPoints(
+			polygon.points.map((point, pointIndex) => pointIndex === index ? { x, y } : { x: point.x, y: point.y }));
 		this.commitAstMutation();
 		return true;
 	}
@@ -5247,7 +5484,11 @@ export class KicadRenderSession {
 	 *  PCB_POINT_EDITOR::addCorner (pcb_point_editor.cpp): scan every
 	 *  segment, keep the nearest, project the cursor onto it. Pass the
 	 *  result straight to insertBoardPolygonPoint. */
-	nearestBoardPolygonInsertion(paintId: string, x: number, y: number): { edgeIndex: number; x: number; y: number } | null {
+	nearestBoardPolygonInsertion(paintId: string, x: number, y: number): {
+		edgeIndex: number;
+		x: number;
+		y: number
+	} | null {
 		const polygon = this.findBoardPolygonByPaintId(paintId);
 		const points = polygon?.points;
 		if (!polygon || !points || points.length < 2) {
@@ -5624,7 +5865,9 @@ export class KicadRenderSession {
 		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
 			return false;
 		}
-		const element = this.scene.hitTestItems.find(it => it.id === paintId)?.element as { isLocked?(): boolean } | undefined;
+		const element = this.scene.hitTestItems.find(it => it.id === paintId)?.element as {
+			isLocked?(): boolean
+		} | undefined;
 		return !!element?.isLocked?.();
 	}
 
@@ -6420,8 +6663,10 @@ export class KicadRenderSession {
 		const boardBarcodeIsAxisAligned = el?.name === 'barcode'
 			&& Number(el.getOrigin?.().rotation ?? 0) === 0;
 		const eligible = this.documentType === 'schematic'
-			? (el?.name === 'rectangle' || el?.name === 'text_box' || el?.name === 'image') && item?.shape.type === 'rect'
-			: (el?.name === 'gr_rect' || el?.name === 'image' || boardTextBoxIsAxisAligned || boardBarcodeIsAxisAligned);
+			?
+			(el?.name === 'rectangle' || el?.name === 'text_box' || el?.name === 'image') && item?.shape.type === 'rect'
+			:
+			(el?.name === 'gr_rect' || el?.name === 'image' || boardTextBoxIsAxisAligned || boardBarcodeIsAxisAligned);
 		if (!item || !eligible) {
 			return null;
 		}
@@ -6748,7 +6993,13 @@ export class KicadRenderSession {
 		this.ensureLibSymbol(libId, () => detached);
 
 		const referenceBase = String(source.getAllProperties().Reference ?? 'U').replace(/^~|\?.*$/g, '').trim() || 'U';
-		const reference = reuseReference ?? this.nextSymbolRef(referenceBase);
+		// Real KiCad's "Annotate Automatically" toolbar toggle
+		// (`EESCHEMA_SETTINGS::m_AnnotatePanel.automatic`): off means a fresh
+		// placement gets the real un-annotated placeholder shape ("<prefix>?")
+		// instead of an immediately-assigned number, left for a later
+		// annotateSchematic() pass — see that method's own doc comment.
+		const reference = reuseReference
+			?? (this.annotateAutomatically ? this.nextSymbolRef(referenceBase) : `${ referenceBase }?`);
 		const value = String(source.getAllProperties().Value ?? libId);
 		const instance = new KicadElementSymbol();
 		instance.addChild(new KicadElementLibId(libId));
@@ -7323,6 +7574,224 @@ export class KicadRenderSession {
 		return true;
 	}
 
+	/** Extracts the current definition of one embedded lib_symbols entry as
+	 *  KiCad s-expression text — used by the symbol editor to sync its own
+	 *  "real" AST (SymbolEditorScreen.currentSymbol, loaded from the actual
+	 *  .kicad_sym file) after an interactive edit lands on this session's
+	 *  own throwaway preview document (see SymbolEditorScreen's own doc
+	 *  comment for why editing happens there: pins/shapes get real per-item
+	 *  paint ids and hit-testing/mutation for free by reusing the placed-
+	 *  instance rendering path, rather than needing a parallel body-only
+	 *  renderer). */
+	getEmbeddedLibrarySymbolText(libId: string): string | null {
+		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
+			return null;
+		}
+		const libSymbols = this.schematicRoot.rootElement.findFirstChildByClass(KicadElementLibSymbols);
+		return libSymbols?.findSymbolByName(libId)?.write() ?? null;
+	}
+
+	/** Removes one pin/graphic/text item from the symbol body it belongs to
+	 *  — NOT from the schematic root's own children the way deleteElements()
+	 *  does, since a symbol body's items live nested inside its lib_symbols
+	 *  entry (lib_symbols > symbol > pin/rectangle/circle/...), not at the
+	 *  document root. Used by the symbol editor's Delete tool/key; refuses a
+	 *  kind:'symbol' hit (the placed preview instance itself must not be
+	 *  deleted this way) and anything with no parent to splice out of. */
+	deleteSymbolBodyItem(paintId: string): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+			return false;
+		}
+		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
+		const el: any = item?.element;
+		if (!item || item.kind === 'symbol' || !el?.parent?.children) {
+			return false;
+		}
+		const siblings: any[] = el.parent.children;
+		const idx = siblings.indexOf(el);
+		if (idx < 0) {
+			return false;
+		}
+		this.pushUndoSnapshot('Delete');
+		siblings.splice(idx, 1);
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Rotates one symbol-body item (pin/graphic/text) 90° around its own
+	 *  pivot point. Ported from real KiCad's symbol-editor rotate behavior
+	 *  (eeschema/tools/symbol_editor_edit_tool.cpp: for a SINGLE selected
+	 *  item the pivot is always that item's own position/center — never
+	 *  (0,0) or the mouse, that only applies to a multi-item selection this
+	 *  app doesn't support rotating yet). Per kind: a pin's `at x y` and a
+	 *  text item's anchor stay fixed — only their quantized orientation/
+	 *  angle field cycles by ±90° (`SCH_PIN::Rotate`/`SCH_TEXT::Rotate` both
+	 *  pivot on that exact point, so the position math cancels to a no-op);
+	 *  a circle rotates about its own already-fixed center (a genuine no-op
+	 *  on center+radius storage — real KiCad's own circle pivot is its
+	 *  center too, per `EDA_SHAPE::getCenter()`'s CIRCLE case); a rectangle/
+	 *  bezier/polyline pivots on its own first stored point (real KiCad's
+	 *  `m_start`, NOT necessarily its visual center — its bounding box CAN
+	 *  shift, matching real KiCad exactly, not a bug); an arc pivots on its
+	 *  true geometric center (`m_arcCenter`, computed here via circumcenter
+	 *  of start/mid/end), degrading to its start point if those three
+	 *  points are collinear/degenerate. `direction`: 1 = CCW (real KiCad's
+	 *  `R` hotkey), -1 = CW (`Shift+R`) — reuses `Angle.rotatePoint()`'s own
+	 *  exact 90°/270° shortcut formulas rather than a second hand-rolled
+	 *  rotation implementation. Returns the item's paint id AFTER the
+	 *  mutation, which the caller must adopt as its new `selectedPaintId` —
+	 *  an arc's id is derived from its (generally shifting, thanks to
+	 *  floating-point noise even though the pivot is conceptually fixed)
+	 *  center coordinates (see `buildSymArc`), so `paintId` can go stale the
+	 *  instant this returns, the same class of bug this app already hit and
+	 *  fixed once for position-derived pin ids during drag (see
+	 *  `SymbolEditorScreen`'s doc comment on `onWindowMouseMove`). Resolved
+	 *  by re-finding the scene item that wraps the SAME (in-place-mutated)
+	 *  AST element object — `commitAstMutation()` repaints from the existing
+	 *  AST without reparsing, so object identity survives the rebuild. */
+	rotateSymbolBodyItemById(paintId: string, direction: 1 | -1): string | null {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			return null;
+		}
+		const el: any = this.schScene.hitTestItems.find(it => it.id === paintId)?.element;
+		if (!el || !this.rotateElementGeometry(el, direction)) {
+			return null;
+		}
+		this.commitAstMutation();
+		return this.schScene?.hitTestItems.find(it => it.element === el)?.id ?? null;
+	}
+
+	/** Mirror counterpart to {@link rotateSymbolBodyItemById} — see that
+	 *  method's doc comment for the shared pivot-per-kind rules. `axis`:
+	 *  'horizontal' flips left-right (negates X — real KiCad's Mirror
+	 *  Horizontally / `X` hotkey), 'vertical' flips top-bottom (negates Y —
+	 *  Mirror Vertically / `Y` hotkey); this naming is NOT swapped despite
+	 *  the temptation to assume so (confirmed against real KiCad's
+	 *  `SCH_ACTIONS::mirrorH`/`mirrorV`, which carry an explicit comment
+	 *  noting it used to be backwards before KiCad 6.0). A pin's orientation
+	 *  swaps RIGHT↔LEFT under a horizontal mirror / UP↔DOWN under a vertical
+	 *  one (and is unaffected by the other axis) — same reasoning applies to
+	 *  a text item's quantized angle field. Returns the post-mutation paint
+	 *  id — see {@link rotateSymbolBodyItemById}'s doc comment for why this
+	 *  can differ from the id passed in. */
+	mirrorSymbolBodyItemById(paintId: string, axis: 'horizontal' | 'vertical'): string | null {
+		if (this.documentType !== 'schematic' || !this.schScene) {
+			return null;
+		}
+		const el: any = this.schScene.hitTestItems.find(it => it.id === paintId)?.element;
+		if (!el || !this.mirrorElementGeometry(el, axis)) {
+			return null;
+		}
+		this.commitAstMutation();
+		return this.schScene?.hitTestItems.find(it => it.element === el)?.id ?? null;
+	}
+
+	/** Per-shape geometry dispatch rotateSymbolBodyItemById() resolves an id
+	 *  to before calling this — same shape-accessor branches
+	 *  translateElementGeometry() uses (getPoints/getStartMidEnd/
+	 *  getStartEnd/getCenter/getOrigin), but rotating each shape's defining
+	 *  points 90° around ITS OWN pivot instead of translating by a delta. */
+	private rotateElementGeometry(el: any, direction: 1 | -1): boolean {
+		const angle = Angle.fromDegrees(direction === 1 ? 90 : 270);
+		if (typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
+			const points = el.getPoints();
+			const pivot = points[0];
+			if (!pivot) {
+				return false;
+			}
+			const origin = new Vec2(pivot.x, pivot.y);
+			el.setPoints(points.map((p: { x: number; y: number }) => angle.rotatePoint(new Vec2(p.x, p.y), origin)));
+			return true;
+		}
+		if (typeof el.getStartMidEnd === 'function' && typeof el.setStartMidEnd === 'function') {
+			const { start, mid, end } = el.getStartMidEnd();
+			const pivot = arcCircumcenter(start, mid, end) ?? start;
+			const origin = new Vec2(pivot.x, pivot.y);
+			const s = angle.rotatePoint(new Vec2(start.x, start.y), origin);
+			const m = angle.rotatePoint(new Vec2(mid.x, mid.y), origin);
+			const e = angle.rotatePoint(new Vec2(end.x, end.y), origin);
+			el.setStartMidEnd(s.x, s.y, m.x, m.y, e.x, e.y);
+			return true;
+		}
+		if (typeof el.getStartEnd === 'function' && typeof el.setStartEnd === 'function') {
+			const { start, end } = el.getStartEnd();
+			const e2 = angle.rotatePoint(new Vec2(end.x, end.y), new Vec2(start.x, start.y));
+			el.setStartEnd(start.x, start.y, e2.x, e2.y);
+			return true;
+		}
+		if (typeof el.getCenter === 'function') {
+			// Circle: rotating about its own already-fixed center is a
+			// genuine no-op on center+radius storage.
+			return true;
+		}
+		if (typeof el.getOrigin === 'function' && typeof el.setOrigin === 'function') {
+			const origin = el.getOrigin();
+			const next = (((origin.rotation ?? 0) + (direction === 1 ? 90 : -90)) % 360 + 360) % 360;
+			el.setOrigin(origin.x, origin.y, next);
+			return true;
+		}
+		return false;
+	}
+
+	/** Mirror counterpart to rotateElementGeometry() — same shape-accessor
+	 *  branches, reflecting each shape's defining points across a line
+	 *  through its own pivot instead of rotating them. */
+	private mirrorElementGeometry(el: any, axis: 'horizontal' | 'vertical'): boolean {
+		const reflect = (x: number, y: number, cx: number, cy: number): { x: number; y: number } =>
+			axis === 'horizontal' ? { x: 2 * cx - x, y } : { x, y: 2 * cy - y };
+		if (typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
+			const points = el.getPoints();
+			const pivot = points[0];
+			if (!pivot) {
+				return false;
+			}
+			el.setPoints(points.map((p: { x: number; y: number }) => reflect(p.x, p.y, pivot.x, pivot.y)));
+			return true;
+		}
+		if (typeof el.getStartMidEnd === 'function' && typeof el.setStartMidEnd === 'function') {
+			const { start, mid, end } = el.getStartMidEnd();
+			const pivot = arcCircumcenter(start, mid, end) ?? start;
+			const s = reflect(start.x, start.y, pivot.x, pivot.y);
+			const m = reflect(mid.x, mid.y, pivot.x, pivot.y);
+			const e = reflect(end.x, end.y, pivot.x, pivot.y);
+			el.setStartMidEnd(s.x, s.y, m.x, m.y, e.x, e.y);
+			return true;
+		}
+		if (typeof el.getStartEnd === 'function' && typeof el.setStartEnd === 'function') {
+			const { start, end } = el.getStartEnd();
+			const e2 = reflect(end.x, end.y, start.x, start.y);
+			el.setStartEnd(start.x, start.y, e2.x, e2.y);
+			return true;
+		}
+		if (typeof el.getCenter === 'function') {
+			// Circle: mirroring about its own already-fixed center is a
+			// genuine no-op on center+radius storage.
+			return true;
+		}
+		if (typeof el.getOrigin === 'function' && typeof el.setOrigin === 'function') {
+			const origin = el.getOrigin();
+			const rotation = origin.rotation ?? 0;
+			let next = rotation;
+			if (axis === 'horizontal') {
+				if (rotation === 0) {
+					next = 180;
+				}
+				else if (rotation === 180) {
+					next = 0;
+				}
+			}
+			else if (rotation === 90) {
+				next = 270;
+			}
+			else if (rotation === 270) {
+				next = 90;
+			}
+			el.setOrigin(origin.x, origin.y, next);
+			return true;
+		}
+		return false;
+	}
+
 	/** Board equivalent of resizeElementBoundsById. PCB images only support a
 	 * uniform scale, while board rectangles and axis-aligned text boxes own
 	 * explicit start/end corners. */
@@ -7337,7 +7806,8 @@ export class KicadRenderSession {
 			return false;
 		}
 		if ((el.name === 'gr_rect' || el.name === 'gr_text_box') && typeof el.setStartEnd === 'function') {
-			if (el.name === 'gr_text_box' && Number(el.findFirstChildByName?.('angle')?.attributes?.[0]?.value ?? 0) !== 0) {
+			if (el.name === 'gr_text_box' && Number(el.findFirstChildByName?.('angle')?.attributes?.[0]?.value ?? 0)
+				!== 0) {
 				return false;
 			}
 			el.setStartEnd(x, y, x + width, y + height);
@@ -8128,7 +8598,7 @@ export class KicadRenderSession {
 		const color = EDIT_PREVIEW_COLOR;
 		switch (p.kind) {
 			case 'wire': {
-				const bend = orthogonalWireBend(p.from, p.cursor);
+				const bend = computeWireBend(p.from, p.cursor, this.lineMode);
 				renderer.line(
 					bend ? [p.from, bend, p.cursor] : [p.from, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
 				break;
@@ -8277,10 +8747,12 @@ export class KicadRenderSession {
 					? (orientation === 0 ? p.cursor.y - first!.y : p.cursor.x - first!.x)
 					: ((p.cursor.x - first!.x) * -dy + (p.cursor.y - first!.y) * dx) / length;
 				const lineStart = p.type === 'orthogonal'
-					? (orientation === 0 ? new Vec2(first!.x, first!.y + height) : new Vec2(first!.x + height, first!.y))
+					?
+					(orientation === 0 ? new Vec2(first!.x, first!.y + height) : new Vec2(first!.x + height, first!.y))
 					: new Vec2(first!.x - dy / length * height, first!.y + dx / length * height);
 				const lineEnd = p.type === 'orthogonal'
-					? (orientation === 0 ? new Vec2(second!.x, second!.y + height) : new Vec2(second!.x + height, second!.y))
+					? (orientation === 0 ? new Vec2(second!.x, second!.y + height) :
+						new Vec2(second!.x + height, second!.y))
 					: new Vec2(second!.x - dy / length * height, second!.y + dx / length * height);
 				renderer.line([first!, lineStart], { strokeColor: color, strokeWidth: 0.1 });
 				renderer.line([second!, lineEnd], { strokeColor: color, strokeWidth: 0.1 });
@@ -8643,6 +9115,26 @@ const SYNTHETIC_ANGLE_BASE = 1000;
 
 function pointsNear(ax: number, ay: number, bx: number, by: number): boolean {
 	return Math.abs(ax - bx) < JUNCTION_POINT_EPS && Math.abs(ay - by) < JUNCTION_POINT_EPS;
+}
+
+/** Circumcenter of the 3 points defining a symbol-body arc — the pivot real
+ *  KiCad rotates/mirrors an arc around (its `m_arcCenter`), as opposed to
+ *  its `start` point. Returns null on a degenerate/near-collinear triple
+ *  (start/mid/end all on one line has no finite circumcenter); callers fall
+ *  back to `start` as the pivot in that case. */
+function arcCircumcenter(
+	p1: { x: number; y: number }, p2: { x: number; y: number }, p3: { x: number; y: number }
+): { x: number; y: number } | null {
+	const d = 2 * (p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
+	if (Math.abs(d) < 1e-9) {
+		return null;
+	}
+	const p1sq = p1.x * p1.x + p1.y * p1.y;
+	const p2sq = p2.x * p2.x + p2.y * p2.y;
+	const p3sq = p3.x * p3.x + p3.y * p3.y;
+	const x = (p1sq * (p2.y - p3.y) + p2sq * (p3.y - p1.y) + p3sq * (p1.y - p2.y)) / d;
+	const y = (p1sq * (p3.x - p2.x) + p2sq * (p1.x - p3.x) + p3sq * (p2.x - p1.x)) / d;
+	return { x, y };
 }
 
 /** Quantized so two truly-collinear directions compare equal (Set dedup) —

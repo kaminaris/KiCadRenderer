@@ -160,6 +160,22 @@ export class SchematicPainter {
 	 *  consumed via expandText(). Re-set (not merged) on every build() call,
 	 *  so stale state from a previous document never leaks into the next. */
 	protected textVars: Record<string, string> = {};
+	/** Off (real KiCad schematic-canvas behavior) by default: a placed
+	 *  symbol instance's own body graphics (rect/circle/arc/polyline/bezier/
+	 *  text) are deliberately NOT independently hitTestable — only the whole
+	 *  symbol, its pins, and its field labels are (see buildSymbolInstance's
+	 *  own doc comment on the symbol-body hit box). The Symbol Editor's
+	 *  render-via-placement trick (see SymbolEditorScreen's doc comment)
+	 *  reuses this exact paint path to draw a symbol's OWN body, where each
+	 *  shape genuinely needs to be its own selectable/draggable/deletable
+	 *  item — set this true on that screen's own private KicadRenderSession
+	 *  only (via KicadRenderSession.setSymbolEditMode), never on the shared
+	 *  schematic/PCB session, so ordinary sheet rendering is unaffected. */
+	symbolEditMode = false;
+	/** Real KiCad's `SCH_RENDER_SETTINGS::m_ShowHiddenPins` — off by default
+	 *  (hidden pins, e.g. power-symbol pins, stay invisible), toggled by the
+	 *  schematic editor's "Show Hidden Pins" toolbar button. */
+	showHiddenPins = false;
 	/** Reference designator → {FIELDNAME: value} for every symbol instance
 	 *  placed on the CURRENT sheet, keyed uppercase-field like the file's own
 	 *  property names — powers `${REFDES:FIELD}` (e.g. `${R3:VALUE}`). Only
@@ -1611,7 +1627,7 @@ export class SchematicPainter {
 			kind: 'symbol-graphic',
 			shape,
 			bbox: shapeToBBox(shape),
-			hitTestable: false,
+			hitTestable: this.symbolEditMode,
 			element: rect,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
@@ -1640,7 +1656,7 @@ export class SchematicPainter {
 			kind: 'symbol-graphic',
 			shape,
 			bbox: shapeToBBox(shape),
-			hitTestable: false,
+			hitTestable: this.symbolEditMode,
 			element: circle,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
@@ -1729,7 +1745,7 @@ export class SchematicPainter {
 			kind: 'symbol-graphic',
 			shape,
 			bbox: shapeToBBox(shape),
-			hitTestable: false,
+			hitTestable: this.symbolEditMode,
 			element: arc,
 			draw: (renderer, color) => {
 				const fillColor = symbolFillColor(fillType, color);
@@ -1775,7 +1791,7 @@ export class SchematicPainter {
 			kind: 'symbol-graphic',
 			shape,
 			bbox: shapeToBBox(shape),
-			hitTestable: false,
+			hitTestable: this.symbolEditMode,
 			element: poly,
 			draw: (renderer, color) => {
 				// Fill is gated on fillType alone (matching buildSymArc's own
@@ -1892,6 +1908,7 @@ export class SchematicPainter {
 		const { width, type: lineType } = typeof bezier.getStroke === 'function' ? bezier.getStroke() :
 			{ width: 0.25, type: 'solid' as KicadStrokeLineType };
 		const drawWidth = width || 0.25;
+		const fillType = typeof bezier.getFill === 'function' ? bezier.getFill() : 'none';
 		const id = bezier.getUuid() ?? `sym-bezier:${ instanceId }:${ points[0]!.x },${ points[0]!.y }`;
 		const shape: PaintedShape = {
 			type: 'polygon', points: curve.map(p => ({ x: p.x, y: p.y })),
@@ -1903,9 +1920,24 @@ export class SchematicPainter {
 			kind: 'symbol-graphic',
 			shape,
 			bbox: shapeToBBox(shape),
-			hitTestable: false,
+			hitTestable: this.symbolEditMode,
 			element: bezier,
-			draw: (renderer, color) => drawStrokeOutline(renderer, curve, drawWidth, lineType, color)
+			draw: (renderer, color) => {
+				// Same unconditional-on-fillType pattern as buildSymPolyline/
+				// buildSymArc (see that method's doc comment) — a compound
+				// IEEE-gate body can mix arcs/polylines/beziers as adjacent
+				// pieces of ONE outline, each independently `(fill (type
+				// background))`, meant to tile into a single solid region.
+				// Before this, a bezier segment NEVER contributed fill at
+				// all (stroke-only), so any gate whose curve used a bezier
+				// piece left that piece's area as bare canvas background —
+				// visually a hole in an otherwise-filled body.
+				const fillColor = symbolFillColor(fillType, color);
+				if (fillColor) {
+					renderer.polygon(curve, { fillColor });
+				}
+				drawStrokeOutline(renderer, curve, drawWidth, lineType, color);
+			}
 		};
 	}
 
@@ -1943,7 +1975,7 @@ export class SchematicPainter {
 			kind: 'text',
 			shape: { type: 'rect', ...bbox },
 			bbox,
-			hitTestable: false,
+			hitTestable: this.symbolEditMode,
 			element: text,
 			defaultColor: schColors.componentOutline,
 			draw: (renderer, color) => drawStrokeTextGeometry(renderer, geometry, color)
@@ -1973,7 +2005,7 @@ export class SchematicPainter {
 		const worldOuter = flippedTransform(instanceMatrix, origin.x, origin.y);
 		const id = pin.getUuid() ?? `pin:${ instanceId }:${ origin.x },${ origin.y }`;
 
-		if (isHidden) {
+		if (isHidden && !this.showHiddenPins) {
 			const shape: PaintedShape = {
 				type: 'segment',
 				x1: worldOuter.x,
