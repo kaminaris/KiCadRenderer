@@ -209,6 +209,17 @@ export type {
 	EditPreviewState, ViaDragFix, SymbolPoseInfo
 } from './types';
 
+export interface BoardDragPerformance {
+	startedAt: number;
+	frames: number;
+	fastFrames: number;
+	fallbackFrames: number;
+	staticRebuilds: number;
+	ratsnestMs: number;
+	fallbackReasons: Record<string, number>;
+	endedAt?: number;
+	durationMs?: number;
+}
 
 
 
@@ -427,6 +438,9 @@ export class KicadRenderSession {
 	 *  so board mutation methods (moveFootprintByPaintId, ...) can mutate +
 	 *  rebuild the scene without re-parsing text. */
 	protected boardRoot: { rootElement: any } | null = null;
+	/** Last canonical board text, retained so undo can snapshot the document
+	 * before a mutation without serializing a large board a second time. */
+	protected boardTextSnapshot = '';
 	/** Multi-select-capable — see select()/selectMultiple()/selection/selectionIds. */
 	protected selectedIds: Set<string> = new Set();
 	/** Hover-driven net highlight IDs — painted in the same highlight color as selection. */
@@ -522,6 +536,7 @@ export class KicadRenderSession {
 	 *  firstSegmentCollision) — a plain linear findChildrenByClass scan
 	 *  there was the single largest cost in a real dense-board drag trace. */
 	protected netNameCache: Map<number, string> | null = null;
+	protected copperGraphCache: { scene: LayeredBoardScene; graph: CopperGraph } | null = null;
 	/** Footprints currently being dragged, KiCad VIEW-preview style (see
 	 *  beginBoardDragPreview's doc comment): removed from the real scene (one
 	 *  full static retessellation, not one per frame) and drawn instead
@@ -529,6 +544,10 @@ export class KicadRenderSession {
 	 *  using whatever items were last built for it here. Re-added to the real
 	 *  scene (another one-time retessellation) at drag-end. */
 	protected dragPreviewFootprints = new Map<any, PaintedItem[]>();
+	/** Newly committed tracks stay in this tiny dynamic overlay until a later
+	 * static rebuild naturally absorbs them; dropping a wire must not stall on
+	 * retessellating an otherwise unchanged dense board. */
+	protected committedTrackOverlay: PaintedItem[] = [];
 	/** Ratsnest airwires whose 'from' or 'to' endpoint sits on a pad
 	 *  currently under drag-preview — see beginBoardDragPreview's doc
 	 *  comment and captureDragPreviewRatsnestEdges. Populated once at drag
@@ -546,6 +565,9 @@ export class KicadRenderSession {
 	// document, layer visibility/opacity, selection) need this; pure
 	// pan/zoom/flip never do.
 	protected geometryDirty = true;
+	protected activeBoardDragPerformance: BoardDragPerformance | null = null;
+	protected lastBoardDragPerformance: BoardDragPerformance | null = null;
+	protected lastBoardDragFastRejection: string | null = null;
 	protected flipped = false;
 	/**
 	 * Items from a fitToItems() call that ran before the canvas had a real
@@ -1197,7 +1219,7 @@ export class KicadRenderSession {
 		if (this.documentType !== 'board' || !this.scene) {
 			return 0;
 		}
-		const graph = buildCopperGraph(this.scene);
+		const graph = this.currentCopperGraph();
 		const seedIds = new Set(this.selectedIds);
 		const seedNodeIndices = graph.nodes
 			.map((node, index) => ({ node, index }))
@@ -1644,7 +1666,9 @@ export class KicadRenderSession {
 	 * gesture in that case — never attempt a partial fast path.
 	 */
 	resolveBoardDragTargets(ids: readonly string[]): { itemIds: string[]; origins: any[]; bboxOnlyItems: PaintedItem[] } | null {
+		this.lastBoardDragFastRejection = null;
 		if (this.documentType !== 'board' || !this.scene) {
+			this.lastBoardDragFastRejection = 'no-board-scene';
 			return null;
 		}
 		const footprints = new Set<any>();
@@ -1660,9 +1684,11 @@ export class KicadRenderSession {
 				footprints.add(el);
 				continue;
 			}
+			this.lastBoardDragFastRejection = 'unsupported-selection';
 			return null;
 		}
 		if (footprints.size === 0 && fields.size === 0) {
+			this.lastBoardDragFastRejection = 'empty-selection';
 			return null;
 		}
 		const itemIds: string[] = [];
@@ -1670,6 +1696,7 @@ export class KicadRenderSession {
 		for (const fp of footprints) {
 			const uuid: string | null = typeof fp.getUuid === 'function' ? fp.getUuid() : null;
 			if (!uuid) {
+				this.lastBoardDragFastRejection = 'missing-footprint-uuid';
 				return null;
 			}
 			for (const bucket of this.scene.layerBuckets.values()) {
@@ -1705,6 +1732,13 @@ export class KicadRenderSession {
 						// there's nothing visible to move.
 						continue;
 					}
+					// Hidden-layer items never entered the static buffer, so asking
+					// WebGL to translate them makes an otherwise eligible footprint
+					// drag fail atomically. PadNumbers is the sole synthetic layer
+					// that BoardPainter intentionally renders without a layer-state.
+					if (item.layer !== 'PadNumbers' && !this.isBoardLayerVisible(item.layer)) {
+						continue;
+					}
 					itemIds.push(item.id);
 				}
 			}
@@ -1712,6 +1746,7 @@ export class KicadRenderSession {
 		for (const field of fields) {
 			const item = this.scene.hitTestItems.find(candidate => candidate.element === field);
 			if (!item) {
+				this.lastBoardDragFastRejection = 'field-not-in-scene';
 				return null;
 			}
 			itemIds.push(item.id);
@@ -1742,13 +1777,17 @@ export class KicadRenderSession {
 	 * for the rest of the gesture in that case.
 	 */
 	translateBoardDragFast(targets: { itemIds: string[]; origins: any[]; bboxOnlyItems: PaintedItem[] }, dx: number, dy: number): boolean {
+		this.lastBoardDragFastRejection = null;
 		if (this.documentType !== 'board' || (dx === 0 && dy === 0)) {
+			this.lastBoardDragFastRejection = 'invalid-delta-or-document';
 			return false;
 		}
 		if (!this.webglRenderer || typeof this.webglRenderer.translateStaticItems !== 'function') {
+			this.lastBoardDragFastRejection = 'renderer-does-not-support-translation';
 			return false;
 		}
 		if (!this.webglRenderer.translateStaticItems(targets.itemIds, dx, dy)) {
+			this.lastBoardDragFastRejection = 'static-item-range-missing';
 			return false;
 		}
 		for (const el of targets.origins) {
@@ -1808,10 +1847,55 @@ export class KicadRenderSession {
 		for (const fp of footprintsToRefresh) {
 			this.painter.updateFootprintItems(this.scene, this.boardRoot, fp);
 		}
+		this.copperGraphCache = null;
+		const ratsnestStartedAt = performance.now();
 		this.refreshRatsnestForFootprints(footprintsToRefresh);
+		if (this.activeBoardDragPerformance) {
+			this.activeBoardDragPerformance.ratsnestMs += performance.now() - ratsnestStartedAt;
+		}
 	}
 
 	get isRatsnestVisible(): boolean { return this.ratsnestVisible; }
+
+	beginBoardDragPerformance(): void {
+		if (this.activeBoardDragPerformance) {
+			return;
+		}
+		this.activeBoardDragPerformance = {
+			startedAt: performance.now(), frames: 0, fastFrames: 0, fallbackFrames: 0,
+			staticRebuilds: 0, ratsnestMs: 0, fallbackReasons: {}
+		};
+	}
+
+	noteBoardDragFrame(fast: boolean): void {
+		const metrics = this.activeBoardDragPerformance;
+		if (!metrics) {
+			return;
+		}
+		metrics.frames++;
+		if (fast) metrics.fastFrames++;
+		else {
+			metrics.fallbackFrames++;
+			const reason = this.lastBoardDragFastRejection ?? 'unknown';
+			metrics.fallbackReasons[reason] = (metrics.fallbackReasons[reason] ?? 0) + 1;
+		}
+	}
+
+	endBoardDragPerformance(): void {
+		const metrics = this.activeBoardDragPerformance;
+		if (!metrics) {
+			return;
+		}
+		metrics.endedAt = performance.now();
+		metrics.durationMs = metrics.endedAt - metrics.startedAt;
+		this.lastBoardDragPerformance = { ...metrics };
+		console.debug('[KiOnline] board drag performance', this.lastBoardDragPerformance);
+		this.activeBoardDragPerformance = null;
+	}
+
+	get latestBoardDragPerformance(): Readonly<BoardDragPerformance> | null {
+		return this.lastBoardDragPerformance;
+	}
 
 	get currentZoneDisplayMode(): ZoneDisplayMode { return this.zoneDisplayMode; }
 
@@ -2082,7 +2166,7 @@ export class KicadRenderSession {
 		if (!item || item.kind !== 'track' || item.shape.type !== 'segment') {
 			return null;
 		}
-		const graph = buildCopperGraph(this.scene);
+		const graph = this.currentCopperGraph();
 		const ownNodeIndices = graph.nodes
 			.map((node, index) => ({ node, index }))
 			.filter(({ node }) => node.itemId === paintId)
@@ -2116,6 +2200,16 @@ export class KicadRenderSession {
 			return true;
 		}
 		return graph.adjacent(nodeIndex).filter(other => graph.nodes[other]!.itemKind === 'track').length > 2;
+	}
+
+	private currentCopperGraph(): CopperGraph {
+		if (!this.scene) {
+			throw new Error('No board scene is loaded.');
+		}
+		if (!this.copperGraphCache || this.copperGraphCache.scene !== this.scene) {
+			this.copperGraphCache = { scene: this.scene, graph: buildCopperGraph(this.scene) };
+		}
+		return this.copperGraphCache.graph;
 	}
 
 	/** Follows a connected straight-track chain one hop at a time from
@@ -2228,7 +2322,16 @@ export class KicadRenderSession {
 		}
 		const insertAt = Math.min(firstIndex, parent.children.length);
 		parent.children.splice(insertAt, 0, ...replacements);
-		this.commitAstMutation();
+		if (this.scene) {
+			this.committedTrackOverlay.push(...this.painter.updateTrackItems(this.scene, this.boardRoot, wanted, replacements));
+			this.hiddenTrackDragIds.clear();
+			this.copperGraphCache = null;
+			this.selectedIds = new Set(replacements.map(segment => segment.getUuid()).filter((id): id is string => !!id));
+			this.scheduleRender();
+		}
+		else {
+			this.commitAstMutation();
+		}
 		return true;
 	}
 
@@ -2398,7 +2501,7 @@ export class KicadRenderSession {
 			return null;
 		}
 		const viaSize = viaItem.shape.r * 2;
-		const graph = buildCopperGraph(this.scene);
+		const graph = this.currentCopperGraph();
 		const viaNodeIndices = graph.nodes
 			.map((node, index) => ({ node, index }))
 			.filter(({ node }) => node.itemId === paintId && node.itemKind === 'via')
@@ -2585,7 +2688,7 @@ export class KicadRenderSession {
 			? new Vec2(item.shape.x1, item.shape.y1)
 			: new Vec2(item.shape.x2, item.shape.y2);
 
-		const graph = buildCopperGraph(this.scene);
+		const graph = this.currentCopperGraph();
 		const ownNodeIndices = graph.nodes
 			.map((node, index) => ({ node, index }))
 			.filter(({ node }) => node.itemId === paintId)
@@ -4094,6 +4197,7 @@ export class KicadRenderSession {
 				const parseMs = performance.now() - t0;
 		const boardRoot = { rootElement };
 		this.boardRoot = boardRoot;
+		this.boardTextSnapshot = text;
 		this.netNameCache = null;
 		const setup = rootElement.findFirstChildByName?.('setup') as any;
 		this.boardGridOrigin = readBoardOrigin(setup, 'grid_origin');
@@ -4102,7 +4206,9 @@ export class KicadRenderSession {
 		const t1 = performance.now();
 		const previousLayerState = this.layerState;
 		this.scene = this.painter.build(boardRoot);
-		this.ratsnestLines = buildBoardRatsnest(this.scene);
+		const graph = buildCopperGraph(this.scene);
+		this.copperGraphCache = { scene: this.scene, graph };
+		this.ratsnestLines = buildBoardRatsnest(this.scene, undefined, graph);
 		const buildMs = performance.now() - t1;
 		this.layerState = defaultLayerState(this.scene.layersPresent);
 		// preserveView reloads the SAME document (undo/redo, resyncBoardFromAst
@@ -4228,7 +4334,8 @@ export class KicadRenderSession {
 		this.repairLibSymbolsPosition(root);
 		this.repairDerivedLibSymbols(root);
 		if (typeof root.write === 'function') {
-			return String(root.write());
+			this.boardTextSnapshot = String(root.write());
+			return this.boardTextSnapshot;
 		}
 		return '';
 	}
@@ -4612,11 +4719,26 @@ export class KicadRenderSession {
 		if (ids.size === 0) {
 			return;
 		}
+		// A track committed through the incremental path is still drawn from
+		// committedTrackOverlay, not the static buffer. Moving it again must
+		// remove that old overlay entry rather than forcing a full rebuild just
+		// because it has no static GPU range yet.
+		const overlayTrackIds = new Set<string>();
+		this.committedTrackOverlay = this.committedTrackOverlay.filter(item => {
+			const owner = [...ids].find(id => item.id === id || item.id.startsWith(`${ id }:`));
+			if (!owner) return true;
+			overlayTrackIds.add(owner);
+			return false;
+		});
+		const staticIds = new Set([...ids].filter(id => !overlayTrackIds.has(id)));
+		const hiddenInPlace = staticIds.size === 0 || !!this.webglRenderer?.setStaticItemsVisible?.(staticIds, false);
 		this.painter.removeItemsByIds(this.scene, ids);
 		for (const id of ids) {
 			this.hiddenTrackDragIds.add(id);
 		}
-		this.geometryDirty = true;
+		if (!hiddenInPlace) {
+			this.geometryDirty = true;
+		}
 		this.scheduleRender();
 	}
 
@@ -8058,12 +8180,16 @@ export class KicadRenderSession {
 
 			if (renderer.beginStaticBuild) {
 				if (this.geometryDirty) {
+					if (this.activeBoardDragPerformance && this.documentType === 'board') {
+						this.activeBoardDragPerformance.staticRebuilds++;
+					}
 					renderer.beginStaticBuild();
 					// No viewBBox — this pass tessellates once into GPU buffers
 					// that then persist across pans/zooms, so it must capture
 					// everything, not just what's on-screen right now.
 					paintActive(undefined, staticHighlighted);
 					renderer.endStaticBuild!();
+					this.committedTrackOverlay.length = 0;
 					this.geometryDirty = false;
 				}
 				renderer.beginDynamicFrame!();
@@ -8102,6 +8228,7 @@ export class KicadRenderSession {
 			this.drawBoardRatsnest(renderer);
 			this.drawBoardOrigins(renderer);
 			this.drawBoardDragPreview(renderer);
+			this.drawCommittedTrackOverlay(renderer);
 			this.drawEditPreview(renderer);
 			this.drawBoardHighlight(renderer);
 			// The cheap per-frame counterpart to paint()'s static highlightOverlay
@@ -8560,6 +8687,15 @@ export class KicadRenderSession {
 							: 'filled';
 				item.draw(renderer, color, mode);
 			}
+		}
+	}
+
+	protected drawCommittedTrackOverlay(renderer: Renderer): void {
+		for (const item of this.committedTrackOverlay) {
+			if (!this.isBoardLayerVisible(item.layer)) continue;
+			const state = this.layerState.get(item.layer);
+			renderer.setOpacity?.(state?.opacity ?? 1);
+			item.draw(renderer, styleForLayer(item.layer).color, this.trackDisplayMode);
 		}
 	}
 

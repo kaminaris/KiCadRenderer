@@ -148,4 +148,8 @@ export interface Renderer {
 	 * happens, not assume partial success silently worked.
 	 */
 	translateStaticItems?(ids: Iterable<string>, dx: number, dy: number): boolean;
+
+	/** Temporarily hides already-baked ordinary geometry without rebuilding the
+	 * static scene. Used by board drag previews to suppress the original item. */
+	setStaticItemsVisible?(ids: Iterable<string>, visible: boolean): boolean;
 }

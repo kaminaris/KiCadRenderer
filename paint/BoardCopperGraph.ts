@@ -3,6 +3,9 @@ import { distanceToSegment, pointInPolygon, shapesOverlap } from './PaintedShape
 import type { PaintedShape } from './PaintedShape';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 
+const CONNECT_EPSILON_MM = 0.02;
+const CONNECT_GRID_CELL_MM = 2;
+
 export interface CopperGraphNode {
 	point: Vec2;
 	layer: string;
@@ -202,36 +205,60 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	}
 
 	// Join touching copper on the same layer, including T-branches whose
-	// endpoint lands in the middle of an existing track. Bucket by net/layer
-	// first so unrelated nets never turn this into a whole-board O(N²) pass.
+	// endpoint lands in the middle of an existing track. The former
+	// node-by-every-node / node-by-every-segment pass was the dominant cost
+	// when refreshing a dense net's ratsnest during a drag. The same net/layer
+	// is now additionally spatially hashed, so a node only tests nearby
+	// candidates while preserving the exact distance tests below.
 	const nodeBuckets = new Map<string, number[]>();
-	const segmentBuckets = new Map<string, CopperGraphSegment[]>();
+	const nodeGrid = new Map<string, number[]>();
+	const segmentGrid = new Map<string, number[]>();
 	for (let index = 0; index < nodes.length; index++) {
 		const node = nodes[index]!;
 		const key = bucketKey(node.netId, node.layer);
 		const bucket = nodeBuckets.get(key) ?? [];
 		bucket.push(index);
 		nodeBuckets.set(key, bucket);
+		const cell = gridCell(nodes[index]!.point.x, nodes[index]!.point.y);
+		pushGridEntry(nodeGrid, gridKey(key, cell.x, cell.y), index);
 	}
-	for (const segment of segments) {
+	for (let index = 0; index < segments.length; index++) {
+		const segment = segments[index]!;
 		const key = bucketKey(segment.netId, segment.layer);
-		const bucket = segmentBuckets.get(key) ?? [];
-		bucket.push(segment);
-		segmentBuckets.set(key, bucket);
+		const a = nodes[segment.a]!.point;
+		const b = nodes[segment.b]!.point;
+		const reach = segment.width / 2 + CONNECT_EPSILON_MM;
+		const min = gridCell(Math.min(a.x, b.x) - reach, Math.min(a.y, b.y) - reach);
+		const max = gridCell(Math.max(a.x, b.x) + reach, Math.max(a.y, b.y) + reach);
+		for (let x = min.x; x <= max.x; x++) {
+			for (let y = min.y; y <= max.y; y++) {
+				pushGridEntry(segmentGrid, gridKey(key, x, y), index);
+			}
+		}
 	}
+	const seenSegments = new Uint32Array(segments.length);
+	let segmentVisit = 0;
 	for (const [key, bucketNodes] of nodeBuckets) {
-		for (let i = 0; i < bucketNodes.length; i++) {
-			const nodeIndex = bucketNodes[i]!;
-			for (let j = i + 1; j < bucketNodes.length; j++) {
-				const otherIndex = bucketNodes[j]!;
-				if (distance(nodes[nodeIndex]!.point, nodes[otherIndex]!.point) <= 0.02) {
-					union(nodeIndex, otherIndex);
+		for (const nodeIndex of bucketNodes) {
+			const node = nodes[nodeIndex]!;
+			const cell = gridCell(node.point.x, node.point.y);
+			for (let x = cell.x - 1; x <= cell.x + 1; x++) {
+				for (let y = cell.y - 1; y <= cell.y + 1; y++) {
+					for (const otherIndex of nodeGrid.get(gridKey(key, x, y)) ?? []) {
+						if (otherIndex <= nodeIndex) continue;
+						if (distance(nodes[nodeIndex]!.point, nodes[otherIndex]!.point) <= CONNECT_EPSILON_MM) {
+							union(nodeIndex, otherIndex);
+						}
+					}
 				}
 			}
-			for (const segment of segmentBuckets.get(key) ?? []) {
-				const node = nodes[nodeIndex]!;
+			segmentVisit++;
+			for (const segmentIndex of segmentGrid.get(gridKey(key, cell.x, cell.y)) ?? []) {
+				if (seenSegments[segmentIndex] === segmentVisit) continue;
+				seenSegments[segmentIndex] = segmentVisit;
+				const segment = segments[segmentIndex]!;
 				const a = nodes[segment.a]!.point, b = nodes[segment.b]!.point;
-				if (distanceToSegment(node.point.x, node.point.y, a.x, a.y, b.x, b.y) <= segment.width / 2 + 0.02) {
+				if (distanceToSegment(node.point.x, node.point.y, a.x, a.y, b.x, b.y) <= segment.width / 2 + CONNECT_EPSILON_MM) {
 					// Union to whichever of the segment's own two endpoint
 					// nodes this point actually coincides with — unioning to
 					// segment.a unconditionally (regardless of which end the
@@ -251,10 +278,10 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 					// being silently merged into whichever end happened to
 					// be "a".
 					const distA = distance(node.point, a), distB = distance(node.point, b);
-					if (distA <= 0.02) {
+					if (distA <= CONNECT_EPSILON_MM) {
 						union(nodeIndex, segment.a);
 					}
-					else if (distB <= 0.02) {
+					else if (distB <= CONNECT_EPSILON_MM) {
 						union(nodeIndex, segment.b);
 					}
 					else {
@@ -295,6 +322,20 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
  *  in principle, for a pathological layer name). */
 function bucketKey(netId: number, layer: string): string {
 	return String(netId) + '\u0000' + layer;
+}
+
+function gridCell(x: number, y: number): { x: number; y: number } {
+	return { x: Math.floor(x / CONNECT_GRID_CELL_MM), y: Math.floor(y / CONNECT_GRID_CELL_MM) };
+}
+
+function gridKey(bucket: string, x: number, y: number): string {
+	return `${ bucket }\u0000${ x }\u0000${ y }`;
+}
+
+function pushGridEntry(grid: Map<string, number[]>, key: string, index: number): void {
+	const entries = grid.get(key);
+	if (entries) entries.push(index);
+	else grid.set(key, [index]);
 }
 
 function centerOf(item: PaintedItem): Vec2 {

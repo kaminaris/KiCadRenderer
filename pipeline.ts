@@ -1,4 +1,5 @@
 import { buildBoardRatsnest } from './paint/BoardRatsnest';
+import { buildCopperGraph } from './paint/BoardCopperGraph';
 import { defaultLayerState } from './paint/BoardPainter';
 import { defaultSchLayerState } from './paint/SchematicPainter';
 import { refreshRatsnestForFootprints } from './layers';
@@ -54,7 +55,9 @@ export function rebuildBoardSceneIfPending(session: any): void {
 		session.netNameCache = null;
 		const previousLayerState = session.layerState;
 		session.scene = session.painter.build(session.boardRoot);
-		session.ratsnestLines = buildBoardRatsnest(session.scene);
+		const graph = buildCopperGraph(session.scene);
+		session.copperGraphCache = { scene: session.scene, graph };
+		session.ratsnestLines = buildBoardRatsnest(session.scene, undefined, graph);
 		session.layerState = defaultLayerState(session.scene.layersPresent);
 		for (const [layer, state] of session.layerState) {
 			const previous = previousLayerState.get(layer);
@@ -67,6 +70,7 @@ export function rebuildBoardSceneIfPending(session: any): void {
 		return;
 	}
 	if (session.boardDirtyFootprints.size > 0 && session.scene) {
+		session.copperGraphCache = null;
 		for (const footprint of session.boardDirtyFootprints) {
 			session.painter.updateFootprintItems(session.scene, session.boardRoot, footprint);
 		}

@@ -1,6 +1,6 @@
 import { Vec2 } from '../math/Vec2';
 import type { LayeredBoardScene } from './BoardPainter';
-import { buildCopperGraph, distance } from './BoardCopperGraph';
+import { buildCopperGraph, distance, type CopperGraph } from './BoardCopperGraph';
 
 export interface BoardRatsnestLine {
 	from: Vec2;
@@ -18,8 +18,8 @@ export interface BoardRatsnestLine {
  * used during a footprint drag to recompute ratsnest for just the nets that
  * moved (see KicadRenderSession's incremental board-rebuild path) instead
  * of the whole board every frame. */
-export function buildBoardRatsnest(scene: LayeredBoardScene, netFilter?: ReadonlySet<number>): BoardRatsnestLine[] {
-	const { nodes, find } = buildCopperGraph(scene, netFilter);
+export function buildBoardRatsnest(scene: LayeredBoardScene, netFilter?: ReadonlySet<number>, graph?: CopperGraph): BoardRatsnestLine[] {
+	const { nodes, find } = graph ?? buildCopperGraph(scene, netFilter);
 
 	const result: BoardRatsnestLine[] = [];
 	const netIds = new Set(nodes.map(node => node.netId));

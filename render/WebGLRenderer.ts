@@ -178,17 +178,19 @@ export class WebGLRenderer implements Renderer {
 	// doc comment (Renderer.ts) for what this is for. Keyed by PaintedItem
 	// id, valid only until the next beginStaticBuild() (which clears it,
 	// since every array index it references is about to be invalidated).
-	protected itemRanges = new Map<string, { posStart: number; posEnd: number; stencilCmdIndices: number[]; hasImage: boolean }>();
+	protected itemRanges = new Map<string, { posStart: number; posEnd: number; stencilCmdIndices: number[]; imageCmdIndices: number[] }>();
+	protected hiddenItemColors = new Map<string, number[]>();
 	protected currentItemId: string | null = null;
 	protected currentItemPosStart = 0;
 	protected currentItemStencilIndices: number[] = [];
-	protected currentItemHasImage = false;
+	protected currentItemImageIndices: number[] = [];
 	// Raw (pre-bake) ring/color/bbox data for each baked stencil job, keyed
 	// by its OWN index into staticCommands — bakeStencilJob() only produces
 	// opaque GL buffers with no way to read their contents back (not
 	// cheaply possible in WebGL1), so translating a stencil job means
 	// re-deriving its geometry from this instead of the baked buffers.
 	protected stencilSourceByCommandIndex = new Map<number, RawStencilJob>();
+	protected imageSourceByCommandIndex = new Map<number, RawImageJob>();
 
 	protected currentOpacity = 1;
 	protected viewMatrix: Matrix3 = Matrix3.identity();
@@ -285,7 +287,9 @@ export class WebGLRenderer implements Renderer {
 		// behind here would let a LATER translateStaticItems() call corrupt
 		// unrelated geometry it now happens to alias.
 		this.itemRanges.clear();
+		this.hiddenItemColors.clear();
 		this.stencilSourceByCommandIndex.clear();
+		this.imageSourceByCommandIndex.clear();
 		this.currentItemId = null;
 	}
 
@@ -297,7 +301,7 @@ export class WebGLRenderer implements Renderer {
 		this.currentItemId = id;
 		this.currentItemPosStart = this.buildPositions.length;
 		this.currentItemStencilIndices = [];
-		this.currentItemHasImage = false;
+		this.currentItemImageIndices = [];
 	}
 
 	endItem(): void {
@@ -308,7 +312,7 @@ export class WebGLRenderer implements Renderer {
 			posStart: this.currentItemPosStart,
 			posEnd: this.buildPositions.length,
 			stencilCmdIndices: this.currentItemStencilIndices,
-			hasImage: this.currentItemHasImage,
+			imageCmdIndices: this.currentItemImageIndices,
 		});
 		this.currentItemId = null;
 	}
@@ -355,6 +359,7 @@ export class WebGLRenderer implements Renderer {
 				return { kind: 'stencil' as const, job: this.bakeStencilJob(cmd.job) };
 			}
 			if (cmd.kind === 'image') {
+				this.imageSourceByCommandIndex.set(index, cmd.job);
 				return { kind: 'image' as const, job: this.bakeImageJob(cmd.job) };
 			}
 			return cmd;
@@ -377,16 +382,15 @@ export class WebGLRenderer implements Renderer {
 	/**
 	 * See Renderer.translateStaticItems's own doc comment. All-or-nothing:
 	 * if ANY of the given ids can't be translated incrementally (never
-	 * part of a static build, or carries baked image geometry this
-	 * implementation doesn't support shifting), nothing is mutated and this
+	 * part of a static build), nothing is mutated and this
 	 * returns false — a caller falling back to a full rebuild on partial
 	 * failure must not also be left with SOME items already moved.
 	 */
 	translateStaticItems(ids: Iterable<string>, dx: number, dy: number): boolean {
-		const ranges: { posStart: number; posEnd: number; stencilCmdIndices: number[] }[] = [];
+		const ranges: { posStart: number; posEnd: number; stencilCmdIndices: number[]; imageCmdIndices: number[] }[] = [];
 		for (const id of ids) {
 			const range = this.itemRanges.get(id);
-			if (!range || range.hasImage) {
+			if (!range) {
 				return false;
 			}
 			ranges.push(range);
@@ -411,6 +415,42 @@ export class WebGLRenderer implements Renderer {
 			for (const cmdIndex of range.stencilCmdIndices) {
 				this.retranslateStencilJob(cmdIndex, dx, dy);
 			}
+			for (const cmdIndex of range.imageCmdIndices) {
+				this.retranslateImageJob(cmdIndex, dx, dy);
+			}
+		}
+		return true;
+	}
+
+	/** Temporarily hides ordinary static items by zeroing just their vertex
+	 * alpha. Track drags use this instead of rebuilding the entire board solely
+	 * to remove the original line underneath the dynamic drag preview. */
+	setStaticItemsVisible(ids: Iterable<string>, visible: boolean): boolean {
+		const entries: { id: string; range: { posStart: number; posEnd: number; stencilCmdIndices: number[]; imageCmdIndices: number[] } }[] = [];
+		for (const id of ids) {
+			const range = this.itemRanges.get(id);
+			if (!range || range.stencilCmdIndices.length > 0 || range.imageCmdIndices.length > 0) {
+				return false;
+			}
+			entries.push({ id, range });
+		}
+		const gl = this.gl;
+		gl.bindBuffer(gl.ARRAY_BUFFER, this.staticColorBuffer);
+		for (const { id, range } of entries) {
+			const start = range.posStart * 2;
+			const end = range.posEnd * 2;
+			if (visible) {
+				const colors = this.hiddenItemColors.get(id);
+				if (!colors) continue;
+				this.staticColors.splice(start, end - start, ...colors);
+				this.hiddenItemColors.delete(id);
+			}
+			else {
+				if (this.hiddenItemColors.has(id)) continue;
+				this.hiddenItemColors.set(id, this.staticColors.slice(start, end));
+				for (let index = start + 3; index < end; index += 4) this.staticColors[index] = 0;
+			}
+			gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, new Float32Array(this.staticColors.slice(start, end)));
 		}
 		return true;
 	}
@@ -443,6 +483,25 @@ export class WebGLRenderer implements Renderer {
 		gl.deleteBuffer(cmd.job.quadPositionBuffer);
 		this.staticCommands[cmdIndex] = { kind: 'stencil', job: this.bakeStencilJob(shifted) };
 		this.stencilSourceByCommandIndex.set(cmdIndex, shifted);
+	}
+
+	protected retranslateImageJob(cmdIndex: number, dx: number, dy: number): void {
+		const cmd = this.staticCommands[cmdIndex];
+		const source = this.imageSourceByCommandIndex.get(cmdIndex);
+		if (!cmd || cmd.kind !== 'image' || !source) {
+			return;
+		}
+		const shifted: RawImageJob = {
+			...source,
+			x: source.x + dx,
+			y: source.y + dy,
+			corners: source.corners?.map(point => new Vec2(point.x + dx, point.y + dy)) as RawImageJob['corners'],
+		};
+		const gl = this.gl;
+		gl.deleteBuffer(cmd.job.positionBuffer);
+		gl.deleteBuffer(cmd.job.texCoordBuffer);
+		this.staticCommands[cmdIndex] = { kind: 'image', job: this.bakeImageJob(shifted) };
+		this.imageSourceByCommandIndex.set(cmdIndex, shifted);
 	}
 
 	protected bakeStencilJob(job: RawStencilJob): CachedStencilJob {
@@ -583,7 +642,7 @@ export class WebGLRenderer implements Renderer {
 		this.flushPendingRegular();
 		this.buildCommands.push({ kind: 'image', job: { texture, x: topLeft.x, y: topLeft.y, width, height, corners, opacity: this.currentOpacity } });
 		if (this.currentItemId !== null) {
-			this.currentItemHasImage = true;
+			this.currentItemImageIndices.push(this.buildCommands.length - 1);
 		}
 	}
 

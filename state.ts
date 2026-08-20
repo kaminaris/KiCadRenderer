@@ -5,7 +5,9 @@
  */
 
 export function pushUndoSnapshot(session: any, label = 'Edit'): void {
-	const text = session.documentType === 'schematic' ? session.getSchematicText() : session.getBoardText();
+	const text = session.documentType === 'schematic'
+		? session.getSchematicText()
+		: (session.boardTextSnapshot || session.getBoardText());
 	if (!text || session.undoStack[session.undoStack.length - 1] === text) {
 		return;
 	}

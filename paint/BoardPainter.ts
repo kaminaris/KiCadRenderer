@@ -518,6 +518,33 @@ export class BoardPainter {
 		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0 || scene.declaredLayers.includes(l));
 	}
 
+	/** Replaces a small set of track items in the logical scene without
+	 * re-walking every footprint, zone, and graphic on the board. The caller
+	 * keeps their geometry in a lightweight overlay until a later static build. */
+	updateTrackItems(scene: LayeredBoardScene, board: any, oldIds: ReadonlySet<string>, segments: Iterable<any>): PaintedItem[] {
+		const allOldItemIds = new Set<string>();
+		for (const items of scene.layerBuckets.values()) {
+			for (const item of items) {
+				if ([...oldIds].some(id => item.id === id || item.id.startsWith(`${ id }:`))) {
+					allOldItemIds.add(item.id);
+				}
+			}
+		}
+		this.removeItemsByIds(scene, allOldItemIds);
+		const added: PaintedItem[] = [];
+		for (const segment of segments) {
+			for (const item of this.buildTrack(segment, board)) {
+				const bucket = scene.layerBuckets.get(item.layer);
+				if (bucket) bucket.push(item);
+				else scene.layerBuckets.set(item.layer, [item]);
+				if (item.hitTestable) scene.hitTestItems.push(item);
+				added.push(item);
+			}
+		}
+		scene.layersPresent = layerPaintOrder.filter(l => (scene.layerBuckets.get(l)?.length ?? 0) > 0 || scene.declaredLayers.includes(l));
+		return added;
+	}
+
 	/**
 	 * Draws a scene built by build(). Cheap: just replays already-built draw
 	 * closures per visible layer, in order, with that layer's opacity — no
