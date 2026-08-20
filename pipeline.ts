@@ -51,6 +51,7 @@ export function rebuildBoardSceneIfPending(session: any): void {
 	if (session.boardStructureDirty) {
 		session.boardStructureDirty = false;
 		session.boardDirtyFootprints.clear();
+		session.netNameCache = null;
 		const previousLayerState = session.layerState;
 		session.scene = session.painter.build(session.boardRoot);
 		session.ratsnestLines = buildBoardRatsnest(session.scene);

@@ -14,6 +14,10 @@ export const JUNCTION_POINT_EPS = 1e-3;
  *  actual wire direction, mirroring real KiCad's own uniqueAngle counter. */
 export const SYNTHETIC_ANGLE_BASE = 1000;
 
+/** Read the board's named origin (grid_origin or aux_axis_origin) from a
+ *  board setup AST node. Returns a zero Vec2 when values are missing or
+ *  non-finite to avoid propagating NaNs. Kept with the function during the
+ *  move so callers retain the original intent and documentation. */
 export function readBoardOrigin(setup: any, name: 'grid_origin' | 'aux_axis_origin'): Vec2 {
 	const origin = setup?.findFirstChildByName?.(name);
 	const x = Number(origin?.attributes?.[0]?.value);

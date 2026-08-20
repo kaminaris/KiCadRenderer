@@ -1,5 +1,13 @@
 // Extracted shared types from KicadRenderSession.ts
 
+import { Vec2 } from './math/Vec2';
+import type { ZoneHatchStyle, ZonePadConnectionType, ZoneSmoothingType, ZoneIslandRemovalMode, RuleAreaKeepoutSettings } from '@kicad-io/KicadElementZone';
+import type { KicadStrokeType } from '@kicad-io/KicadElementStroke';
+import type { GrShapeFillMode } from '@kicad-io/KicadElementPolygon';
+import type { KicadGlobalLabelShape } from '@kicad-io/KicadElementGlobalLabel';
+import type { KicadHierarchicalLabelShape } from '@kicad-io/KicadElementHierarchicalLabel';
+import type { KicadDirectiveLabelShape } from '@kicad-io/KicadElementNetclassFlag';
+
 export type RenderBackend = 'webgl' | 'canvas2d';
 export type RenderDocumentType = 'board' | 'schematic';
 
@@ -18,15 +26,15 @@ export interface ZoneDraft {
 	locked: boolean;
 	clearanceMm: number;
 	minThicknessMm: number;
-	padConnection: any;
+	padConnection: ZonePadConnectionType;
 	thermalGapMm: number;
 	thermalSpokeWidthMm: number;
-	cornerSmoothing: any;
+	cornerSmoothing: ZoneSmoothingType;
 	cornerRadiusMm: number;
-	islandRemoval: any;
+	islandRemoval: ZoneIslandRemovalMode;
 	islandAreaMinMm: number;
 	priority: number;
-	hatchStyle: any;
+	hatchStyle: ZoneHatchStyle;
 	hatchPitchMm: number;
 }
 
@@ -34,16 +42,16 @@ export interface RuleAreaDraft {
 	layers: string[];
 	name: string;
 	locked: boolean;
-	hatchStyle: any;
+	hatchStyle: ZoneHatchStyle;
 	hatchPitchMm: number;
-	keepout: any;
+	keepout: RuleAreaKeepoutSettings;
 }
 
 export interface PolygonDraft {
 	layer: string;
 	lineWidthMm: number;
-	lineStyle: any;
-	fillMode: any;
+	lineStyle: KicadStrokeType;
+	fillMode: GrShapeFillMode;
 	locked: boolean;
 	netName: string;
 }
@@ -118,23 +126,23 @@ export interface SelectionResizeBox {
  * (really `Vec2`) to keep this module import-free.
  */
 export type EditPreviewState =
-	| { kind: 'wire'; from: any; cursor: any }
-	| { kind: 'junction'; cursor: any }
-	| { kind: 'no-connect'; cursor: any }
-	| { kind: 'line' | 'rect' | 'circle'; anchor: any | null; cursor: any }
+	| { kind: 'wire'; from: Vec2; cursor: Vec2 }
+	| { kind: 'junction'; cursor: Vec2 }
+	| { kind: 'no-connect'; cursor: Vec2 }
+	| { kind: 'line' | 'rect' | 'circle'; anchor: Vec2 | null; cursor: Vec2 }
 	/** points: [] before the start click, [start] before the end click,
 	 *  [start, end] while dragging the mid-bulge (cursor = the mid point). */
-	| { kind: 'arc'; points: any[]; cursor: any }
-	| { kind: 'bezier'; points: any[]; cursor: any }
-	| { kind: 'rule-area'; points: any[]; cursor: any }
-	| { kind: 'dimension'; type: 'aligned' | 'orthogonal'; points: any[]; cursor: any }
-	| { kind: 'text'; anchor: any; text: string }
+	| { kind: 'arc'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'bezier'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'rule-area'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'dimension'; type: 'aligned' | 'orthogonal'; points: Vec2[]; cursor: Vec2 }
+	| { kind: 'text'; anchor: Vec2; text: string }
 	| { kind: 'text-box'; x: number; y: number; width: number; height: number; text: string }
-	| { kind: 'label'; anchor: any; text: string; rotation: number }
-	| { kind: 'global-label' | 'hier-label'; anchor: any; text: string; shape: any; rotation: number }
-	| { kind: 'directive-label'; anchor: any; text: string; shape: any; rotation: number }
+	| { kind: 'label'; anchor: Vec2; text: string; rotation: number }
+	| { kind: 'global-label' | 'hier-label'; anchor: Vec2; text: string; shape: KicadGlobalLabelShape | KicadHierarchicalLabelShape; rotation: number }
+	| { kind: 'directive-label'; anchor: Vec2; text: string; shape: KicadDirectiveLabelShape; rotation: number }
 	| {
-		kind: 'route'; points: any[]; cursor: any; width: number;
+		kind: 'route'; points: Vec2[]; cursor: Vec2; width: number;
 		/** True when the candidate path (as currently drawn) violates
 		 *  clearance against different-net copper — drawn in the collision
 		 *  color instead of the normal preview color, matching real KiCad's
@@ -152,17 +160,17 @@ export type EditPreviewState =
 	 *  cursor point — see KicadRenderSession.viaDragFanout's doc comment for
 	 *  why this needs its own kind instead of reusing 'route' (which only
 	 *  ever draws one width/layer at a time). */
-	| { kind: 'via-drag'; tracks: { points: any[]; width: number }[]; cursor: any; viaSize?: number }
+	| { kind: 'via-drag'; tracks: { points: Vec2[]; width: number }[]; cursor: Vec2; viaSize?: number }
 	/** Power symbols place in one click (like junction/no-connect) — no
 	 *  glyph preview needed, just a cursor-follow marker. */
-	| { kind: 'power'; cursor: any }
+	| { kind: 'power'; cursor: Vec2 }
 	/** Select tool's rectangle multi-select drag. `mode` is the contained
 	 *  ('origin'→cursor drawn left-to-right) vs touching (right-to-left)
 	 *  distinction; `selectMode` is what committing the box will do to the
 	 *  existing selection, both driving live color feedback — see
 	 *  SELECTION_BOX_* constants. Deliberately unsnapped (origin/cursor are
 	 *  raw world coordinates), unlike every other preview kind above. */
-	| { kind: 'selection-box'; origin: any; cursor: any; mode: 'contained' | 'touching'; selectMode: 'replace' | 'add' | 'subtract' };
+	| { kind: 'selection-box'; origin: Vec2; cursor: Vec2; mode: 'contained' | 'touching'; selectMode: 'replace' | 'add' | 'subtract' };
 
 /** One connected track's whole assembled line, as computed once by
  *  KicadRenderSession.viaDragFanout at via-drag gesture start —
@@ -176,7 +184,7 @@ export type EditPreviewState =
  *  viaDragFanout's and dragViaChain's doc comments. */
 export interface ViaDragFix {
 	segmentIds: string[];
-	originPoints: any[];
+	originPoints: Vec2[];
 	width: number;
 	layer: string;
 	netId: number | null;

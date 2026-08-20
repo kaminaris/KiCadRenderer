@@ -1,5 +1,5 @@
 import { ClipType } from '@clipper2-ts/engine';
-import { FillRule, Path, Paths, Point, Point64Of, PointInPolygon, PointInPolygonResult } from '@clipper2-ts/core';
+import { Area, FillRule, Path, Paths, Point, Point64Of, PointInPolygon, PointInPolygonResult } from '@clipper2-ts/core';
 import { EndType, JoinType } from '@clipper2-ts/offset';
 import { Angle } from '../math/Angle';
 import { Matrix3 } from '../math/Matrix3';
@@ -104,6 +104,24 @@ import { PaintedShape } from './PaintedShape';
  *    = ZONE_CONNECTION::THT_THERMAL, which `DRC_ENGINE::EvalZoneConnection`
  *    (drc_engine.cpp) resolves PER PAD: a PTH pad becomes THERMAL, anything
  *    else (SMD, NPTH) becomes FULL — see resolvePadConnectionMode.
+ *  - A pad's own `(zone_connect N)` override (KicadElementPad.
+ *    getZoneConnectionOverride) wins over the zone's `connect_pads` mode
+ *    when present — see resolvePadConnectionMode's own doc comment.
+ *  - A pad's own `(clearance N)` local-clearance override, or (when the
+ *    pad itself has none) its parent footprint's own `(clearance N)`
+ *    (KicadElementPad.getClearanceOverride, mirroring real KiCad's
+ *    `PAD::GetClearanceOverrides` fallback exactly — footprints with a
+ *    single pad, e.g. a mounting hole, commonly set clearance at the
+ *    footprint level rather than repeating it on the pad) raises (never
+ *    lowers) the effective clearance for THAT pad's exclusion ring above
+ *    the zone's own flat clearance — see pushPadExclusionRing's own doc
+ *    comment. Confirmed against real KiCad's file grammar
+ *    (`T_clearance`/`SetLocalClearance` inside both `parseFOOTPRINT` and
+ *    `parsePAD`, pcb_io_kicad_sexpr_parser.cpp) — a DIRECT child of
+ *    `(pad ...)` or
+ *    `(footprint ...)`, unrelated to the ZONE's own
+ *    `(connect_pads (clearance N))` field despite the identical token
+ *    name.
  *  - Only PADS branch on this — real KiCad's own knockoutThermalReliefs
  *    (zone_filler.cpp) only ever gives same-net TRACKS/VIAS/GRAPHICS a
  *    thermal/none treatment inside `ZONE_FILL_MODE::HATCH_PATTERN`, which
@@ -266,14 +284,55 @@ export interface ZoneFillPadConnectionSettings {
 }
 
 /** Resolves a zone's pad-connection MODE down to what a single pad actually
- *  gets — only 'thru_hole_only' branches per pad (DRC_ENGINE::
- *  EvalZoneConnection, drc_engine.cpp: PTH → THERMAL, everything else →
- *  FULL); 'thermal'/'full'/'none' apply to every pad uniformly. */
+ *  gets. A pad's own `(zone_connect N)` override (KicadElementPad.
+ *  getZoneConnectionOverride) wins UNCONDITIONALLY over the zone's
+ *  `connect_pads` mode when present — confirmed against drc_engine.cpp's
+ *  `EvalRules(ZONE_CONNECTION_CONSTRAINT, ...)`, which checks
+ *  `pad->GetLocalZoneConnection() != INHERITED` and returns that override
+ *  immediately, before even the zone's own setting is consulted. Only
+ *  'thru_hole_only' (whichever side supplied it) branches further per pad
+ *  (DRC_ENGINE::EvalZoneConnection, drc_engine.cpp: PTH → THERMAL, anything
+ *  else → FULL); 'thermal'/'full'/'none' apply as resolved. */
 function resolvePadConnectionMode(mode: ZoneFillPadConnectionMode, pad: any): 'thermal' | 'full' | 'none' {
-	if (mode === 'thru_hole_only') {
+	const override: ZoneFillPadConnectionMode | null =
+		typeof pad?.getZoneConnectionOverride === 'function' ? pad.getZoneConnectionOverride() : null;
+	const effective = override ?? mode;
+	if (effective === 'thru_hole_only') {
 		return pad?.padType === 'thru_hole' ? 'thermal' : 'full';
 	}
-	return mode;
+	return effective;
+}
+
+/**
+ * Routes one pad's exclusion ring to the flat zone-clearance inflate
+ * (`exclusionRingsMm`) or, when the pad carries its own LARGER effective
+ * clearance override (`KicadElementPad.getClearanceOverride` — the pad's
+ * own `(clearance N)`, or its parent footprint's, exactly like real
+ * KiCad's `PAD::GetClearanceOverrides` fallback), pre-inflates it by that
+ * own amount and routes it to `preInflatedExclusionRingsMm` instead (which
+ * bypasses the shared flat `clearanceMm` inflate a second time — the same
+ * mechanism the thermal-relief moat already uses for "this one ring needs
+ * its own inflate amount"). Matches real KiCad's own resolution
+ * (drc_engine.cpp, `CLEARANCE_CONSTRAINT`): a local override only ever
+ * RAISES the effective clearance (`if (localClearance > clearance)
+ * clearance = localClearance`), never lowers it below the zone's own — so
+ * a pad with no override, or one smaller than the zone's clearance, takes
+ * the ordinary flat-clearance path unchanged.
+ */
+function pushPadExclusionRing(
+	ring: MmPath, pad: any, zoneClearanceMm: number,
+	exclusionRingsMm: MmPath[], preInflatedExclusionRingsMm: MmPath[],
+): void {
+	const localClearanceMm: number | null =
+		typeof pad?.getClearanceOverride === 'function' ? pad.getClearanceOverride() : null;
+	if (localClearanceMm != null && localClearanceMm > zoneClearanceMm) {
+		const inflated = inflateClosedRingMm(ring, localClearanceMm);
+		if (inflated && inflated.length >= 3) {
+			preInflatedExclusionRingsMm.push(inflated);
+		}
+		return;
+	}
+	exclusionRingsMm.push(ring);
 }
 
 /** Inflates an already-closed polygon ring by `amountMm` (round joins) —
@@ -634,6 +693,105 @@ export function resolveCopperLayers(scene: LayeredBoardScene): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Zone priority (overlapping zones of different/same net)
+// ---------------------------------------------------------------------------
+
+/** The plain-data shape of every OTHER zone on the board a caller must
+ *  supply so a zone's fill can be knocked out by a higher-priority
+ *  overlapping one — see buildZonePriorityKnockouts. Deliberately the same
+ *  handful of fields buildZoneFillJobs' own `zones` entries already carry
+ *  (plus `priority`), not a separate live-element type, matching this
+ *  whole file's plain-serializable-data convention. */
+export interface OtherZoneInput {
+	uuid: string;
+	netId: number | null;
+	priority: number;
+	layers: readonly string[];
+	outlinePoints: MmPath;
+	clearanceMm: number;
+}
+
+/**
+ * Real KiCad's zone-priority overlap resolution — confirmed against
+ * pcbnew/zone_filler.cpp, not assumed:
+ *  - `ZONE::HigherPriority`: different priority values → higher wins;
+ *    exact ties are broken by UUID comparison (arbitrary but
+ *    deterministic — a tie is NOT "neither wins", it still resolves).
+ *  - DIFFERENT net + higher priority wins (`buildDifferentNetZoneClearances`/
+ *    `knockoutZoneClearance`) → the winner's shape, inflated by the
+ *    clearance BETWEEN the two zones, knocks a hole in the loser — the
+ *    same "same-pass electrical clearance" mechanism used for zone-vs-pad,
+ *    just zone-vs-zone. Real KiCad resolves that clearance via its DRC
+ *    constraint engine (per net-class pair); this app has no such
+ *    resolver, so it approximates with the LARGER of the two zones' own
+ *    `clearanceMm` — the same "larger of the local override and whatever
+ *    floor is available" philosophy resolveZoneClearanceMm already uses
+ *    for pad/track clearance.
+ *  - SAME net + STRICTLY higher priority (`subtractHigherPriorityZones`,
+ *    plain `>` — an exact tie does NOT clip; two same-net same-priority
+ *    zones simply merge/coalesce instead, matching `ZONE::BuildSmoothedPoly`)
+ *    → the winner's BARE outline (no clearance) knocks a hole in the
+ *    loser. Real KiCad applies this as the LAST step of the whole fill
+ *    pipeline ("Lastly give any same-net but higher-priority zones
+ *    control over their own area") — see computeFillFromRings' own
+ *    `sameNetKnockoutRingsMm` parameter, which callers must subtract
+ *    after everything else (spokes included), not fold into the earlier
+ *    exclusion union.
+ *  - Uses each candidate's raw AUTHORED OUTLINE, never its own computed
+ *    fill. Real KiCad's actual algorithm fills a higher-priority zone
+ *    FIRST (a dependency-ordered wave schedule) and knocks out lower-
+ *    priority zones with its TRUE FILLED shape — this app has no such
+ *    multi-pass scheduler (zone fill jobs are independent/parallelizable
+ *    today — see this file's header comment on deferred work), so this
+ *    is a deliberate simplification. It produces an IDENTICAL result to
+ *    the full algorithm unless the winning zone's own fill was itself
+ *    substantially eaten by ITS OWN obstacles in the exact overlap
+ *    region — a real but secondary precision gap, not the "two
+ *    different-net zones both fill the same overlap" bug this exists to
+ *    fix (a lower-priority zone unconditionally filling straight through
+ *    a higher-priority different-net zone's ENTIRE outline, with no
+ *    knockout at all).
+ */
+export function buildZonePriorityKnockouts(
+	zone: { uuid: string; netId: number | null; priority: number; clearanceMm: number },
+	layer: string,
+	copperLayers: readonly string[],
+	allZones: readonly OtherZoneInput[],
+): { differentNetKnockoutRingsMm: MmPath[]; sameNetKnockoutRingsMm: MmPath[] } {
+	const differentNetKnockoutRingsMm: MmPath[] = [];
+	const sameNetKnockoutRingsMm: MmPath[] = [];
+	for (const other of allZones) {
+		if (other.uuid === zone.uuid || other.outlinePoints.length < 3) {
+			continue;
+		}
+		const otherLayers = other.layers.flatMap(l => l === '*.Cu' ? copperLayers : [l]);
+		if (!otherLayers.includes(layer)) {
+			continue;
+		}
+		const sameNet = other.netId === zone.netId;
+		const otherWins = sameNet
+			? other.priority > zone.priority
+			: (other.priority !== zone.priority ? other.priority > zone.priority : other.uuid > zone.uuid);
+		if (!otherWins) {
+			continue;
+		}
+		if (sameNet) {
+			sameNetKnockoutRingsMm.push(other.outlinePoints);
+			continue;
+		}
+		const gapMm = Math.max(zone.clearanceMm, other.clearanceMm);
+		if (gapMm <= 0) {
+			differentNetKnockoutRingsMm.push(other.outlinePoints);
+			continue;
+		}
+		const inflated = getClipperEngine().inflatePaths(
+			[toClipperPath(other.outlinePoints)], gapMm * NM_PER_MM, JoinType.Round, EndType.Polygon);
+		for (const path of inflated) differentNetKnockoutRingsMm.push(fromClipperPath(path));
+	}
+	return { differentNetKnockoutRingsMm, sameNetKnockoutRingsMm };
+}
+
+// ---------------------------------------------------------------------------
 // Core fill pipeline
 // ---------------------------------------------------------------------------
 
@@ -695,6 +853,81 @@ function pruneThermalSpokes(candidates: ThermalSpokeCandidateMm[], fillNm: Paths
 	return accepted;
 }
 
+/** Mirrors KicadElementZone's own ZoneIslandRemovalMode — duck-typed rather
+ *  than imported, matching this whole file's existing no-@kicad-io-dependency
+ *  convention (see the header comment on why: worker-portability). */
+export type ZoneFillIslandRemovalMode = 'always' | 'never' | 'area';
+
+export interface ZoneFillIslandRemovalSettings {
+	mode: ZoneFillIslandRemovalMode;
+	areaMinMm: number;
+}
+
+/**
+ * Real KiCad's island removal — confirmed against `connectivity_algo.cpp`'s
+ * `FillIsolatedIslandsMap` and `zone_filler.cpp`'s removal loop, not
+ * assumed. A zone's fill, once fractured into disjoint per-region polygons,
+ * keeps only the regions whose connectivity cluster contains at least one
+ * real PAD of the zone's own net — `CN_CLUSTER::IsOrphaned()` is exactly
+ * `m_originPad == nullptr`, and `CN_CLUSTER::Add` (connectivity_items.cpp)
+ * only ever sets `m_originPad` for an actual non-free PAD item: a track or
+ * via touching a fragment is NOT by itself enough to save it from being an
+ * island (a real, load-bearing, non-obvious detail — a fragment bridged to
+ * the rest of the board only by copper track has no pad and IS an island).
+ * A fragment that touches NO pad is then deleted (`mode: 'always'`), kept
+ * only if its area clears `areaMinMm` (`mode: 'area'`), or always kept but
+ * would be flagged as an island on the file (`mode: 'never'` — this app
+ * doesn't thread that per-fragment flag out to `setFilledPolygons`' own
+ * `island?` field yet, a deliberately deferred cosmetic gap; the important
+ * behavior — an unconnected fragment isn't silently left in the fill data
+ * as if it were real, DRC-clean copper — is unaffected).
+ *
+ * This app doesn't build a full board-wide connectivity graph inside this
+ * pure/worker-safe pipeline (computeFillFromRings has no live scene) — this
+ * is a direct, scoped-down per-fragment test instead: a fragment survives
+ * if it geometrically overlaps at least one same-net pad's own shape on
+ * this layer (`sameNetPadRingsMm`), rather than joining a real transitive
+ * cluster graph. A fragment saved ONLY by a chain through another zone
+ * fragment or a track/via that itself eventually reaches a distant pad is
+ * a narrower, rarer gap than what this fixes (a keepout/rule-area carving
+ * an isolated wedge that touches no pad at all — previously never removed
+ * regardless of the zone's own island-removal setting).
+ *
+ * Mirrors real KiCad's own "layer fully isolated → skip removal entirely"
+ * guard (zone_filler.cpp's `allLayersFullyIsolated`, its own comment:
+ * "unconnected pour — must be preserved as-is") — scoped to THIS layer
+ * only, not every layer of the zone (this pipeline has no cross-layer view
+ * of one zone's several per-layer jobs): if literally every fragment on
+ * this layer touches no pad, none are removed, since a genuinely
+ * pad-free copper pour (a floating shield/antenna shape) is a legitimate,
+ * deliberate design, not something to silently delete.
+ */
+function applyIslandRemoval(
+	fragments: Paths, sameNetPadRingsMm: MmPath[] | undefined, islandRemoval: ZoneFillIslandRemovalSettings | undefined,
+): Paths {
+	if (!islandRemoval || islandRemoval.mode === 'never' || fragments.length === 0) {
+		return fragments;
+	}
+	const padRingsNm = (sameNetPadRingsMm ?? []).map(toClipperPath);
+	if (padRingsNm.length === 0) {
+		return fragments; // no same-net pad anywhere on this layer — nothing to anchor to, so nothing survives; treat as fully isolated
+	}
+	const engine = getClipperEngine();
+	const touchesPad = fragments.map(fragment =>
+		engine.booleanOp(ClipType.Intersection, FillRule.NonZero, [fragment], padRingsNm).length > 0);
+	if (touchesPad.every(touch => !touch)) {
+		return fragments; // every fragment on this layer is pad-free — a legitimate unconnected pour, preserve as-is
+	}
+	return fragments.filter((fragment, index) => {
+		if (touchesPad[index]) return true;
+		if (islandRemoval.mode === 'area') {
+			const areaMm = Math.abs(Area(fragment)) / (NM_PER_MM * NM_PER_MM);
+			return areaMm >= islandRemoval.areaMinMm;
+		}
+		return false; // mode === 'always'
+	});
+}
+
 export function computeFillFromRings(
 	outlinePoints: MmPath,
 	exclusionRingsMm: MmPath[],
@@ -710,8 +943,22 @@ export function computeFillFromRings(
 	// back into the fill, then the whole result is clipped back to the
 	// zone's own outline.
 	spokeCandidates?: ThermalSpokeCandidateMm[],
+	// Bare (un-inflated) outlines of same-net, STRICTLY-higher-priority
+	// zones (see buildZonePriorityKnockouts) — subtracted LAST, after
+	// spokes, matching real KiCad's own "Lastly give any same-net but
+	// higher-priority zones control over their own area". Different-net
+	// knockouts are NOT a separate parameter here — they're already
+	// clearance-inflated plain exclusion rings by the time they reach this
+	// function, so callers fold them into extraExclusionRingsMm instead.
+	sameNetKnockoutRingsMm?: MmPath[],
+	// Every same-net pad's own copper shape on this layer (collectExclusionRingsMm's
+	// sameNetPadRingsMm) — the "does this fragment touch a real pad" test
+	// applyIslandRemoval needs. Only pads count, matching real KiCad's own
+	// CN_CLUSTER::Add rule (see applyIslandRemoval's doc comment).
+	sameNetPadRingsMm?: MmPath[],
+	islandRemoval?: ZoneFillIslandRemovalSettings,
 ): Paths /* world-mm point rings — always simple (hole-free) polygons after
-	fracture, one per disjoint fill region */ {
+	fracture AND island removal, one per disjoint, surviving fill region */ {
 	if (outlinePoints.length < 3) return [];
 
 	const engine = getClipperEngine();
@@ -748,7 +995,17 @@ export function computeFillFromRings(
 		}
 	}
 
-	return fractureFillResult(fillNm).map(fromClipperPath);
+	// Real KiCad's own final step ("Lastly give any same-net but higher-
+	// priority zones control over their own area") — see
+	// buildZonePriorityKnockouts' doc comment for why this runs LAST,
+	// after spokes, rather than folded into the exclusion union above.
+	if (sameNetKnockoutRingsMm && sameNetKnockoutRingsMm.length > 0 && fillNm.length > 0) {
+		const knockoutsNm = sameNetKnockoutRingsMm.map(toClipperPath);
+		fillNm = engine.booleanOp(ClipType.Difference, FillRule.NonZero, fillNm, knockoutsNm);
+	}
+
+	const fragments = applyIslandRemoval(fractureFillResult(fillNm), sameNetPadRingsMm, islandRemoval);
+	return fragments.map(fromClipperPath);
 }
 
 /**
@@ -762,27 +1019,45 @@ export function computeFillFromRings(
  */
 export function collectExclusionRingsMm(
 	scene: LayeredBoardScene, layer: string, zoneNetId: number | null,
+	// The zone's own resolved clearance — needed here (not just later, in
+	// computeFillFromRings) so a pad's local clearance override (see
+	// pushPadExclusionRing) can be compared against it per-obstacle, rather
+	// than every obstacle sharing one flat inflate regardless of any
+	// pad-specific override.
+	zoneClearanceMm: number,
 	// See this file's header comment ("Pad Connections") for exactly what
 	// this changes and why it's PAD-only.
 	padConnection?: ZoneFillPadConnectionSettings,
-): { exclusionRingsMm: MmPath[]; preInflatedExclusionRingsMm: MmPath[]; spokeCandidates: ThermalSpokeCandidateMm[] } {
+): {
+	exclusionRingsMm: MmPath[]; preInflatedExclusionRingsMm: MmPath[]; spokeCandidates: ThermalSpokeCandidateMm[];
+	// Every same-net pad's own copper shape on this layer, regardless of Pad
+	// Connections mode — island removal's "does this fragment touch a real
+	// pad" test (applyIslandRemoval) needs ALL of them, not just the ones
+	// that also happen to need a thermal/none-mode exclusion ring below.
+	sameNetPadRingsMm: MmPath[];
+} {
 	const bucket = scene.layerBuckets.get(layer) ?? [];
 	const exclusionRingsMm: MmPath[] = [];
 	const preInflatedExclusionRingsMm: MmPath[] = [];
 	const spokeCandidates: ThermalSpokeCandidateMm[] = [];
+	const sameNetPadRingsMm: MmPath[] = [];
 	for (const item of bucket) {
 		if (!isObstacleKind(item.kind)) continue;
 		// Same-net copper flows together with the pour — only a DIFFERENT
 		// (or absent) net is an obstacle the fill must clear around, UNLESS
 		// this is a same-net pad under a non-'full' Pad Connections mode.
 		if (item.netId != null && zoneNetId != null && item.netId === zoneNetId) {
+			if (item.kind === 'pad') {
+				const padRing = shapeToRingMm(item.shape);
+				if (padRing && padRing.length >= 3) sameNetPadRingsMm.push(padRing);
+			}
 			if (item.kind !== 'pad' || !padConnection) continue;
 			const mode = resolvePadConnectionMode(padConnection.mode, item.element);
 			if (mode === 'full') continue;
 			const ring = shapeToRingMm(item.shape);
 			if (!ring || ring.length < 3) continue;
 			if (mode === 'none') {
-				exclusionRingsMm.push(ring); // gets the normal clearanceMm inflate below
+				pushPadExclusionRing(ring, item.element, zoneClearanceMm, exclusionRingsMm, preInflatedExclusionRingsMm);
 				continue;
 			}
 			// mode === 'thermal'
@@ -801,9 +1076,15 @@ export function collectExclusionRingsMm(
 		const ring = item.kind === 'track' && item.shape.type === 'circle'
 			? trackArcRingMm(item.element, item.shape)
 			: shapeToRingMm(item.shape);
-		if (ring && ring.length >= 3) exclusionRingsMm.push(ring);
+		if (!ring || ring.length < 3) continue;
+		if (item.kind === 'pad') {
+			pushPadExclusionRing(ring, item.element, zoneClearanceMm, exclusionRingsMm, preInflatedExclusionRingsMm);
+		}
+		else {
+			exclusionRingsMm.push(ring);
+		}
 	}
-	return { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates };
+	return { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates, sameNetPadRingsMm };
 }
 
 /**
@@ -823,12 +1104,20 @@ export function computeZoneFillForLayer(
 	boardOutlineNm?: Paths | null,
 	extraExclusionRingsMm?: MmPath[],
 	padConnection?: ZoneFillPadConnectionSettings,
+	// See buildZonePriorityKnockouts — bare outlines of same-net, strictly-
+	// higher-priority zones, subtracted last. Different-net priority
+	// knockouts are the caller's responsibility to fold into
+	// extraExclusionRingsMm (already clearance-inflated), same as
+	// board-edge/keepout exclusions.
+	sameNetKnockoutRingsMm?: MmPath[],
+	islandRemoval?: ZoneFillIslandRemovalSettings,
 ): Paths {
-	const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates } =
-		collectExclusionRingsMm(scene, layer, zoneNetId, padConnection);
+	const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates, sameNetPadRingsMm } =
+		collectExclusionRingsMm(scene, layer, zoneNetId, clearanceMm, padConnection);
 	return computeFillFromRings(
 		outlinePoints, exclusionRingsMm, clearanceMm, boardOutlineNm,
-		[...(extraExclusionRingsMm ?? []), ...preInflatedExclusionRingsMm], spokeCandidates);
+		[...(extraExclusionRingsMm ?? []), ...preInflatedExclusionRingsMm], spokeCandidates, sameNetKnockoutRingsMm,
+		sameNetPadRingsMm, islandRemoval);
 }
 
 /** One (zone, layer) unit of work for the Clipper2 pipeline — plain,
@@ -845,6 +1134,17 @@ export interface ZoneFillJob {
 	boardOutlineNm: Paths | null;
 	extraExclusionRingsMm: MmPath[];
 	spokeCandidates: ThermalSpokeCandidateMm[];
+	/** See buildZonePriorityKnockouts — bare outlines of same-net, strictly-
+	 *  higher-priority zones, subtracted LAST (after spokes). Different-net
+	 *  priority knockouts are already folded into extraExclusionRingsMm by
+	 *  the time a job reaches this shape (they're clearance-inflated plain
+	 *  exclusion rings, same treatment as board-edge/keepout). */
+	sameNetKnockoutRingsMm: MmPath[];
+	/** See applyIslandRemoval — every same-net pad's own shape on this layer. */
+	sameNetPadRingsMm: MmPath[];
+	/** See applyIslandRemoval — null means the zone's own mode is 'never'
+	 *  (or unresolvable), a complete no-op for this job. */
+	islandRemoval: ZoneFillIslandRemovalSettings | null;
 }
 
 /**
@@ -857,7 +1157,12 @@ export interface ZoneFillJob {
 export function buildZoneFillJobs(
 	zones: readonly {
 		uuid: string; outlinePoints: MmPath; netId: number | null; layers: readonly string[]; clearanceMm: number;
+		/** Real KiCad defaults every new zone to priority 0 (ZONE::m_priority) —
+		 *  same default here, so a board that never touches zone priority at
+		 *  all (the common case) is a complete no-op for this feature. */
+		priority?: number;
 		padConnection?: ZoneFillPadConnectionSettings;
+		islandRemoval?: ZoneFillIslandRemovalSettings;
 	}[],
 	scene: LayeredBoardScene,
 	boardOutlineNm: Paths | null,
@@ -865,8 +1170,20 @@ export function buildZoneFillJobs(
 	// buildEdgeExclusionsByLayer. Layer-uniform, so a caller computes this
 	// once per board and it gets attached to every job for that layer.
 	extraExclusionsByLayer?: Map<string, MmPath[]>,
+	// EVERY zone on the board (not just the ones in `zones` being (re)filled
+	// this call) that might knock a hole in one of them via priority — see
+	// buildZonePriorityKnockouts. A "fill all zones" caller can omit this
+	// (it defaults to `zones` itself, already the full board-wide set);
+	// a single-zone fillZone-style caller must pass the real board-wide
+	// list explicitly, since `zones` there is just the one zone being filled
+	// and every OTHER zone on the board still needs to be considered.
+	allZonesForPriority?: readonly OtherZoneInput[],
 ): ZoneFillJob[] {
 	const copperLayers = resolveCopperLayers(scene);
+	const priorityZones = allZonesForPriority ?? zones.map((z): OtherZoneInput => ({
+		uuid: z.uuid, netId: z.netId, priority: z.priority ?? 0, layers: z.layers,
+		outlinePoints: z.outlinePoints, clearanceMm: z.clearanceMm,
+	}));
 
 	const jobs: ZoneFillJob[] = [];
 	for (const zone of zones) {
@@ -875,8 +1192,11 @@ export function buildZoneFillJobs(
 			.flatMap(layer => layer === '*.Cu' ? copperLayers : [layer])
 			.filter(layer => layer.endsWith('.Cu'));
 		for (const layer of layers) {
-			const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates } =
-				collectExclusionRingsMm(scene, layer, zone.netId, zone.padConnection);
+			const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates, sameNetPadRingsMm } =
+				collectExclusionRingsMm(scene, layer, zone.netId, zone.clearanceMm, zone.padConnection);
+			const { differentNetKnockoutRingsMm, sameNetKnockoutRingsMm } = buildZonePriorityKnockouts(
+				{ uuid: zone.uuid, netId: zone.netId, priority: zone.priority ?? 0, clearanceMm: zone.clearanceMm },
+				layer, copperLayers, priorityZones);
 			jobs.push({
 				zoneUuid: zone.uuid,
 				layer,
@@ -884,8 +1204,14 @@ export function buildZoneFillJobs(
 				exclusionRingsMm,
 				clearanceMm: zone.clearanceMm,
 				boardOutlineNm,
-				extraExclusionRingsMm: [...(extraExclusionsByLayer?.get(layer) ?? []), ...preInflatedExclusionRingsMm],
+				extraExclusionRingsMm: [
+					...(extraExclusionsByLayer?.get(layer) ?? []), ...preInflatedExclusionRingsMm,
+					...differentNetKnockoutRingsMm,
+				],
 				spokeCandidates,
+				sameNetKnockoutRingsMm,
+				sameNetPadRingsMm,
+				islandRemoval: zone.islandRemoval ?? null,
 			});
 		}
 	}
@@ -897,7 +1223,8 @@ export function buildZoneFillJobs(
 export function runZoneFillJob(job: ZoneFillJob): { zoneUuid: string; layer: string; points: MmPath }[] {
 	const fills = computeFillFromRings(
 		job.outlinePoints, job.exclusionRingsMm, job.clearanceMm, job.boardOutlineNm,
-		job.extraExclusionRingsMm, job.spokeCandidates);
+		job.extraExclusionRingsMm, job.spokeCandidates, job.sameNetKnockoutRingsMm,
+		job.sameNetPadRingsMm, job.islandRemoval ?? undefined);
 	return fills.filter(ring => ring.length >= 3).map(points => ({ zoneUuid: job.zoneUuid, layer: job.layer, points }));
 }
 
@@ -930,7 +1257,18 @@ function bridgeHoleInto(outline: Path, hole: Path): Path {
 		const yMin = Math.min(a.y, b.y), yMax = Math.max(a.y, b.y);
 		if (holePt.y < yMin || holePt.y > yMax || yMin === yMax) continue;
 		const t = (holePt.y - a.y) / (b.y - a.y);
-		const x = a.x + t * (b.x - a.x);
+		// Rounded to stay true-integer Clipper2 space, matching Point64Of's
+		// convention everywhere else in this file — a linear interpolation
+		// along an edge otherwise lands on a fractional nm coordinate almost
+		// every time. Latent for a long time (fractureFillResult's own output
+		// was only ever converted back to plain mm via fromClipperPath, never
+		// fed into another Clipper2 boolean op), until applyIslandRemoval
+		// became the first caller to do exactly that: the WASM Clipper2
+		// engine's Point64 bridge (wasmClipperEngine.ts's toWasmPath) calls
+		// `BigInt(x)` directly with no rounding of its own and throws
+		// outright on a non-integer float — the pure-TS engine tolerates any
+		// JS `number`, so this never surfaced there.
+		const x = Math.round(a.x + t * (b.x - a.x));
 		if (x <= holePt.x && x > bestX) {
 			bestX = x;
 			bestEdgeIdx = i;
@@ -1036,6 +1374,9 @@ export function computeZoneFill(
 	boardOutlineNm?: Paths | null,
 	extraExclusionRingsMm?: MmPath[],
 	padConnection?: ZoneFillPadConnectionSettings,
+	// See buildZonePriorityKnockouts / computeZoneFillForLayer's own doc
+	// comment on this same parameter.
+	sameNetKnockoutRingsMm?: MmPath[],
 ): { layer: string; points: MmPath }[] {
 	const copperLayers = resolveCopperLayers(scene);
 	const layers = requestedLayers
@@ -1045,7 +1386,8 @@ export function computeZoneFill(
 	const result: { layer: string; points: MmPath }[] = [];
 	for (const layer of layers) {
 		for (const ring of computeZoneFillForLayer(
-			outlinePoints, zoneNetId, layer, scene, clearanceMm, boardOutlineNm, extraExclusionRingsMm, padConnection)) {
+			outlinePoints, zoneNetId, layer, scene, clearanceMm, boardOutlineNm, extraExclusionRingsMm, padConnection,
+			sameNetKnockoutRingsMm)) {
 			if (ring.length >= 3) result.push({ layer, points: ring });
 		}
 	}

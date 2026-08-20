@@ -114,4 +114,38 @@ export interface Renderer {
 	 * call order with no separate flush needed.
 	 */
 	flushOverlay?(): void;
+
+	/**
+	 * Marks every primitive drawn between this call and the matching
+	 * endItem() as belonging to `id`, ONLY meaningful during a static
+	 * build (beginStaticBuild()/endStaticBuild()) — a no-op otherwise.
+	 * Lets a renderer that supports it (currently just WebGLRenderer) track
+	 * which slice of the static buffer a given PaintedItem contributed,
+	 * without changing anything about how that geometry is batched/drawn —
+	 * see translateStaticItems()'s own doc comment for what this tracking
+	 * is actually FOR. Callers (BoardPainter.paint()) call this
+	 * unconditionally around every item; renderers that don't implement it
+	 * (Canvas2dRenderer) simply ignore the id.
+	 */
+	beginItem?(id: string): void;
+	endItem?(): void;
+
+	/**
+	 * Translates the ALREADY-BAKED static geometry for the given item ids
+	 * by (dx, dy), in place, with no re-tessellation — the incremental
+	 * counterpart to a full beginStaticBuild()/endStaticBuild() rebuild,
+	 * for the one case where a full rebuild is provably unnecessary: a
+	 * PURE TRANSLATION never changes a shape's own triangle structure,
+	 * only where those triangles sit, so this reuses the exact vertices a
+	 * prior static build already computed. Optional (feature-detect before
+	 * calling) — a renderer without persistent static geometry
+	 * (Canvas2dRenderer) has no use for this, since it re-tessellates
+	 * every item from its draw() closure every frame regardless. Returns
+	 * false if any of the given ids has no tracked static range (e.g. it
+	 * was never part of a static build, or only stencil/image geometry
+	 * that this particular renderer's implementation doesn't support
+	 * translating) — callers should fall back to a full rebuild when this
+	 * happens, not assume partial success silently worked.
+	 */
+	translateStaticItems?(ids: Iterable<string>, dx: number, dy: number): boolean;
 }

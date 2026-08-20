@@ -7,6 +7,7 @@ import { layerPaintOrder } from './LayerOrder';
 import { computeStrokeTextGeometry, drawStrokeTextGeometry, getStrokeTextBounds, type StrokeTextGeometry } from './TextPaint';
 import { PaintedShape, shapeToBBox, bboxesIntersect } from './PaintedShape';
 import { buildBoardOutlineRingsMm, fromClipperPath, toClipperPath } from './BoardZoneFill';
+import { expandTextVars } from './DrawingSheet';
 import { getClipperEngine } from './ClipperEngine';
 import { EndType, JoinType } from '@clipper2-ts/offset';
 import { embeddedImageInfo } from './EmbeddedImage';
@@ -630,7 +631,16 @@ export class BoardPainter {
 					: item.kind === 'via' ? itemDisplayModes.via
 					: item.kind === 'track' ? itemDisplayModes.track
 					: 'filled';
+				// Brackets this item's own contribution to the static buffer
+				// so a renderer that supports it (WebGLRenderer) can later
+				// translate just this item's geometry in place — see
+				// translateStaticItems's own doc comment for what this
+				// tracking is for. A no-op outside a static build (Canvas2D,
+				// or WebGL's dynamic frames) — see Renderer.beginItem's own
+				// doc comment.
+				renderer.beginItem?.(item.id);
 				item.draw(renderer, color, mode);
+				renderer.endItem?.();
 				if (highlighted) {
 					highlightOverlay.push({ item, color, mode });
 				}
@@ -807,8 +817,17 @@ export class BoardPainter {
 					zoneDisplayMode: isFilled ? 'outline' : undefined, netId, netName,
 					draw: (renderer, color) => {
 						renderer.polygon(points, { strokeColor: color, strokeWidth: displayOutlineWidth });
+						// Real KiCad draws these edge-hatch "whiskers" flat-ended, not
+						// as little pills — and on WebGL, a round cap costs 2 extra
+						// semicircle fans per whisker for zero visual difference at
+						// this stroke width (a zone's edge hatching can run into the
+						// tens of thousands of these across a real board's worth of
+						// zones — measured ~15% of a real board's ENTIRE triangle
+						// budget going to line-end caps alone). capStyle: 'butt' skips
+						// that geometry entirely; see RenderStyle.capStyle's own doc
+						// comment (ratsnest airwires already use this same reasoning).
 						for (const [start, end] of edgeHatches) {
-							renderer.line([start, end], { strokeColor: color, strokeWidth: displayOutlineWidth });
+							renderer.line([start, end], { strokeColor: color, strokeWidth: displayOutlineWidth, capStyle: 'butt' });
 						}
 					},
 				});
@@ -947,14 +966,34 @@ export class BoardPainter {
 				// decode on every repaint was pure waste and, measured on a
 				// text-heavy board, the majority of per-frame cost.
 				const geometry = computeStrokeTextGeometry(value, textWorld, textSize, textAngle, isBack, undefined, anchor);
+				const bbox = getStrokeTextBounds(geometry);
 				items.push({
 					id: `${ footprintId }:prop:${ name }`,
 					layer: propLayer,
 					kind: 'footprint-ref',
-					shape: { type: 'rect', x: textWorld.x - textSize, y: textWorld.y - textSize, w: textSize * 2, h: textSize * 2 },
-					bbox: { x: textWorld.x - textSize, y: textWorld.y - textSize, w: textSize * 2, h: textSize * 2 },
-					hitTestable: false,
-					element: footprint,
+					shape: { type: 'rect', ...bbox },
+					bbox,
+					// Real KiCad keeps a footprint's FIELDS (Reference/Value/
+					// custom) individually selectable and independently
+					// draggable outside the footprint editor — confirmed
+					// against pcb_selection_tool.cpp's own Selectable():
+					// among a footprint's children, only PCB_PAD_T/
+					// PCB_FIELD_T/PCB_TEXT_T stay individually pickable on the
+					// main board view; everything else (graphics) resolves to
+					// the whole-footprint synthetic hit item instead (see
+					// buildFpLine's own doc comment on that half of the same
+					// rule). getVisibleProperties() above already excludes
+					// hidden fields, matching Selectable()'s own
+					// `!field->IsVisible()` rejection.
+					hitTestable: true,
+					// The property element itself, not the parent footprint —
+					// a hit here must resolve to (and move) just this field.
+					// See KicadRenderSession.translateBoardSelection's and
+					// layers.ts's beginBoardDragPreview's own `kind ===
+					// 'footprint-ref'` carve-outs, which keep this from being
+					// silently re-resolved to the whole footprint the way a
+					// pad hit legitimately still is.
+					element: prop,
 					draw: (renderer, color) => {
 						drawStrokeTextGeometry(renderer, geometry, color);
 					},
@@ -1017,7 +1056,7 @@ export class BoardPainter {
 			// was entirely unrendered before this.
 			if (getFpTextClass()) {
 				for (const text of footprint.findChildrenByClass(getFpTextClass())) {
-					const item = this.buildTextElement(text, footprintMatrix, footprintId, origin.rotation ?? 0);
+					const item = this.buildTextElement(text, footprintMatrix, footprintId, origin.rotation ?? 0, footprint);
 					if (item) {
 						items.push(item);
 					}
@@ -1101,11 +1140,35 @@ export class BoardPainter {
 	 *    color — not KiCad's exact rounded-margin swatch, but visibly
 	 *    correct (readable light text on a filled patch) rather than absent.
 	 */
-	protected buildTextElement(textEl: any, footprintMatrix: Matrix3 | null, footprintId?: string, footprintRotation = 0): PaintedItem | null {
+	protected buildTextElement(
+		textEl: any, footprintMatrix: Matrix3 | null, footprintId?: string, footprintRotation = 0,
+		// Present only for a footprint's own fp_text (never board-root gr_text,
+		// which has no footprint to resolve REFERENCE/VALUE/custom fields
+		// against) — resolves real KiCad text-variable placeholders
+		// (`${REFERENCE}`, `${VALUE}`, `${SomeCustomField}`) against the
+		// footprint's own properties before this text is measured/drawn. Was
+		// entirely missing: an fp_text carrying the literal template
+		// `"${REFERENCE}"` (a common real-world pattern — a generic
+		// library footprint drawing its own reference on F.Fab this way
+		// instead of relying on the separate Reference FIELD) rendered and
+		// hit-tested as that 13-character placeholder string itself, not the
+		// real (usually much shorter) reference — inflating both the drawn
+		// text and, since this item's shape feeds directly into
+		// footprintHullPoints (fp_text is a 'graphic', not the excluded
+		// 'footprint-ref' kind — see that function's own doc comment), the
+		// WHOLE FOOTPRINT's selection/click hit-test hull along with it. This
+		// was the root cause of a small (e.g. 0603) part's hitbox measuring
+		// roughly 2x its real footprint size.
+		footprint?: any,
+	): PaintedItem | null {
 		if (!textEl.value) {
 			return null;
 		}
 		if (typeof textEl.isHidden === 'function' && textEl.isHidden()) {
+			return null;
+		}
+		const resolvedValue: string = footprint ? expandTextVars(textEl.value, footprintTextVars(footprint)) : textEl.value;
+		if (!resolvedValue) {
 			return null;
 		}
 		const layer: string = typeof textEl.getLayer === 'function' ? textEl.getLayer() : 'F.SilkS';
@@ -1148,9 +1211,8 @@ export class BoardPainter {
 			: origin.rotation ?? 0;
 		const font = typeof textEl.getFont === 'function' ? textEl.getFont() : { height: 1 };
 		const textSize = font.height || 1;
-		const value = textEl.value;
 		const anchor = typeof textEl.getAnchorPoint === 'function' ? textEl.getAnchorPoint() : { x: 0, y: 0 };
-		const geometry = computeStrokeTextGeometry(value, worldPos, textSize, angleDeg, isBack, undefined, anchor);
+		const geometry = computeStrokeTextGeometry(resolvedValue, worldPos, textSize, angleDeg, isBack, undefined, anchor);
 		const bbox = getStrokeTextBounds(geometry);
 
 		return {
@@ -3111,6 +3173,83 @@ function offsetCustomPadLocalRings(
 function isKnockoutLayer(el: any): boolean {
 	const layerChild = typeof el.findFirstChildByName === 'function' ? el.findFirstChildByName('layer') : null;
 	return layerChild?.attributes?.[1]?.value === 'knockout';
+}
+
+/** Real KiCad's `FOOTPRINT::ResolveTextVar` (footprint.cpp) special-cases
+ *  `REFERENCE`/`VALUE` (uppercase, resolved from the Reference/Value
+ *  FIELDS regardless of what the field's own declared name is) and
+ *  `LAYER`, then falls back to `GetField(name)` for any custom field
+ *  looked up by its EXACT declared name — this mirrors that scope
+ *  (skipping the rarer `FOOTPRINT_LIBRARY`/`FOOTPRINT_NAME`/
+ *  `NET_NAME(pad)`-style function-call variables, out of scope for the
+ *  common "${REFERENCE}"/"${VALUE}" case this exists to fix). */
+function footprintTextVars(footprint: any): Record<string, string> {
+	const vars: Record<string, string> = typeof footprint.getAllProperties === 'function'
+		? { ...footprint.getAllProperties() } : {};
+	if (vars.Reference !== undefined) {
+		vars.REFERENCE = vars.Reference;
+	}
+	if (vars.Value !== undefined) {
+		vars.VALUE = vars.Value;
+	}
+	if (typeof footprint.getLayer === 'function') {
+		vars.LAYER = footprint.getLayer();
+	}
+	return vars;
+}
+
+/**
+ * Redraws just the currently selected/highlighted item(s) in the highlight
+ * color — the WebGL DYNAMIC-frame counterpart to `paint()`'s own
+ * `highlightOverlay` mechanism (see that doc comment for why a highlighted
+ * item needs a top-most redraw at all), but callable on its own so a
+ * selection change never needs `paint()`'s full per-layer STATIC pass.
+ *
+ * This exists because selecting an item previously set `geometryDirty`,
+ * forcing KicadRenderSession.render() to re-run `paint()` over the ENTIRE
+ * board scene (every pad/track/via/graphic) and re-upload the whole result
+ * to the GPU — the same cost as loading a new board — just to recolor 1-2
+ * items yellow. WebGLRenderer.ts's own header comment already documents a
+ * DYNAMIC per-frame overlay tier meant for exactly this ("selection
+ * highlight/handles" is explicitly listed there) — this is what actually
+ * routes selection through it instead. `render()` now bakes an EMPTY
+ * highlight set into the static build and calls this function every frame
+ * in the dynamic overlay pass instead (see its own call site).
+ *
+ * Scans `scene.hitTestItems`, not the full `layerBuckets` — only
+ * hit-testable items are ever individually selectable, and this list is
+ * already the smaller, pre-filtered set `paint()` uses for hit-testing.
+ * Selection is normally 1-2 items, so this is a cheap per-frame linear
+ * scan (a plain string-id comparison per item), nowhere near the cost of
+ * the full rebuild it replaces.
+ */
+export function paintHighlightOverlay(
+	scene: LayeredBoardScene,
+	renderer: Renderer,
+	highlightedIds: ReadonlySet<string>,
+	itemDisplayModes: { pad: ItemDisplayMode; via: ItemDisplayMode; track: ItemDisplayMode } =
+		{ pad: 'filled', via: 'filled', track: 'filled' },
+): void {
+	if (highlightedIds.size === 0) {
+		return;
+	}
+	renderer.beginBatch?.();
+	for (const item of scene.hitTestItems) {
+		if (!highlightedIds.has(item.id)) {
+			continue;
+		}
+		if (item.kind === 'footprint') {
+			renderer.rect(new Vec2(item.bbox.x, item.bbox.y), item.bbox.w, item.bbox.h,
+				{ strokeColor: '#ffcc00', strokeWidth: 0.18 });
+			continue;
+		}
+		const mode = item.kind === 'pad' ? itemDisplayModes.pad
+			: item.kind === 'via' ? itemDisplayModes.via
+			: item.kind === 'track' ? itemDisplayModes.track
+			: 'filled';
+		item.draw(renderer, '#ffcc00', mode);
+	}
+	renderer.endBatch?.();
 }
 
 /**

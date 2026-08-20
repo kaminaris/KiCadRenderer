@@ -19,6 +19,25 @@ export type {
 	LoadResult,
 	HitResult,
 } from './KicadRenderSession';
+
+// Re-export internal types from the shared types module so consumers can import
+// them from the package root (keeping docs and types colocated with the
+// moved definitions in shared/kicad-render/types.ts).
+export type {
+	ZoneDraft,
+	RuleAreaDraft,
+	PolygonDraft,
+	ResizeHandle,
+	AlignAxis,
+	CurveAnchor,
+	SelectionCurveAnchors,
+	SchLineMode,
+	ZoneFillDesignSettings,
+	SelectionResizeBox,
+	EditPreviewState,
+	ViaDragFix,
+	SymbolPoseInfo,
+} from './types';
 export {
 	buildSheetTree,
 	findTreePath,
@@ -124,6 +143,7 @@ export type { CachedStencilJob, RawStencilJob } from './render/WebGLRenderer';
 
 export { sceneToSvg } from './svgExporter';
 export { computeWireBend } from './utils';
+export { parseText, parseBoardText } from './parser';
 export { pushUndoSnapshot, clearUndoRedo, canUndo, canRedo, undo, redo, cancelLatestUndoSnapshot, getUndoStackDebug, beginBatch, endBatch, commitAstMutation } from './state';
 
 // Math

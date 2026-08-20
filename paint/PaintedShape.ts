@@ -185,3 +185,85 @@ export function pointInPolygon(points: { x: number; y: number }[], px: number, p
 	}
 	return inside;
 }
+
+/** Tessellates a filled PaintedShape into a plain point ring for overlap
+ *  testing — a circle into a 24-gon (plenty for "do these two shapes
+ *  touch", not a precision fill boundary), a rect into its 4 corners, a
+ *  polygon as-is, a segment as its bare 2-point centerline (width-blind —
+ *  no current caller needs a wide-segment overlap test; see
+ *  shapesOverlap's own doc comment). */
+function shapeToOverlapRing(shape: PaintedShape): { x: number; y: number }[] {
+	switch (shape.type) {
+		case 'circle': {
+			const points: { x: number; y: number }[] = [];
+			const segments = 24;
+			for (let i = 0; i < segments; i++) {
+				const a = (i / segments) * Math.PI * 2;
+				points.push({ x: shape.cx + shape.r * Math.cos(a), y: shape.cy + shape.r * Math.sin(a) });
+			}
+			return points;
+		}
+		case 'rect':
+			return [
+				{ x: shape.x, y: shape.y }, { x: shape.x + shape.w, y: shape.y },
+				{ x: shape.x + shape.w, y: shape.y + shape.h }, { x: shape.x, y: shape.y + shape.h },
+			];
+		case 'polygon':
+			return shape.points;
+		case 'segment':
+			return [{ x: shape.x1, y: shape.y1 }, { x: shape.x2, y: shape.y2 }];
+	}
+}
+
+/** Whether two 2-point-or-more segments (as plain point pairs) cross —
+ *  standard orientation-sign test, used by shapesOverlap's edge-crossing
+ *  fallback. */
+function segmentsCross(
+	p1: { x: number; y: number }, p2: { x: number; y: number },
+	p3: { x: number; y: number }, p4: { x: number; y: number },
+): boolean {
+	const orient = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number =>
+		Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+	const o1 = orient(p1, p2, p3), o2 = orient(p1, p2, p4);
+	const o3 = orient(p3, p4, p1), o4 = orient(p3, p4, p2);
+	return o1 !== o2 && o3 !== o4;
+}
+
+/**
+ * Whether two FILLED shapes' own copper actually touches/overlaps —
+ * general shape-vs-shape (not just point-vs-shape), for cases neither
+ * `shapeContainsPoint` (needs one side to already be a bare point) nor a
+ * plain bbox check (too coarse — two shapes can share a bbox without
+ * touching) covers. Bbox pre-filtered, then a genuine polygon check: one
+ * shape contains a vertex of the other (handles full containment and most
+ * ordinary overlaps), OR any pair of edges crosses (handles the case where
+ * neither shape's own sampled vertices happen to land inside the other —
+ * e.g. two similarly-sized crossing shapes with no vertex inside either).
+ * A circle is tessellated (24 segments — plenty for "do these touch",
+ * unlike a fill boundary which needs real precision), so this stays exact
+ * for rect/polygon and a close, more-than-good-enough approximation for
+ * any shape involving a circle.
+ */
+export function shapesOverlap(a: PaintedShape, b: PaintedShape): boolean {
+	if (!bboxesIntersect(shapeToBBox(a), shapeToBBox(b))) {
+		return false;
+	}
+	const ringA = shapeToOverlapRing(a), ringB = shapeToOverlapRing(b);
+	if (ringA.length === 0 || ringB.length === 0) {
+		return false;
+	}
+	for (const p of ringA) {
+		if (pointInPolygon(ringB, p.x, p.y)) return true;
+	}
+	for (const p of ringB) {
+		if (pointInPolygon(ringA, p.x, p.y)) return true;
+	}
+	for (let i = 0; i < ringA.length; i++) {
+		const a1 = ringA[i]!, a2 = ringA[(i + 1) % ringA.length]!;
+		for (let j = 0; j < ringB.length; j++) {
+			const b1 = ringB[j]!, b2 = ringB[(j + 1) % ringB.length]!;
+			if (segmentsCross(a1, a2, b1, b2)) return true;
+		}
+	}
+	return false;
+}

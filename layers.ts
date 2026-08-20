@@ -70,6 +70,17 @@ export function beginBoardDragPreview(session: any, paintIds: Iterable<string>):
 	}
 	let changed = false;
 	for (const paintId of paintIds) {
+		// A footprint's own field (Reference/Value/custom) drags
+		// independently of its footprint (see KicadRenderSession.
+		// translateBoardSelection's identical carve-out) — pulling the
+		// WHOLE footprint into drag-preview here just because a field's own
+		// element.parent happens to be that footprint would be both wrong
+		// (the footprint itself isn't moving) and wasteful (re-tessellating
+		// every pad of a footprint to drag one small text label).
+		const hitItem = session.scene.hitTestItems.find((item: any) => item.id === paintId);
+		if (hitItem?.kind === 'footprint-ref') {
+			continue;
+		}
 		const el = session.footprintOwnerOfHit(paintId);
 		if (el && !session.dragPreviewFootprints.has(el)) {
 			if (session.ratsnestVisible) {

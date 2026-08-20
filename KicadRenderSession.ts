@@ -151,7 +151,7 @@ import { Renderer }                                   from './render/Renderer';
 import { Canvas2dRenderer }                           from './render/Canvas2dRenderer';
 import { WebGLRenderer }                              from './render/WebGLRenderer';
 import {
-	BoardPainter, boardPaintOrder, defaultLayerState,
+	BoardPainter, boardPaintOrder, defaultLayerState, paintHighlightOverlay,
 	LayeredBoardScene, LayerVisibilityState, PaintedItem, ZoneDisplayMode, ItemDisplayMode
 }                                                     from './paint/BoardPainter';
 import {
@@ -165,7 +165,7 @@ import { buildCopperGraph, type CopperGraph }         from './paint/BoardCopperG
 import { buildInitialTrace }                          from './router/PnsDragger';
 import {
 	buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath,
-	resolveCopperLayers, ZoneFillJob
+	OtherZoneInput, resolveCopperLayers, ZoneFillJob
 }                                                     from './paint/BoardZoneFill';
 
 /** Off-main-thread runner for zone-fill jobs, injected by the app (a Web
@@ -511,6 +511,17 @@ export class KicadRenderSession {
 	 *  actually takes; boardStructureDirty above is the full-rebuild
 	 *  fallback every other board mutation still uses. */
 	protected boardDirtyFootprints = new Set<any>();
+	/** Lazily-built id->name lookup for netNameForId, invalidated (set back
+	 *  to null) alongside every full board scene rebuild — see
+	 *  rebuildBoardSceneIfPending's boardStructureDirty branch. Net names
+	 *  never change without a structural rebuild (the `(net id name)` table
+	 *  itself is root-level board content, not something a footprint/track
+	 *  drag ever touches), so this stays valid for the whole span between
+	 *  rebuilds despite netNameForId being called many times per second
+	 *  during a track/via drag's live collision preview (RouterNode's
+	 *  firstSegmentCollision) — a plain linear findChildrenByClass scan
+	 *  there was the single largest cost in a real dense-board drag trace. */
+	protected netNameCache: Map<number, string> | null = null;
 	/** Footprints currently being dragged, KiCad VIEW-preview style (see
 	 *  beginBoardDragPreview's doc comment): removed from the real scene (one
 	 *  full static retessellation, not one per frame) and drawn instead
@@ -1144,9 +1155,16 @@ export class KicadRenderSession {
 				this.selectedIds.delete(id);
 			}
 		}
-		// Highlight color is baked per-vertex at build time on WebGL — see
-		// setLayerVisible()'s comment.
-		this.geometryDirty = true;
+		// Board selection now draws through paintHighlightOverlay's cheap
+		// per-frame dynamic pass (see render()'s own doc comment) — no full
+		// static geometry rebuild needed just to recolor 1-2 items, which
+		// used to cost the same as loading the whole board on every click.
+		// Schematic selection is unchanged for now (still baked per-vertex at
+		// build time — see setLayerVisible()'s comment) — a separately-scoped
+		// follow-up, not a forgotten case.
+		if (this.documentType !== 'board') {
+			this.geometryDirty = true;
+		}
 		this.scheduleRender();
 	}
 
@@ -1558,12 +1576,25 @@ export class KicadRenderSession {
 		const footprints = new Set<any>();
 		const elements = new Set<any>();
 		for (const id of ids) {
+			const item = this.scene.hitTestItems.find(candidate => candidate.id === id);
+			// A footprint's own field (Reference/Value/custom) moves
+			// independently — real KiCad keeps these individually draggable
+			// outside the footprint editor (confirmed against
+			// pcb_selection_tool.cpp's Selectable(): PCB_FIELD_T/PCB_TEXT_T
+			// stay pickable, unlike a pad, which always drags the WHOLE
+			// footprint). Checked by item KIND, not by walking the element's
+			// own parent chain — footprintOwnerOfHit below would otherwise
+			// resolve a field straight past this and move the whole
+			// footprint, since a field's own .parent IS the footprint.
+			if (item?.kind === 'footprint-ref') {
+				elements.add(item.element);
+				continue;
+			}
 			const el = this.footprintOwnerOfHit(id);
 			if (el) {
 				footprints.add(el);
 				continue;
 			}
-			const item = this.scene.hitTestItems.find(candidate => candidate.id === id);
 			if (item) {
 				elements.add(item.element);
 			}
@@ -1592,6 +1623,192 @@ export class KicadRenderSession {
 			this.rebuildActiveScene();
 		}
 		return moved;
+	}
+
+	/**
+	 * Resolves a board selection into what a FAST, incremental drag needs
+	 * — every STATIC ITEM id whose GPU geometry must shift (every one of a
+	 * dragged footprint's own pads/graphics/text, or a single field's own
+	 * item), plus the AST elements (footprints and/or fields) whose own
+	 * `(at x y)` origin must update to match. A footprint drag was
+	 * previously the ONE case that still cost a full static rebuild even
+	 * after selection itself got moved off that path — see
+	 * translateBoardDragFast's own doc comment for the mechanism this
+	 * feeds.
+	 *
+	 * Returns `null` (no fast path) for anything this doesn't cover yet: a
+	 * bare track/via/graphic in the selection (translateBoardSelection's
+	 * own `rebuildActiveScene()` fallback already handles those), or a
+	 * footprint with no real uuid to key its own items by. Callers must
+	 * fall back to the slower beginBoardDragPreview path for the WHOLE
+	 * gesture in that case — never attempt a partial fast path.
+	 */
+	resolveBoardDragTargets(ids: readonly string[]): { itemIds: string[]; origins: any[]; bboxOnlyItems: PaintedItem[] } | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const footprints = new Set<any>();
+		const fields = new Set<any>();
+		for (const id of ids) {
+			const item = this.scene.hitTestItems.find(candidate => candidate.id === id);
+			if (item?.kind === 'footprint-ref') {
+				fields.add(item.element);
+				continue;
+			}
+			const el = this.footprintOwnerOfHit(id);
+			if (el) {
+				footprints.add(el);
+				continue;
+			}
+			return null;
+		}
+		if (footprints.size === 0 && fields.size === 0) {
+			return null;
+		}
+		const itemIds: string[] = [];
+		const bboxOnlyItems: PaintedItem[] = [];
+		for (const fp of footprints) {
+			const uuid: string | null = typeof fp.getUuid === 'function' ? fp.getUuid() : null;
+			if (!uuid) {
+				return null;
+			}
+			for (const bucket of this.scene.layerBuckets.values()) {
+				for (const item of bucket) {
+					if (item.id !== uuid && !item.id.startsWith(`${ uuid }:`)) {
+						continue;
+					}
+					if (item.kind === 'footprint') {
+						// The synthetic whole-footprint hit item never draws
+						// real geometry (its own draw() is a no-op — see
+						// BoardPainter.buildFootprint's own comment); it
+						// exists only so paintHighlightOverlay has a bbox to
+						// outline when this footprint is selected. Nothing
+						// for translateStaticItems to shift — its bbox/shape
+						// move directly instead (see translateBoardDragFast)
+						// so the selection outline still tracks the drag live
+						// instead of visibly lagging a frame behind.
+						bboxOnlyItems.push(item);
+						continue;
+					}
+					if (!item.layer) {
+						// Never actually drawn: BoardPainter.paint()'s own
+						// per-layer loop only ever visits real, known layer
+						// names, so an item with no declared layer at all
+						// (e.g. an internal-only footprint property like
+						// "ki_fp_filters" with no `(layer ...)` of its own)
+						// never reached item.draw() and so was never tracked
+						// by WebGLRenderer's beginItem/endItem to begin with.
+						// A real, separately-flagged latent gap (such an item
+						// is also invisible and non-hit-testable through the
+						// normal path, for the same underlying reason) — not
+						// something this fast path needs to move, since
+						// there's nothing visible to move.
+						continue;
+					}
+					itemIds.push(item.id);
+				}
+			}
+		}
+		for (const field of fields) {
+			const item = this.scene.hitTestItems.find(candidate => candidate.element === field);
+			if (!item) {
+				return null;
+			}
+			itemIds.push(item.id);
+		}
+		return { itemIds, origins: [...footprints, ...fields], bboxOnlyItems };
+	}
+
+	/**
+	 * The fast per-frame drag primitive `resolveBoardDragTargets` feeds:
+	 * shifts the already-baked static GPU geometry for every one of
+	 * `targets.itemIds` by (dx, dy) with NO re-tessellation
+	 * (WebGLRenderer.translateStaticItems — see its own doc comment for
+	 * why a pure translation never needs one), then applies the same delta
+	 * to each of `targets.origins`' own `(at x y)` so the AST — undo
+	 * snapshots, save, everything downstream — agrees with what's on
+	 * screen. This is what actually fixes a footprint drag's "first move
+	 * is laggy, then fast" symptom: beginBoardDragPreview previously
+	 * needed a full static rebuild just to temporarily hide the dragged
+	 * footprint before the very first frame could even draw a preview;
+	 * this needs no such rebuild at any point during the drag.
+	 *
+	 * Returns false (and mutates NOTHING — not even the AST) if the
+	 * renderer doesn't support incremental translation at all (Canvas2D),
+	 * or if it does but some item in `targets.itemIds` can't be
+	 * incrementally shifted (see translateStaticItems' own doc comment on
+	 * when that happens) — the caller must fall back to
+	 * beginBoardDragPreview/translateBoardSelection/updateBoardDragPreview
+	 * for the rest of the gesture in that case.
+	 */
+	translateBoardDragFast(targets: { itemIds: string[]; origins: any[]; bboxOnlyItems: PaintedItem[] }, dx: number, dy: number): boolean {
+		if (this.documentType !== 'board' || (dx === 0 && dy === 0)) {
+			return false;
+		}
+		if (!this.webglRenderer || typeof this.webglRenderer.translateStaticItems !== 'function') {
+			return false;
+		}
+		if (!this.webglRenderer.translateStaticItems(targets.itemIds, dx, dy)) {
+			return false;
+		}
+		for (const el of targets.origins) {
+			const origin = el.getOrigin();
+			el.setOrigin(origin.x + dx, origin.y + dy, origin.rotation);
+		}
+		// The synthetic whole-footprint hit item(s) — see
+		// resolveBoardDragTargets' own comment on why these are handled
+		// separately from translateStaticItems: no real drawn geometry to
+		// shift on the GPU side, just a bbox/shape paintHighlightOverlay
+		// reads every frame to draw the selection outline. Without this,
+		// the outline would visibly freeze at the pre-drag position for the
+		// whole gesture instead of tracking it live.
+		for (const item of targets.bboxOnlyItems) {
+			item.bbox = { x: item.bbox.x + dx, y: item.bbox.y + dy, w: item.bbox.w, h: item.bbox.h };
+			if (item.shape.type === 'polygon') {
+				item.shape = { ...item.shape, points: item.shape.points.map(p => ({ x: p.x + dx, y: p.y + dy })) };
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Drag-END counterpart to translateBoardDragFast — refreshes the
+	 * LOGICAL scene data (hit-test bboxes, each PaintedItem's own draw()
+	 * closure) for everything the fast path touched, so a LATER full
+	 * rebuild triggered by something else entirely (toggling a layer,
+	 * editing a zone, anything) doesn't silently snap this back to its
+	 * pre-drag position: every PaintedItem's draw() closure still captures
+	 * whatever coordinates were current when IT was last built from the
+	 * AST — translateBoardDragFast's own per-frame calls kept the GPU
+	 * buffer and the AST itself correct throughout the drag, but never
+	 * touched these closures. Deliberately does NOT set geometryDirty —
+	 * the GPU buffer is already right; this only catches up the CPU-side
+	 * scene data to match it.
+	 */
+	commitBoardDragFast(targets: { itemIds: string[]; origins: any[]; bboxOnlyItems: PaintedItem[] }): void {
+		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+			return;
+		}
+		const footprintsToRefresh = new Set<any>();
+		for (const el of targets.origins) {
+			if (el instanceof KicadElementFootprint) {
+				footprintsToRefresh.add(el);
+				continue;
+			}
+			// A field/property — refresh its OWNING footprint instead (which
+			// also covers the field itself, since it lives inside it).
+			let owner: any = el.parent;
+			while (owner && !(owner instanceof KicadElementFootprint)) {
+				owner = owner.parent;
+			}
+			if (owner) {
+				footprintsToRefresh.add(owner);
+			}
+		}
+		for (const fp of footprintsToRefresh) {
+			this.painter.updateFootprintItems(this.scene, this.boardRoot, fp);
+		}
+		this.refreshRatsnestForFootprints(footprintsToRefresh);
 	}
 
 	get isRatsnestVisible(): boolean { return this.ratsnestVisible; }
@@ -2979,9 +3196,16 @@ export class KicadRenderSession {
 		if (netId === null || this.documentType !== 'board' || !this.boardRoot?.rootElement) {
 			return null;
 		}
-		const entry = this.boardRoot.rootElement.findChildrenByClass(KicadElementNet)
-			.find((net: KicadElementNet) => net.id === netId);
-		return entry?.netName ?? null;
+		if (!this.netNameCache) {
+			this.netNameCache = new Map();
+			for (const net of this.boardRoot.rootElement.findChildrenByClass(KicadElementNet)) {
+				const name = (net as KicadElementNet).netName;
+				if (name !== undefined) {
+					this.netNameCache.set((net as KicadElementNet).id, name);
+				}
+			}
+		}
+		return this.netNameCache.get(netId) ?? null;
 	}
 
 	/** Nearest ratsnest airwire ENDPOINT (an unrouted pad's exact world
@@ -3870,6 +4094,7 @@ export class KicadRenderSession {
 				const parseMs = performance.now() - t0;
 		const boardRoot = { rootElement };
 		this.boardRoot = boardRoot;
+		this.netNameCache = null;
 		const setup = rootElement.findFirstChildByName?.('setup') as any;
 		this.boardGridOrigin = readBoardOrigin(setup, 'grid_origin');
 		this.boardDrillPlaceOrigin = readBoardOrigin(setup, 'aux_axis_origin');
@@ -3970,6 +4195,7 @@ export class KicadRenderSession {
 		}
 		this.documentType = 'board';
 		this.boardRoot = fakeBoard;
+		this.netNameCache = null;
 		const previewScene: LayeredBoardScene = {
 			layersPresent: [...layerBuckets.keys()],
 			layerBuckets,
@@ -4575,6 +4801,55 @@ export class KicadRenderSession {
 			.map(zone => ({ outlinePoints: zone.getPolygon(), layers: zone.getLayers() }));
 	}
 
+	/** Real KiCad zones aren't required to carry a `(uuid ...)` child (see
+	 *  fillAllZones' own comment on the same gap) — a WeakMap keyed by the
+	 *  live zone OBJECT (not a per-call array index) guarantees the SAME
+	 *  zone always gets the SAME fallback id across every call this
+	 *  session, regardless of which enumeration (all zones vs. just the
+	 *  ones being filled this call) or index produced it. That stability
+	 *  matters here specifically because buildZonePriorityKnockouts
+	 *  matches "is this the zone I'm filling, or a different one" purely
+	 *  by this id string — two DIFFERENT zones colliding on the same id
+	 *  (impossible with this scheme) would wrongly treat them as the same
+	 *  zone; the same zone getting two DIFFERENT ids across two call sites
+	 *  (the actual risk with a naive per-call `_zonefill_${i}` scheme)
+	 *  would make it invisible to its own peer-list lookup. */
+	private static readonly zoneFallbackIds = new WeakMap<KicadElementZone, string>();
+	private static zoneFallbackIdCounter = 0;
+	private zoneJobId(zone: KicadElementZone): string {
+		const real = zone.getUuid();
+		if (real) {
+			return real;
+		}
+		let id = KicadRenderSession.zoneFallbackIds.get(zone);
+		if (!id) {
+			id = `__zonefill_${ KicadRenderSession.zoneFallbackIdCounter++ }`;
+			KicadRenderSession.zoneFallbackIds.set(zone, id);
+		}
+		return id;
+	}
+
+	/** Every OTHER fillable (non-rule-area) zone on the board, in the plain
+	 *  shape BoardZoneFill's buildZonePriorityKnockouts needs to resolve
+	 *  overlapping-zone priority — see that function's own doc comment.
+	 *  Mirrors keepoutZoneInputs' own pattern (board-wide by default, but a
+	 *  caller that already enumerated every zone this call — fillAllZones —
+	 *  can pass it in to avoid walking the AST twice). */
+	private zonePriorityInputs(allZones?: readonly KicadElementZone[]): OtherZoneInput[] {
+		const zones = allZones ?? (this.boardRoot?.rootElement.findChildrenByClass(
+			KicadElementZone) as KicadElementZone[] ?? []);
+		return zones
+			.filter(zone => !zone.isRuleArea() && zone.getPolygon().length >= 3)
+			.map(zone => ({
+				uuid: this.zoneJobId(zone),
+				netId: zone.getNetId(),
+				priority: zone.getPriority(),
+				layers: zone.getLayers(),
+				outlinePoints: zone.getPolygon(),
+				clearanceMm: zone.getClearance(),
+			}));
+	}
+
 	/** A copper zone's Pad Connections field (Thermal reliefs/Solid/Thru-hole
 	 *  only/None), plus the thermal-relief sizing BoardZoneFill's
 	 *  collectExclusionRingsMm needs to act on it — see that file's "Pad
@@ -4639,10 +4914,12 @@ export class KicadRenderSession {
 					netId: zone.getNetId(),
 					layers: zone.getLayers(),
 					clearanceMm: resolveZoneClearanceMm(zone, designSettings),
-					padConnection: this.zonePadConnectionSettings(zone)
+					priority: zone.getPriority(),
+					padConnection: this.zonePadConnectionSettings(zone),
+					islandRemoval: zone.getIslandRemovalMode()
 				}
 			],
-			this.scene, boardOutlineNm, extraExclusionsByLayer
+			this.scene, boardOutlineNm, extraExclusionsByLayer, this.zonePriorityInputs()
 		);
 		const results = await runJobs(jobs, onProgress);
 
@@ -4988,17 +5265,22 @@ export class KicadRenderSession {
 		);
 		// Real KiCad zones aren't required to carry a (uuid ...) child — it's
 		// an optional field many exported boards omit — so `getUuid()` alone
-		// isn't a safe job tag here. Use a synthetic per-call id for the
-		// duration of the fill-job/result-regrouping below; it's never
-		// written back onto the zone (setUuid is never called), only used to
-		// match each async job result back to the `fillable[i]` it came from.
-		const jobIds = fillable.map((zone, i) => zone.getUuid() ?? `__zonefill_${ i }`);
+		// isn't a safe job tag here. zoneJobId's WeakMap-backed fallback (not
+		// a per-call array index) is used for the duration of the fill-job/
+		// result-regrouping below so it stays consistent with
+		// zonePriorityInputs' own id for the same zone object (see
+		// zoneJobId's doc comment for why that consistency matters); it's
+		// never written back onto the zone (setUuid is never called).
+		const jobIds = fillable.map(zone => this.zoneJobId(zone));
 		const zoneInputs = fillable.map((zone, i) => ({
 			uuid: jobIds[i], outlinePoints: zone.getPolygon(), netId: zone.getNetId(),
 			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings),
-			padConnection: this.zonePadConnectionSettings(zone)
+			priority: zone.getPriority(),
+			padConnection: this.zonePadConnectionSettings(zone),
+			islandRemoval: zone.getIslandRemovalMode()
 		}));
-		const jobs = buildZoneFillJobs(zoneInputs, this.scene, boardOutlineNm, extraExclusionsByLayer);
+		const jobs = buildZoneFillJobs(
+			zoneInputs, this.scene, boardOutlineNm, extraExclusionsByLayer, this.zonePriorityInputs(zones));
 		const results = await runJobs(jobs, onProgress);
 
 		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
@@ -7748,21 +8030,31 @@ export class KicadRenderSession {
 					}
 				}
 			}
-			const paintActive = (viewBBox?: { x: number; y: number; w: number; h: number }) => {
+			const paintActive = (
+				viewBBox?: { x: number; y: number; w: number; h: number }, highlightSet: Set<string> = highlighted,
+			) => {
 				if (this.documentType === 'schematic') {
 					this.schematicPainter.paint(
-						this.schScene!, renderer, this.schLayerState, highlighted, this.highlightedNetIds, viewBBox);
+						this.schScene!, renderer, this.schLayerState, highlightSet, this.highlightedNetIds, viewBBox);
 				}
 				else {
 					this.painter.paint(
 						this.scene!, renderer, this.layerState, this.activeBoardLayer,
 						this.zoneDisplayMode,
-						highlighted,
+						highlightSet,
 						{ pad: this.padDisplayMode, via: this.viaDisplayMode, track: this.trackDisplayMode },
 						this.highlightedBoardNetId, viewBBox
 					);
 				}
 			};
+			// Board selection highlighting draws through paintHighlightOverlay's
+			// cheap per-frame DYNAMIC pass instead (see its own doc comment and
+			// the call site below) — so the STATIC build below must never bake
+			// a board selection color into its buffers, or every click-select
+			// would still force a full rebuild via geometryDirty regardless.
+			// Schematic selection is unchanged (still baked statically) — a
+			// separately-scoped follow-up, not touched here.
+			const staticHighlighted = this.documentType === 'board' ? new Set<string>() : highlighted;
 
 			if (renderer.beginStaticBuild) {
 				if (this.geometryDirty) {
@@ -7770,7 +8062,7 @@ export class KicadRenderSession {
 					// No viewBBox — this pass tessellates once into GPU buffers
 					// that then persist across pans/zooms, so it must capture
 					// everything, not just what's on-screen right now.
-					paintActive();
+					paintActive(undefined, staticHighlighted);
 					renderer.endStaticBuild!();
 					this.geometryDirty = false;
 				}
@@ -7812,6 +8104,19 @@ export class KicadRenderSession {
 			this.drawBoardDragPreview(renderer);
 			this.drawEditPreview(renderer);
 			this.drawBoardHighlight(renderer);
+			// The cheap per-frame counterpart to paint()'s static highlightOverlay
+			// — see paintHighlightOverlay's own doc comment for why selection no
+			// longer bakes into the static build above. WebGL only
+			// (renderer.beginStaticBuild): Canvas2D already redraws the whole
+			// scene every frame via paintActive()'s own (unchanged, full)
+			// `highlighted` set above, so this would just be a redundant
+			// second draw of the same already-yellow shape there.
+			if (this.documentType === 'board' && this.scene && renderer.beginStaticBuild) {
+				paintHighlightOverlay(
+					this.scene, renderer, this.selectedIds,
+					{ pad: this.padDisplayMode, via: this.viaDisplayMode, track: this.trackDisplayMode },
+				);
+			}
 			this.drawZoneEditHandles(renderer);
 			this.drawDimensionEditHandles(renderer);
 			this.drawSelectionResizeHandles(renderer);
@@ -7962,9 +8267,13 @@ export class KicadRenderSession {
 		const color = EDIT_PREVIEW_COLOR;
 		switch (p.kind) {
 			case 'wire': {
+				// computeWireBend (utils.ts) returns a plain {x,y} literal, not a
+				// real Vec2, to stay decoupled from the math module — wrap it
+				// here since Renderer.line() needs actual Vec2 instances.
 				const bend = computeWireBend(p.from, p.cursor, this.lineMode);
+				const bendPoint = bend ? new Vec2(bend.x, bend.y) : null;
 				renderer.line(
-					bend ? [p.from, bend, p.cursor] : [p.from, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
+					bendPoint ? [p.from, bendPoint, p.cursor] : [p.from, p.cursor], { strokeColor: color, strokeWidth: 0.15 });
 				break;
 			}
 			case 'line':

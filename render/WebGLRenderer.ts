@@ -103,10 +103,16 @@ interface ImageRecord {
  *    flipping the view do NOT touch this buffer at all — only the camera's
  *    view-matrix UNIFORM changes, and draw() just re-issues the same
  *    already-uploaded vertices against the new matrix. Rebuilt only when
- *    the actual scene content changes: layer visibility/opacity, selection
- *    highlight, or a new board loaded.
+ *    the actual scene content changes: layer visibility/opacity, or a new
+ *    board loaded — NOT board selection, which used to rebuild this whole
+ *    buffer just to recolor 1-2 items (the same cost as a fresh board
+ *    load, on every click) until it was moved to the dynamic tier below
+ *    (see BoardPainter.paintHighlightOverlay's doc comment). Schematic
+ *    selection is the one remaining exception, still baked in here —
+ *    unlike PCB boards, not yet moved to the dynamic path.
  *  - DYNAMIC: small per-frame content that genuinely changes every frame
- *    (the grid, ratsnest, drag/edit previews, selection highlight/handles).
+ *    (the grid, ratsnest, drag/edit previews, board selection highlight,
+ *    selection handles).
  *    Cheap enough to fully re-tessellate every frame since it's a few
  *    hundred shapes, not thousands of board items. Drawn in TWO passes —
  *    grid first via flush() (drawn behind everything, then the static
@@ -158,6 +164,31 @@ export class WebGLRenderer implements Renderer {
 	protected buildCommands: ({ kind: 'regular'; start: number; count: number } | { kind: 'stencil'; job: RawStencilJob } | { kind: 'image'; job: RawImageJob })[] = [];
 	protected pendingRegularStart = 0;
 	protected buildingStatic = false;
+
+	// Persistent CPU mirror of what's actually uploaded to
+	// staticPositionBuffer/staticColorBuffer — kept alive PAST
+	// endStaticBuild() (unlike buildPositions/buildColors, which reset for
+	// the next accumulation cycle) specifically so translateStaticItems()
+	// can mutate a small slice of it and re-upload just that slice via
+	// bufferSubData, without needing to re-run any item's draw() closure.
+	protected staticPositions: number[] = [];
+	protected staticColors: number[] = [];
+
+	// Per-item tracking for translateStaticItems() — see beginItem()'s own
+	// doc comment (Renderer.ts) for what this is for. Keyed by PaintedItem
+	// id, valid only until the next beginStaticBuild() (which clears it,
+	// since every array index it references is about to be invalidated).
+	protected itemRanges = new Map<string, { posStart: number; posEnd: number; stencilCmdIndices: number[]; hasImage: boolean }>();
+	protected currentItemId: string | null = null;
+	protected currentItemPosStart = 0;
+	protected currentItemStencilIndices: number[] = [];
+	protected currentItemHasImage = false;
+	// Raw (pre-bake) ring/color/bbox data for each baked stencil job, keyed
+	// by its OWN index into staticCommands — bakeStencilJob() only produces
+	// opaque GL buffers with no way to read their contents back (not
+	// cheaply possible in WebGL1), so translating a stencil job means
+	// re-deriving its geometry from this instead of the baked buffers.
+	protected stencilSourceByCommandIndex = new Map<number, RawStencilJob>();
 
 	protected currentOpacity = 1;
 	protected viewMatrix: Matrix3 = Matrix3.identity();
@@ -249,6 +280,37 @@ export class WebGLRenderer implements Renderer {
 		this.buildColors.length = 0;
 		this.buildCommands.length = 0;
 		this.pendingRegularStart = 0;
+		// Every array index itemRanges/stencilSourceByCommandIndex refers to
+		// is about to be invalidated by this rebuild — a stale entry left
+		// behind here would let a LATER translateStaticItems() call corrupt
+		// unrelated geometry it now happens to alias.
+		this.itemRanges.clear();
+		this.stencilSourceByCommandIndex.clear();
+		this.currentItemId = null;
+	}
+
+	/** See Renderer.beginItem's own doc comment. */
+	beginItem(id: string): void {
+		if (!this.buildingStatic) {
+			return;
+		}
+		this.currentItemId = id;
+		this.currentItemPosStart = this.buildPositions.length;
+		this.currentItemStencilIndices = [];
+		this.currentItemHasImage = false;
+	}
+
+	endItem(): void {
+		if (!this.buildingStatic || this.currentItemId === null) {
+			return;
+		}
+		this.itemRanges.set(this.currentItemId, {
+			posStart: this.currentItemPosStart,
+			posEnd: this.buildPositions.length,
+			stencilCmdIndices: this.currentItemStencilIndices,
+			hasImage: this.currentItemHasImage,
+		});
+		this.currentItemId = null;
 	}
 
 	/** Closes out whatever regular-geometry range has accumulated since the
@@ -283,15 +345,104 @@ export class WebGLRenderer implements Renderer {
 				gl.deleteBuffer(cmd.job.texCoordBuffer);
 			}
 		}
-		this.staticCommands = this.buildCommands.map(cmd =>
-			cmd.kind === 'stencil' ? { kind: 'stencil', job: this.bakeStencilJob(cmd.job) }
-				: cmd.kind === 'image' ? { kind: 'image', job: this.bakeImageJob(cmd.job) }
-					: cmd);
+		this.staticCommands = this.buildCommands.map((cmd, index) => {
+			if (cmd.kind === 'stencil') {
+				// Kept around (not just the baked GL buffers) so
+				// translateStaticItems() can shift + re-tessellate this
+				// job's own small geometry later without needing to read
+				// GPU buffer contents back.
+				this.stencilSourceByCommandIndex.set(index, cmd.job);
+				return { kind: 'stencil' as const, job: this.bakeStencilJob(cmd.job) };
+			}
+			if (cmd.kind === 'image') {
+				return { kind: 'image' as const, job: this.bakeImageJob(cmd.job) };
+			}
+			return cmd;
+		});
+
+		// buildPositions/buildColors become the persistent CPU mirror of
+		// what was just uploaded (see the fields' own doc comment) — a
+		// FRESH array for the next accumulation cycle, not a clear of this
+		// one, since a translateStaticItems() call can happen at any later
+		// time, long before the next beginStaticBuild() touches these again.
+		this.staticPositions = this.buildPositions;
+		this.staticColors = this.buildColors;
+		this.buildPositions = [];
+		this.buildColors = [];
 
 		this.buildingStatic = false;
-		this.buildPositions.length = 0;
-		this.buildColors.length = 0;
 		this.buildCommands.length = 0;
+	}
+
+	/**
+	 * See Renderer.translateStaticItems's own doc comment. All-or-nothing:
+	 * if ANY of the given ids can't be translated incrementally (never
+	 * part of a static build, or carries baked image geometry this
+	 * implementation doesn't support shifting), nothing is mutated and this
+	 * returns false — a caller falling back to a full rebuild on partial
+	 * failure must not also be left with SOME items already moved.
+	 */
+	translateStaticItems(ids: Iterable<string>, dx: number, dy: number): boolean {
+		const ranges: { posStart: number; posEnd: number; stencilCmdIndices: number[] }[] = [];
+		for (const id of ids) {
+			const range = this.itemRanges.get(id);
+			if (!range || range.hasImage) {
+				return false;
+			}
+			ranges.push(range);
+		}
+		if (ranges.length === 0) {
+			return true;
+		}
+		const gl = this.gl;
+		gl.bindBuffer(gl.ARRAY_BUFFER, this.staticPositionBuffer);
+		for (const range of ranges) {
+			if (range.posEnd <= range.posStart) {
+				continue;
+			}
+			for (let i = range.posStart; i < range.posEnd; i += 2) {
+				this.staticPositions[i] = this.staticPositions[i]! + dx;
+				this.staticPositions[i + 1] = this.staticPositions[i + 1]! + dy;
+			}
+			// Float32 = 4 bytes; posStart/posEnd are already flat float
+			// indices (x,y pairs), not vertex counts.
+			const byteOffset = range.posStart * 4;
+			gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, new Float32Array(this.staticPositions.slice(range.posStart, range.posEnd)));
+			for (const cmdIndex of range.stencilCmdIndices) {
+				this.retranslateStencilJob(cmdIndex, dx, dy);
+			}
+		}
+		return true;
+	}
+
+	/** Re-derives one stencil job's geometry shifted by (dx, dy) from its
+	 *  retained raw source (see stencilSourceByCommandIndex's own doc
+	 *  comment) and re-bakes it — cheap, since one job is always a single
+	 *  small shape (a zone fill region, a custom pad, a concave graphic),
+	 *  never the whole board. Updates the retained source too, so a SECOND
+	 *  translateStaticItems() call later in the same drag composes
+	 *  correctly instead of re-deriving from the original (now stale)
+	 *  position. */
+	protected retranslateStencilJob(cmdIndex: number, dx: number, dy: number): void {
+		const cmd = this.staticCommands[cmdIndex];
+		if (!cmd || cmd.kind !== 'stencil') {
+			return;
+		}
+		const source = this.stencilSourceByCommandIndex.get(cmdIndex);
+		if (!source) {
+			return;
+		}
+		const shifted: RawStencilJob = {
+			rings: source.rings.map(ring => ring.map(p => new Vec2(p.x + dx, p.y + dy))),
+			color: source.color,
+			minX: source.minX + dx, minY: source.minY + dy,
+			maxX: source.maxX + dx, maxY: source.maxY + dy,
+		};
+		const gl = this.gl;
+		gl.deleteBuffer(cmd.job.fanPositionBuffer);
+		gl.deleteBuffer(cmd.job.quadPositionBuffer);
+		this.staticCommands[cmdIndex] = { kind: 'stencil', job: this.bakeStencilJob(shifted) };
+		this.stencilSourceByCommandIndex.set(cmdIndex, shifted);
 	}
 
 	protected bakeStencilJob(job: RawStencilJob): CachedStencilJob {
@@ -378,7 +529,7 @@ export class WebGLRenderer implements Renderer {
 			this.pushCircleFan(center.x, center.y, radius, style.fillColor);
 		}
 		if (this.wantsStroke(style)) {
-			const ring = circlePoints(center, radius, circleSegments);
+			const ring = circlePoints(center, radius, segmentsForRadius(radius, MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS));
 			this.pushStrokePolyline(ring, style.strokeColor!, style.strokeWidth!, true);
 		}
 	}
@@ -388,7 +539,8 @@ export class WebGLRenderer implements Renderer {
 			return;
 		}
 		const points: Vec2[] = [];
-		const steps = Math.max(4, Math.ceil((Math.abs(endAngleRad - startAngleRad) / (Math.PI * 2)) * circleSegments));
+		const fullCircleSegments = segmentsForRadius(radius, MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS);
+		const steps = Math.max(4, Math.ceil((Math.abs(endAngleRad - startAngleRad) / (Math.PI * 2)) * fullCircleSegments));
 		for (let i = 0; i <= steps; i++) {
 			const t = startAngleRad + ((endAngleRad - startAngleRad) * i) / steps;
 			points.push(new Vec2(center.x + radius * Math.cos(t), center.y + radius * Math.sin(t)));
@@ -430,6 +582,9 @@ export class WebGLRenderer implements Renderer {
 		// of drawing all textures in a final overlay pass.
 		this.flushPendingRegular();
 		this.buildCommands.push({ kind: 'image', job: { texture, x: topLeft.x, y: topLeft.y, width, height, corners, opacity: this.currentOpacity } });
+		if (this.currentItemId !== null) {
+			this.currentItemHasImage = true;
+		}
 	}
 
 	protected loadImage(source: EmbeddedImage): ImageRecord {
@@ -483,7 +638,32 @@ export class WebGLRenderer implements Renderer {
 			// color handling.
 			const [r, g, b, colorAlpha] = parseColor(style.fillColor);
 			const color: [number, number, number, number] = [r, g, b, colorAlpha * this.currentOpacity];
-			if (this.buildingStatic) {
+			// A single convex ring (rect/roundrect/oval/trapezoid pad outlines —
+			// the overwhelming majority of real pad shapes; a rounded-rect SMD
+			// footprint library alone typically outnumbers plain circular pads
+			// several times over) never needs the stencil-buffer "stencil, then
+			// cover" technique below, which exists for arbitrary (possibly
+			// concave/self-intersecting/multi-ring-with-holes) shapes — a
+			// straight fan triangulation from the ring's own first point is
+			// exactly as correct for any convex polygon and, critically, merges
+			// into the SAME single big batched buffer/draw call every other
+			// plain triangle (including circular pads' own fans) already uses,
+			// instead of costing a dedicated 2-draw-plus-~10-state-change GPU
+			// job that (in the static-build case) gets replayed EVERY FRAME by
+			// flush(), or (in the dynamic case) rebuilds its own throwaway
+			// buffers every frame. On a real board with hundreds to thousands
+			// of roundrect pads plus dozens of zone fill regions, skipping this
+			// avoids the dominant cost of steady-state WebGL rendering — a real
+			// board's trace showed the GPU process pegged at ~70k GPU
+			// commands/sec (~1300/frame), almost entirely from replaying one
+			// stencil job per non-circular pad/zone-fill-region every frame.
+			if (usableRings.length === 1 && isConvexPolygon(usableRings[0]!)) {
+				const ring = usableRings[0]!;
+				for (let i = 1; i < ring.length - 1; i++) {
+					this.pushTriangle(ring[0]!, ring[i]!, ring[i + 1]!, color);
+				}
+			}
+			else if (this.buildingStatic) {
 				let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 				for (const ring of usableRings) {
 					for (const p of ring) {
@@ -496,6 +676,9 @@ export class WebGLRenderer implements Renderer {
 				// paint-order position instead of getting bucketed separately.
 				this.flushPendingRegular();
 				this.buildCommands.push({ kind: 'stencil', job: { rings: usableRings, color, minX, minY, maxX, maxY } });
+				if (this.currentItemId !== null) {
+					this.currentItemStencilIndices.push(this.buildCommands.length - 1);
+				}
 			}
 			else {
 				// Outside a static build (grid/ratsnest/drag-preview/edit-
@@ -506,12 +689,12 @@ export class WebGLRenderer implements Renderer {
 				// dynamic/overlay draw path (uploadAndDrawDynamic/
 				// flushOverlay) only ever looks at buildPositions/
 				// buildColors. Any filled multiPolygon reached this way
-				// (which is most real pad shapes — rect/roundrect/oval/
-				// custom all fill via polygon()→multiPolygon(), only plain
-				// circular pads take the direct pushCircleFan path instead)
-				// was therefore silently never drawn — confirmed as why a
-				// dragged footprint's pads disappeared during the live
-				// preview. See drawImmediateStencilFill's doc comment.
+				// (concave/multi-ring shapes only now — convex single-ring ones
+				// take the fast path above) was, before that fast path existed,
+				// why a dragged footprint's non-circular pads disappeared during
+				// the live preview — see drawImmediateStencilFill's doc comment.
+				// Still needed for genuinely concave/multi-ring cases (most zone
+				// fills, custom pad shapes).
 				this.drawImmediateStencilFill(usableRings, color);
 			}
 		}
@@ -712,7 +895,7 @@ export class WebGLRenderer implements Renderer {
 	protected pushCircleFan(cx: number, cy: number, radius: number, colorStr: string): void {
 		const color = parseColor(colorStr);
 		const center = new Vec2(cx, cy);
-		const ring = circlePoints(center, radius, circleSegments);
+		const ring = circlePoints(center, radius, segmentsForRadius(radius, MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS));
 		for (let i = 0; i < ring.length; i++) {
 			const next = ring[(i + 1) % ring.length]!;
 			this.pushTriangle(center, ring[i]!, next, color);
@@ -777,6 +960,7 @@ export class WebGLRenderer implements Renderer {
 	protected pushSemicircleFanColor(cx: number, cy: number, radius: number, centerAngleRad: number, color: [number, number, number, number]): void {
 		const center = new Vec2(cx, cy);
 		const startAngle = centerAngleRad - Math.PI / 2;
+		const capSegments = jointSegmentsForRadius(radius) / 2;
 		const points: Vec2[] = [];
 		for (let i = 0; i <= capSegments; i++) {
 			const t = startAngle + (Math.PI * i) / capSegments;
@@ -789,7 +973,7 @@ export class WebGLRenderer implements Renderer {
 
 	protected pushCircleFanColor(cx: number, cy: number, radius: number, color: [number, number, number, number]): void {
 		const center = new Vec2(cx, cy);
-		const ring = circlePoints(center, radius, jointSegments);
+		const ring = circlePoints(center, radius, jointSegmentsForRadius(radius));
 		for (let i = 0; i < ring.length; i++) {
 			const next = ring[(i + 1) % ring.length]!;
 			this.pushTriangle(center, ring[i]!, next, color);
@@ -797,13 +981,91 @@ export class WebGLRenderer implements Renderer {
 	}
 }
 
-// Real circles people look at closely (pad/via/hole bodies).
-const circleSegments = 24;
-// Tiny fans at stroke joints/caps — coarser is fine since they're a couple
-// pixels across, but needs to be even so CAP_SEGMENTS (half of it) stays a
-// whole number of segments spanning exactly 180 degrees.
-const jointSegments = 8;
-const capSegments = jointSegments / 2;
+// Real circles people look at closely (pad/via/hole bodies) — up to a real
+// circle's worth of segments (MAX_CIRCLE_SEGMENTS); MIN_CIRCLE_SEGMENTS is
+// the floor for a drilled-hole-sized circle too small to need that many.
+const MIN_CIRCLE_SEGMENTS = 8;
+const MAX_CIRCLE_SEGMENTS = 24;
+// Tiny fans at stroke joints/caps — coarser is fine since they're often
+// just a couple pixels across (see segmentsForRadius). Both bounds must
+// stay even so half of one (a cap) is still a whole number of segments
+// spanning exactly 180 degrees.
+const MIN_JOINT_SEGMENTS = 4;
+const MAX_JOINT_SEGMENTS = 8;
+
+/**
+ * Static geometry is baked once at load time, independent of camera zoom
+ * (see beginStaticBuild's own doc comment) — so segment count can't adapt
+ * to "how zoomed-in is the user right now" the way some tools do. It CAN
+ * adapt to the primitive's own world-space size, which is fixed and known
+ * at bake time: a stroke joint on a 0.1mm-wide hatch line has a
+ * 0.05mm radius — a couple of screen pixels even at extreme zoom — and
+ * never needs anywhere near a real via/pad's segment count to look round.
+ * Chooses the fewest segments (within [minSegments, maxSegments]) whose
+ * worst-case deviation from a true circle (the "sagitta",
+ * radius * (1 - cos(pi/n))) stays under MAX_SAGITTA_MM — small enough to
+ * be imperceptible at any zoom a user would actually view a board at, but
+ * loose enough that a real via/pad radius (~0.3-1mm+) still lands at or
+ * near maxSegments, matching this file's previous fixed-24-segment look
+ * for the shapes people actually zoom in on.
+ */
+const MAX_SAGITTA_MM = 0.008;
+
+function segmentsForRadius(radius: number, minSegments: number, maxSegments: number): number {
+	if (radius <= 0) {
+		return minSegments;
+	}
+	const ratio = MAX_SAGITTA_MM / radius;
+	if (ratio >= 2) {
+		// Sagitta budget exceeds the whole diameter — any segment count
+		// clears it, so there's nothing to solve for; use the floor.
+		return minSegments;
+	}
+	const n = Math.PI / Math.acos(1 - ratio);
+	return Math.min(maxSegments, Math.max(minSegments, Math.ceil(n)));
+}
+
+/** Joint/cap segment count for a stroke of this radius (half-width),
+ * rounded up to even so a cap fan (half of this) stays a whole number —
+ * see MIN_JOINT_SEGMENTS/MAX_JOINT_SEGMENTS's own doc comment. */
+function jointSegmentsForRadius(radius: number): number {
+	const n = segmentsForRadius(radius, MIN_JOINT_SEGMENTS, MAX_JOINT_SEGMENTS);
+	return n % 2 === 0 ? n : n + 1;
+}
+
+/** Cross-product-sign-consistency check: true iff every consecutive vertex
+ *  triple turns the same way (all-left or all-right), i.e. the ring is a
+ *  simple convex polygon with no self-intersections. Collinear triples
+ *  (zero cross product — e.g. two points along a straight pad edge) are
+ *  skipped rather than treated as a turn, so a convex shape whose
+ *  tessellation happens to include collinear points (most roundrect/oval/
+ *  trapezoid pad outlines do) doesn't get misclassified as non-convex. Used
+ *  by multiPolygon() to route convex single-ring fills through the cheap
+ *  fan-triangulation path instead of the stencil-buffer technique the
+ *  latter exists for arbitrary (possibly concave/self-intersecting) shapes
+ *  — never actually needed for a shape this check accepts. */
+function isConvexPolygon(ring: Vec2[]): boolean {
+	if (ring.length < 3) {
+		return false;
+	}
+	let sign = 0;
+	const n = ring.length;
+	for (let i = 0; i < n; i++) {
+		const a = ring[i]!, b = ring[(i + 1) % n]!, c = ring[(i + 2) % n]!;
+		const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+		if (Math.abs(cross) < 1e-9) {
+			continue;
+		}
+		const s = cross > 0 ? 1 : -1;
+		if (sign === 0) {
+			sign = s;
+		}
+		else if (s !== sign) {
+			return false;
+		}
+	}
+	return sign !== 0;
+}
 
 function circlePoints(center: Vec2, radius: number, segments: number): Vec2[] {
 	const points: Vec2[] = [];

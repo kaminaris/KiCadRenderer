@@ -1,5 +1,6 @@
 import { Vec2 } from '../math/Vec2';
-import { distanceToSegment, pointInPolygon } from './PaintedShape';
+import { distanceToSegment, pointInPolygon, shapesOverlap } from './PaintedShape';
+import type { PaintedShape } from './PaintedShape';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 
 export interface CopperGraphNode {
@@ -104,6 +105,13 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		? scene.copperLayerStack
 		: scene.layersPresent.filter(layer => layer.endsWith('.Cu'));
 	const padNodes = new Map<any, number[]>();
+	// Same-net, same-layer pads whose own copper shapes physically overlap
+	// (e.g. a footprint's big annular "via ring" pad overlapping a ring of
+	// smaller contact pads around it — MountingHole_*_Pad_Via footprints on
+	// a real board did exactly this) are ONE continuous piece of copper,
+	// not two isolated islands needing a track/zone to bridge them — see
+	// the overlap-union pass below, after the main loop populates this.
+	const padShapesByNetLayer = new Map<string, { index: number; shape: PaintedShape; element: any }[]>();
 	// Iterates every layer-bucket item, not just scene.hitTestItems — track
 	// ARCS (length-tuning/meander rounded corners) are deliberately not
 	// hit-testable (see buildTrackArc's doc comment) but still need to
@@ -138,6 +146,10 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 			for (const sibling of siblings) union(index, sibling);
 			siblings.push(index);
 			padNodes.set(item.element, siblings);
+			const key = bucketKey(netId, item.layer);
+			const shapeBucket = padShapesByNetLayer.get(key) ?? [];
+			shapeBucket.push({ index, shape: item.shape, element: item.element });
+			padShapesByNetLayer.set(key, shapeBucket);
 		}
 		else if (item.kind === 'via') {
 			const requested: string[] = typeof item.element?.getLayers === 'function'
@@ -160,6 +172,33 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 			for (let i = 1; i < viaNodes.length; i++) union(viaNodes[0]!, viaNodes[i]!);
 		}
 	}
+	}
+
+	// Pad-to-pad shape overlap: two DIFFERENT pads of the same net/layer
+	// whose own copper shapes physically touch are one continuous piece of
+	// copper — real KiCad's own connectivity engine does real shape
+	// collision, not just point tests, for exactly this reason (a
+	// footprint's own pads are ordinary board copper to it, same as any
+	// other item). This app's own pad handling above only ever unions
+	// different LAYERS of the SAME pad element (a thru-hole pad's own F.Cu/
+	// B.Cu taps) — two DIFFERENT pads (even of the same footprint) were
+	// never tested against each other at all, so a deliberately-overlapping
+	// pad pattern (an annular "via ring" pad overlapping a ring of smaller
+	// contact pads around it, both same net) showed a spurious ratsnest
+	// airwire between them despite being solid, continuous, already-
+	// connected copper. O(n²) per net+layer bucket, same complexity class
+	// as the existing node/segment touching pass just below — pad counts
+	// sharing one net on one layer are small in practice (this bug's own
+	// real-board repro case was 9), so this stays cheap.
+	for (const bucket of padShapesByNetLayer.values()) {
+		for (let i = 0; i < bucket.length; i++) {
+			for (let j = i + 1; j < bucket.length; j++) {
+				if (bucket[i]!.element === bucket[j]!.element) continue; // already unioned via padNodes above
+				if (shapesOverlap(bucket[i]!.shape, bucket[j]!.shape)) {
+					union(bucket[i]!.index, bucket[j]!.index);
+				}
+			}
+		}
 	}
 
 	// Join touching copper on the same layer, including T-branches whose
