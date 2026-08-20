@@ -1,5 +1,5 @@
 import { Vec2 } from '../math/Vec2';
-import { distanceToSegment, pointInPolygon, shapesOverlap } from './PaintedShape';
+import { distanceToSegment, pointInPolygon, shapeContainsPoint, shapesOverlap } from './PaintedShape';
 import type { PaintedShape } from './PaintedShape';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 
@@ -70,6 +70,7 @@ export interface CopperGraph {
 export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlySet<number>): CopperGraph {
 	const nodes: CopperGraphNode[] = [];
 	const segments: CopperGraphSegment[] = [];
+	const nodeCopperShapes = new Map<number, PaintedShape>();
 	const parent: number[] = [];
 	const adjacency: number[][] = [];
 	const addNode = (point: Vec2, layer: string, netId: number, itemId: string, itemKind: CopperGraphNode['itemKind']): number => {
@@ -114,7 +115,7 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	// a real board did exactly this) are ONE continuous piece of copper,
 	// not two isolated islands needing a track/zone to bridge them — see
 	// the overlap-union pass below, after the main loop populates this.
-	const padShapesByNetLayer = new Map<string, { index: number; shape: PaintedShape; element: any }[]>();
+	const padShapesByNetLayer = new Map<string, { index: number; shape: PaintedShape; bbox: PaintedItem['bbox']; element: any }[]>();
 	// Iterates every layer-bucket item, not just scene.hitTestItems — track
 	// ARCS (length-tuning/meander rounded corners) are deliberately not
 	// hit-testable (see buildTrackArc's doc comment) but still need to
@@ -145,13 +146,14 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		}
 		else if (item.kind === 'pad' && item.layer.endsWith('.Cu')) {
 			const index = addNode(centerOf(item), item.layer, netId, item.id, 'pad');
+			nodeCopperShapes.set(index, item.shape);
 			const siblings = padNodes.get(item.element) ?? [];
 			for (const sibling of siblings) union(index, sibling);
 			siblings.push(index);
 			padNodes.set(item.element, siblings);
 			const key = bucketKey(netId, item.layer);
 			const shapeBucket = padShapesByNetLayer.get(key) ?? [];
-			shapeBucket.push({ index, shape: item.shape, element: item.element });
+			shapeBucket.push({ index, shape: item.shape, bbox: item.bbox, element: item.element });
 			padShapesByNetLayer.set(key, shapeBucket);
 		}
 		else if (item.kind === 'via') {
@@ -171,7 +173,11 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 			const layers = indices.length >= 2
 				? copperLayers.slice(Math.min(...indices), Math.max(...indices) + 1)
 				: explicit;
-			const viaNodes = layers.map(layer => addNode(centerOf(item), layer, netId, item.id, 'via'));
+			const viaNodes = layers.map(layer => {
+				const index = addNode(centerOf(item), layer, netId, item.id, 'via');
+				nodeCopperShapes.set(index, item.shape);
+				return index;
+			});
 			for (let i = 1; i < viaNodes.length; i++) union(viaNodes[0]!, viaNodes[i]!);
 		}
 	}
@@ -293,6 +299,66 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		}
 	}
 
+	// A track is allowed to terminate anywhere on a pad's copper, not only
+	// at its geometric centre.  The node graph deliberately gives every pad
+	// one representative centre node, so the regular node-to-segment pass
+	// above cannot discover this otherwise.  Query the existing segment grid
+	// by the actual pad bounds, then test both track endpoints against the
+	// pad's real shape (including the track half-width).  The zero-width
+	// overlap test also covers a segment crossing a pad without an endpoint
+	// inside it.  This is the same copper-contact rule for SMD and THT pads
+	// and avoids the old "must touch the pad centre" ratsnest artefact.
+	const seenPadSegments = new Uint32Array(segments.length);
+	let padSegmentVisit = 0;
+	for (const [key, pads] of padShapesByNetLayer) {
+		for (const pad of pads) {
+			// Vias are copper discs too.  A via may sit anywhere inside a pad's
+			// annulus (via-in-pad / via stitching), so matching only its centre
+			// against the pad-centre graph node leaves a false ratsnest even
+			// though their copper overlaps.  Node grid entries are layer-aware,
+			// therefore this also correctly joins a through-pad to the via's
+			// internal-layer taps without shorting an SMD pad to other layers.
+			const padMin = gridCell(pad.bbox.x - CONNECT_EPSILON_MM, pad.bbox.y - CONNECT_EPSILON_MM);
+			const padMax = gridCell(
+				pad.bbox.x + pad.bbox.w + CONNECT_EPSILON_MM,
+				pad.bbox.y + pad.bbox.h + CONNECT_EPSILON_MM,
+			);
+			for (let x = padMin.x; x <= padMax.x; x++) {
+				for (let y = padMin.y; y <= padMax.y; y++) {
+					for (const nodeIndex of nodeGrid.get(gridKey(key, x, y)) ?? []) {
+						const node = nodes[nodeIndex]!;
+						if (node.itemKind === 'via'
+							&& shapeContainsPoint(pad.shape, node.point.x, node.point.y, CONNECT_EPSILON_MM)) {
+							union(pad.index, nodeIndex);
+						}
+					}
+				}
+			}
+
+			padSegmentVisit++;
+			for (let x = padMin.x; x <= padMax.x; x++) {
+				for (let y = padMin.y; y <= padMax.y; y++) {
+					for (const segmentIndex of segmentGrid.get(gridKey(key, x, y)) ?? []) {
+						if (seenPadSegments[segmentIndex] === padSegmentVisit) continue;
+						seenPadSegments[segmentIndex] = padSegmentVisit;
+						const segment = segments[segmentIndex]!;
+						const a = nodes[segment.a]!.point;
+						const b = nodes[segment.b]!.point;
+						const tolerance = segment.width / 2 + CONNECT_EPSILON_MM;
+						const crossesPad = shapesOverlap(pad.shape, {
+							type: 'segment', x1: a.x, y1: a.y, x2: b.x, y2: b.y, width: 0,
+						});
+						if (crossesPad
+							|| shapeContainsPoint(pad.shape, a.x, a.y, tolerance)
+							|| shapeContainsPoint(pad.shape, b.x, b.y, tolerance)) {
+							union(pad.index, segment.a);
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Zone-fill connectivity: a copper pour joins every same-net pad/via/
 	// track on the layer(s) it pours onto, exactly like touching copper —
 	// this is the dominant connection for a GND/power plane, which is
@@ -305,10 +371,19 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		const key = bucketKey(fill.netId, fill.layer);
 		const bucketNodes = nodeBuckets.get(key);
 		if (!bucketNodes) continue;
+		const fillShape: PaintedShape = { type: 'polygon', points: fill.points, closed: true };
 		let first: number | null = null;
 		for (const nodeIndex of bucketNodes) {
 			const point = nodes[nodeIndex]!.point;
-			if (!pointInPolygon(fill.points, point.x, point.y)) continue;
+			// A via's centre can legitimately sit just outside a poured area
+			// while its annular ring touches the pour (common at a zone edge),
+			// as can a large/offset pad.  Centre-only tests miss that real
+			// copper contact and produce an invalid airwire.  Tracks retain
+			// their endpoint point test here; pads/vias carry their actual
+			// filled copper shape in nodeCopperShapes.
+			const copperShape = nodeCopperShapes.get(nodeIndex);
+			if (!pointInPolygon(fill.points, point.x, point.y)
+				&& (!copperShape || !shapesOverlap(fillShape, copperShape))) continue;
 			if (first === null) first = nodeIndex;
 			else union(first, nodeIndex);
 		}
