@@ -1,4 +1,4 @@
-import { KicadParser } from '@kicad-io/KicadParser';
+import { KicadParser }                   from '@kicad-io/KicadParser';
 import { repairLegacyMalformedZoneText } from './utils';
 
 /** Parse a generic KiCad S-expression string into the AST used by the

@@ -1,8 +1,16 @@
 import { Vec2 } from '../math/Vec2';
-import { distanceToSegment, pointInPolygon, shapeContainsPoint, shapesOverlap } from './PaintedShape';
+import { distanceToSegment, pointInPolygon, shapeToBBox, shapesOverlap } from './PaintedShape';
 import type { PaintedShape } from './PaintedShape';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 
+/**
+ * KiCad connectivity design adaptation. Based on pcbnew/connectivity/
+ * connectivity_algo.cpp, connectivity_items.h, and connectivity_rtree.h
+ * (KiCad Developers; GPLv2-or-later). This TypeScript implementation keeps
+ * KiOnline's scene adapter and union-find representation, while adopting
+ * KiCad's item-level, layer-aware copper-contact model and per-filled-zone
+ * island semantics. Distributed under GPLv3-or-later with this derivative.
+ */
 const CONNECT_EPSILON_MM = 0.02;
 const CONNECT_GRID_CELL_MM = 2;
 
@@ -16,7 +24,7 @@ export interface CopperGraphNode {
 	 *  (it's one physical via); a through-hole pad similarly contributes
 	 *  one node per copper layer it appears on. */
 	itemId: string;
-	itemKind: 'track' | 'pad' | 'via';
+	itemKind: 'track' | 'pad' | 'via' | 'graphic';
 }
 
 export interface CopperGraphSegment {
@@ -68,9 +76,15 @@ export interface CopperGraph {
  * expensive union-find/nearest-neighbor work for everything else.
  */
 export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlySet<number>): CopperGraph {
+	const activeNetFilter = netFilter ? expandNetFilterForJumpers(scene, netFilter) : undefined;
 	const nodes: CopperGraphNode[] = [];
 	const segments: CopperGraphSegment[] = [];
-	const nodeCopperShapes = new Map<number, PaintedShape>();
+	// One actual copper item per layer, rather than one entry for every
+	// topological endpoint.  Tracks have two endpoint nodes but only one
+	// physical copper body; indexing both multiplied dense-board collision
+	// candidates by four without discovering any extra contacts.
+	const copperContacts: Array<{ node: number; shape: PaintedShape }> = [];
+	const nodeCopperShapes = new Map<number, PaintedShape[]>();
 	const parent: number[] = [];
 	const adjacency: number[][] = [];
 	const addNode = (point: Vec2, layer: string, netId: number, itemId: string, itemKind: CopperGraphNode['itemKind']): number => {
@@ -79,6 +93,12 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		parent.push(index);
 		adjacency.push([]);
 		return index;
+	};
+	const addCopperContact = (node: number, shape: PaintedShape): void => {
+		const shapes = nodeCopperShapes.get(node);
+		if (shapes) shapes.push(shape);
+		else nodeCopperShapes.set(node, [shape]);
+		copperContacts.push({ node, shape });
 	};
 	const find = (index: number): number => {
 		while (parent[index] !== index) {
@@ -109,13 +129,7 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		? scene.copperLayerStack
 		: scene.layersPresent.filter(layer => layer.endsWith('.Cu'));
 	const padNodes = new Map<any, number[]>();
-	// Same-net, same-layer pads whose own copper shapes physically overlap
-	// (e.g. a footprint's big annular "via ring" pad overlapping a ring of
-	// smaller contact pads around it — MountingHole_*_Pad_Via footprints on
-	// a real board did exactly this) are ONE continuous piece of copper,
-	// not two isolated islands needing a track/zone to bridge them — see
-	// the overlap-union pass below, after the main loop populates this.
-	const padShapesByNetLayer = new Map<string, { index: number; shape: PaintedShape; bbox: PaintedItem['bbox']; element: any }[]>();
+	const footprintPadNodes = new Map<any, Map<string, number[]>>();
 	// Iterates every layer-bucket item, not just scene.hitTestItems — track
 	// ARCS (length-tuning/meander rounded corners) are deliberately not
 	// hit-testable (see buildTrackArc's doc comment) but still need to
@@ -125,10 +139,11 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	for (const item of items) {
 		const netId = item.netId ?? null;
 		if (netId === null || netId <= 0) continue;
-		if (netFilter && !netFilter.has(netId)) continue;
+		if (activeNetFilter && !activeNetFilter.has(netId)) continue;
 		if (item.kind === 'track' && item.shape.type === 'segment') {
 			const a = addNode(new Vec2(item.shape.x1, item.shape.y1), item.layer, netId, item.id, 'track');
 			const b = addNode(new Vec2(item.shape.x2, item.shape.y2), item.layer, netId, item.id, 'track');
+			addCopperContact(a, item.shape);
 			union(a, b);
 			segments.push({ a, b, layer: item.layer, netId, width: item.shape.width });
 		}
@@ -141,20 +156,35 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 			const width = typeof item.element.getWidth === 'function' ? item.element.getWidth() : 0.25;
 			const a = addNode(new Vec2(start.x, start.y), item.layer, netId, item.id, 'track');
 			const b = addNode(new Vec2(end.x, end.y), item.layer, netId, item.id, 'track');
+			if (typeof item.element.getArcCenterRadiusAngles === 'function') {
+				const arcShape = sweptArcShape(item.element.getArcCenterRadiusAngles(), width);
+				if (arcShape) {
+					addCopperContact(a, arcShape);
+				}
+			}
 			union(a, b);
 			segments.push({ a, b, layer: item.layer, netId, width });
 		}
 		else if (item.kind === 'pad' && item.layer.endsWith('.Cu')) {
 			const index = addNode(centerOf(item), item.layer, netId, item.id, 'pad');
-			nodeCopperShapes.set(index, item.shape);
+			addCopperContact(index, item.shape);
 			const siblings = padNodes.get(item.element) ?? [];
 			for (const sibling of siblings) union(index, sibling);
 			siblings.push(index);
 			padNodes.set(item.element, siblings);
-			const key = bucketKey(netId, item.layer);
-			const shapeBucket = padShapesByNetLayer.get(key) ?? [];
-			shapeBucket.push({ index, shape: item.shape, bbox: item.bbox, element: item.element });
-			padShapesByNetLayer.set(key, shapeBucket);
+			const footprint = item.element?.parent;
+			const padNumber = String(item.element?.padNumber ?? '');
+			if (footprint && padNumber) {
+				const byNumber = footprintPadNodes.get(footprint) ?? new Map<string, number[]>();
+				const padLayerNodes = byNumber.get(padNumber) ?? [];
+				padLayerNodes.push(index);
+				byNumber.set(padNumber, padLayerNodes);
+				footprintPadNodes.set(footprint, byNumber);
+			}
+		}
+		else if (item.kind === 'graphic' && item.layer.endsWith('.Cu')) {
+			const index = addNode(centerOf(item), item.layer, netId, item.id, 'graphic');
+			for (const shape of graphicCopperShapes(item)) addCopperContact(index, shape);
 		}
 		else if (item.kind === 'via') {
 			const requested: string[] = typeof item.element?.getLayers === 'function'
@@ -175,7 +205,7 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 				: explicit;
 			const viaNodes = layers.map(layer => {
 				const index = addNode(centerOf(item), layer, netId, item.id, 'via');
-				nodeCopperShapes.set(index, item.shape);
+				addCopperContact(index, item.shape);
 				return index;
 			});
 			for (let i = 1; i < viaNodes.length; i++) union(viaNodes[0]!, viaNodes[i]!);
@@ -183,30 +213,17 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	}
 	}
 
-	// Pad-to-pad shape overlap: two DIFFERENT pads of the same net/layer
-	// whose own copper shapes physically touch are one continuous piece of
-	// copper — real KiCad's own connectivity engine does real shape
-	// collision, not just point tests, for exactly this reason (a
-	// footprint's own pads are ordinary board copper to it, same as any
-	// other item). This app's own pad handling above only ever unions
-	// different LAYERS of the SAME pad element (a thru-hole pad's own F.Cu/
-	// B.Cu taps) — two DIFFERENT pads (even of the same footprint) were
-	// never tested against each other at all, so a deliberately-overlapping
-	// pad pattern (an annular "via ring" pad overlapping a ring of smaller
-	// contact pads around it, both same net) showed a spurious ratsnest
-	// airwire between them despite being solid, continuous, already-
-	// connected copper. O(n²) per net+layer bucket, same complexity class
-	// as the existing node/segment touching pass just below — pad counts
-	// sharing one net on one layer are small in practice (this bug's own
-	// real-board repro case was 9), so this stays cheap.
-	for (const bucket of padShapesByNetLayer.values()) {
-		for (let i = 0; i < bucket.length; i++) {
-			for (let j = i + 1; j < bucket.length; j++) {
-				if (bucket[i]!.element === bucket[j]!.element) continue; // already unioned via padNodes above
-				if (shapesOverlap(bucket[i]!.shape, bucket[j]!.shape)) {
-					union(bucket[i]!.index, bucket[j]!.index);
-				}
-			}
+	// KiCad's `updateJumperPads()` explicitly joins declared net-tie pad
+	// groups (and intentionally duplicated pad numbers) after it has built
+	// ordinary physical contacts.  These links cross net IDs by design, so
+	// they cannot go through the net/layer shape index below.
+	for (const [footprint, padsByNumber] of footprintPadNodes) {
+		if (footprint.getSimpleChildValue?.('duplicate_pad_numbers_are_jumpers') === true) {
+			for (const nodesForNumber of padsByNumber.values()) unionAll(nodesForNumber, union);
+		}
+		for (const group of footprintNetTieGroups(footprint)) {
+			const groupNodes = group.flatMap(number => padsByNumber.get(number) ?? []);
+			unionAll(groupNodes, union);
 		}
 	}
 
@@ -225,8 +242,15 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		const bucket = nodeBuckets.get(key) ?? [];
 		bucket.push(index);
 		nodeBuckets.set(key, bucket);
-		const cell = gridCell(nodes[index]!.point.x, nodes[index]!.point.y);
-		pushGridEntry(nodeGrid, gridKey(key, cell.x, cell.y), index);
+		// Graphics have a bookkeeping centre only; unlike a pad, via, or
+		// track endpoint it is never an electrical anchor.  Indexing it here
+		// falsely joined a hollow net-tied rectangle to a pad drawn inside its
+		// empty interior. Their real stroked/fill geometry is handled by the
+		// physical-shape pass above.
+		if (node.itemKind !== 'graphic') {
+			const cell = gridCell(node.point.x, node.point.y);
+			pushGridEntry(nodeGrid, gridKey(key, cell.x, cell.y), index);
+		}
 	}
 	for (let index = 0; index < segments.length; index++) {
 		const segment = segments[index]!;
@@ -242,11 +266,41 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 			}
 		}
 	}
+	// KiCad's CN_ITEM search is item-vs-item, not a matrix of special-case
+	// pad/via/track rules.  Index every real copper shape by its bbox, then
+	// collide same-net, same-layer candidates through one shared path.
+	const shapeGrid = new Map<string, number[]>();
+	for (let contactIndex = 0; contactIndex < copperContacts.length; contactIndex++) {
+		const { node: index, shape } = copperContacts[contactIndex]!;
+		const node = nodes[index]!;
+		const bbox = shapeToBBox(shape);
+		const min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
+		const key = bucketKey(node.netId, node.layer);
+		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) pushGridEntry(shapeGrid, gridKey(key, x, y), contactIndex);
+	}
+	const seenShapes = new Uint32Array(copperContacts.length);
+	let shapeVisit = 0;
+	for (let contactIndex = 0; contactIndex < copperContacts.length; contactIndex++) {
+		const { node: index, shape } = copperContacts[contactIndex]!;
+		const node = nodes[index]!;
+		const bbox = shapeToBBox(shape), min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
+		const key = bucketKey(node.netId, node.layer);
+		shapeVisit++;
+		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) for (const otherContactIndex of shapeGrid.get(gridKey(key, x, y)) ?? []) {
+			if (otherContactIndex <= contactIndex) continue;
+			if (seenShapes[otherContactIndex] === shapeVisit) continue;
+			seenShapes[otherContactIndex] = shapeVisit;
+			const other = copperContacts[otherContactIndex]!;
+			if (nodes[other.node]!.itemId === node.itemId) continue;
+			if (shapesOverlap(shape, other.shape)) union(index, other.node);
+		}
+	}
 	const seenSegments = new Uint32Array(segments.length);
 	let segmentVisit = 0;
 	for (const [key, bucketNodes] of nodeBuckets) {
 		for (const nodeIndex of bucketNodes) {
 			const node = nodes[nodeIndex]!;
+			if (node.itemKind === 'graphic') continue;
 			const cell = gridCell(node.point.x, node.point.y);
 			for (let x = cell.x - 1; x <= cell.x + 1; x++) {
 				for (let y = cell.y - 1; y <= cell.y + 1; y++) {
@@ -299,75 +353,16 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		}
 	}
 
-	// A track is allowed to terminate anywhere on a pad's copper, not only
-	// at its geometric centre.  The node graph deliberately gives every pad
-	// one representative centre node, so the regular node-to-segment pass
-	// above cannot discover this otherwise.  Query the existing segment grid
-	// by the actual pad bounds, then test both track endpoints against the
-	// pad's real shape (including the track half-width).  The zero-width
-	// overlap test also covers a segment crossing a pad without an endpoint
-	// inside it.  This is the same copper-contact rule for SMD and THT pads
-	// and avoids the old "must touch the pad centre" ratsnest artefact.
-	const seenPadSegments = new Uint32Array(segments.length);
-	let padSegmentVisit = 0;
-	for (const [key, pads] of padShapesByNetLayer) {
-		for (const pad of pads) {
-			// Vias are copper discs too.  A via may sit anywhere inside a pad's
-			// annulus (via-in-pad / via stitching), so matching only its centre
-			// against the pad-centre graph node leaves a false ratsnest even
-			// though their copper overlaps.  Node grid entries are layer-aware,
-			// therefore this also correctly joins a through-pad to the via's
-			// internal-layer taps without shorting an SMD pad to other layers.
-			const padMin = gridCell(pad.bbox.x - CONNECT_EPSILON_MM, pad.bbox.y - CONNECT_EPSILON_MM);
-			const padMax = gridCell(
-				pad.bbox.x + pad.bbox.w + CONNECT_EPSILON_MM,
-				pad.bbox.y + pad.bbox.h + CONNECT_EPSILON_MM,
-			);
-			for (let x = padMin.x; x <= padMax.x; x++) {
-				for (let y = padMin.y; y <= padMax.y; y++) {
-					for (const nodeIndex of nodeGrid.get(gridKey(key, x, y)) ?? []) {
-						const node = nodes[nodeIndex]!;
-						if (node.itemKind === 'via'
-							&& shapeContainsPoint(pad.shape, node.point.x, node.point.y, CONNECT_EPSILON_MM)) {
-							union(pad.index, nodeIndex);
-						}
-					}
-				}
-			}
-
-			padSegmentVisit++;
-			for (let x = padMin.x; x <= padMax.x; x++) {
-				for (let y = padMin.y; y <= padMax.y; y++) {
-					for (const segmentIndex of segmentGrid.get(gridKey(key, x, y)) ?? []) {
-						if (seenPadSegments[segmentIndex] === padSegmentVisit) continue;
-						seenPadSegments[segmentIndex] = padSegmentVisit;
-						const segment = segments[segmentIndex]!;
-						const a = nodes[segment.a]!.point;
-						const b = nodes[segment.b]!.point;
-						const tolerance = segment.width / 2 + CONNECT_EPSILON_MM;
-						const crossesPad = shapesOverlap(pad.shape, {
-							type: 'segment', x1: a.x, y1: a.y, x2: b.x, y2: b.y, width: 0,
-						});
-						if (crossesPad
-							|| shapeContainsPoint(pad.shape, a.x, a.y, tolerance)
-							|| shapeContainsPoint(pad.shape, b.x, b.y, tolerance)) {
-							union(pad.index, segment.a);
-						}
-					}
-				}
-			}
-		}
-	}
-
 	// Zone-fill connectivity: a copper pour joins every same-net pad/via/
 	// track on the layer(s) it pours onto, exactly like touching copper —
 	// this is the dominant connection for a GND/power plane, which is
 	// usually poured rather than individually traced to every pad. Tested
 	// against the zone's own bucket-matched nodes only (cheap: nodeBuckets
-	// is already keyed by net+layer), using its authored outline rather
-	// than the fractured fill geometry — see ZoneFillRegion's doc comment.
+	// is already keyed by net+layer).  Each ZoneFillRegion is an actual
+	// filled island, never the zone's authored outline.
+	const zoneContacts: Array<{ fill: typeof scene.zoneFills[number]; node: number | null }> = [];
 	for (const fill of scene.zoneFills) {
-		if (netFilter && !netFilter.has(fill.netId)) continue;
+		if (activeNetFilter && !activeNetFilter.has(fill.netId)) continue;
 		const key = bucketKey(fill.netId, fill.layer);
 		const bucketNodes = nodeBuckets.get(key);
 		if (!bucketNodes) continue;
@@ -375,17 +370,53 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 		let first: number | null = null;
 		for (const nodeIndex of bucketNodes) {
 			const point = nodes[nodeIndex]!.point;
-			// A via's centre can legitimately sit just outside a poured area
-			// while its annular ring touches the pour (common at a zone edge),
-			// as can a large/offset pad.  Centre-only tests miss that real
-			// copper contact and produce an invalid airwire.  Tracks retain
-			// their endpoint point test here; pads/vias carry their actual
-			// filled copper shape in nodeCopperShapes.
-			const copperShape = nodeCopperShapes.get(nodeIndex);
+			// A via, pad, or track can legitimately meet a poured island while
+			// its anchor centre lies outside it (common at zone edges).  KiCad
+			// asks its CN_ZONE_LAYER to collide the item's actual shape; this
+			// adaptation keeps that same item-level rule in nodeCopperShapes.
+			const copperShapes = nodeCopperShapes.get(nodeIndex);
 			if (!pointInPolygon(fill.points, point.x, point.y)
-				&& (!copperShape || !shapesOverlap(fillShape, copperShape))) continue;
+				&& (!copperShapes || !copperShapes.some(shape => shapesOverlap(fillShape, shape)))) continue;
 			if (first === null) first = nodeIndex;
 			else union(first, nodeIndex);
+		}
+		zoneContacts.push({ fill, node: first });
+	}
+
+	// KiCad indexes every filled-zone island as a normal connectivity item.
+	// Consequently two same-net islands that physically touch are one copper
+	// island even if no pad, via, or track happens to provide an anchor at
+	// their seam. The contact representatives above let us express that in
+	// this anchor-based graph without inventing visible ratsnest endpoints.
+	const zoneGrid = new Map<string, number[]>();
+	for (let index = 0; index < zoneContacts.length; index++) {
+		const contact = zoneContacts[index]!;
+		if (contact.node === null) continue;
+		const shape: PaintedShape = { type: 'polygon', points: contact.fill.points, closed: true };
+		const bbox = shapeToBBox(shape);
+		const min = gridCell(bbox.x, bbox.y);
+		const max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
+		const key = bucketKey(contact.fill.netId, contact.fill.layer);
+		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) {
+			pushGridEntry(zoneGrid, gridKey(key, x, y), index);
+		}
+	}
+	const seenZoneContacts = new Uint32Array(zoneContacts.length);
+	let zoneVisit = 0;
+	for (let i = 0; i < zoneContacts.length; i++) {
+		const a = zoneContacts[i]!;
+		if (a.node === null) continue;
+		const shapeA: PaintedShape = { type: 'polygon', points: a.fill.points, closed: true };
+		const bbox = shapeToBBox(shapeA);
+		const min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
+		zoneVisit++;
+		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) for (const j of zoneGrid.get(gridKey(bucketKey(a.fill.netId, a.fill.layer), x, y)) ?? []) {
+			if (j <= i || seenZoneContacts[j] === zoneVisit) continue;
+			seenZoneContacts[j] = zoneVisit;
+			const b = zoneContacts[j]!;
+			if (b.node === null) continue;
+			const shapeB: PaintedShape = { type: 'polygon', points: b.fill.points, closed: true };
+			if (shapesOverlap(shapeA, shapeB)) union(a.node, b.node);
 		}
 	}
 
@@ -413,10 +444,130 @@ function pushGridEntry(grid: Map<string, number[]>, key: string, index: number):
 	else grid.set(key, [index]);
 }
 
+function unionAll(indices: readonly number[], union: (a: number, b: number) => void): void {
+	for (let index = 1; index < indices.length; index++) union(indices[0]!, indices[index]!);
+}
+
+function footprintNetTieGroups(footprint: any): string[][] {
+	const element = footprint?.findFirstChildByName?.('net_tie_pad_groups');
+	const rawGroups: unknown[] = Array.isArray(element?.groups) ? element.groups : (element?.attributes ?? []).map((attribute: any) => attribute.value);
+	return rawGroups.map(group => String(group).split(',').map(number => number.trim()).filter(Boolean)).filter(group => group.length > 0);
+}
+
+/** The incremental graph normally contains only the nets touched by a drag.
+ * A net tie is a declared cross-net bridge, so its partner nets must enter
+ * that local graph as well or a pad routed through the tie looks isolated
+ * until a slow whole-board refresh happens. */
+function expandNetFilterForJumpers(scene: LayeredBoardScene, netFilter: ReadonlySet<number>): Set<number> {
+	const expanded = new Set(netFilter);
+	const padsByFootprint = new Map<any, Map<string, Set<number>>>();
+	for (const items of scene.layerBuckets.values()) for (const item of items) {
+		if (item.kind !== 'pad' || !item.netId || !item.layer.endsWith('.Cu')) continue;
+		const footprint = item.element?.parent;
+		const padNumber = String(item.element?.padNumber ?? '');
+		if (!footprint || !padNumber) continue;
+		const byNumber = padsByFootprint.get(footprint) ?? new Map<string, Set<number>>();
+		const netIds = byNumber.get(padNumber) ?? new Set<number>();
+		netIds.add(item.netId);
+		byNumber.set(padNumber, netIds);
+		padsByFootprint.set(footprint, byNumber);
+	}
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const [footprint, padsByNumber] of padsByFootprint) {
+			const groups: Set<number>[] = [];
+			if (footprint.getSimpleChildValue?.('duplicate_pad_numbers_are_jumpers') === true) {
+				for (const netIds of padsByNumber.values()) groups.push(netIds);
+			}
+			for (const padGroup of footprintNetTieGroups(footprint)) {
+				const netIds = new Set<number>();
+				for (const padNumber of padGroup) for (const netId of padsByNumber.get(padNumber) ?? []) netIds.add(netId);
+				groups.push(netIds);
+			}
+			for (const netIds of groups) {
+				if (![...netIds].some(netId => expanded.has(netId))) continue;
+				for (const netId of netIds) if (!expanded.has(netId)) {
+					expanded.add(netId);
+					changed = true;
+				}
+			}
+		}
+	}
+	return expanded;
+}
+
 function centerOf(item: PaintedItem): Vec2 {
 	return new Vec2(item.bbox.x + item.bbox.w / 2, item.bbox.y + item.bbox.h / 2);
 }
 
+/** `PCB_SHAPE` can be a filled copper area or only a stroked perimeter.
+ * The renderer's hit shape intentionally preserves the latter as an
+ * unfilled rect/circle/poly, but connectivity must test the material stroke
+ * itself rather than incorrectly shorting through its hollow interior. */
+function graphicCopperShapes(item: PaintedItem): PaintedShape[] {
+	const shape = item.shape;
+	if (shape.type === 'segment') return [shape];
+	if (shape.type === 'circle') {
+		if (typeof item.element?.getArcCenterRadiusAngles === 'function') {
+			const width = Number(item.element.getStroke?.().width ?? shape.strokeWidth ?? 0.1);
+			const arc = sweptArcShape(item.element.getArcCenterRadiusAngles(), width);
+			return arc ? [arc] : [];
+		}
+		if (shape.filled !== false) return [shape];
+		return circularStrokeSegments(shape, shape.strokeWidth ?? 0.1);
+	}
+	if (shape.filled !== false) return [shape];
+	const width = shape.strokeWidth ?? 0.1;
+	const points = shape.type === 'rect'
+		? [
+			{ x: shape.x, y: shape.y }, { x: shape.x + shape.w, y: shape.y },
+			{ x: shape.x + shape.w, y: shape.y + shape.h }, { x: shape.x, y: shape.y + shape.h },
+		]
+		: shape.points;
+	const segments: PaintedShape[] = [];
+	for (let index = 1; index < points.length; index++) {
+		segments.push({ type: 'segment', x1: points[index - 1]!.x, y1: points[index - 1]!.y, x2: points[index]!.x, y2: points[index]!.y, width });
+	}
+	if (shape.type === 'rect' || shape.closed) {
+		const first = points[0]!, last = points[points.length - 1]!;
+		segments.push({ type: 'segment', x1: last.x, y1: last.y, x2: first.x, y2: first.y, width });
+	}
+	return segments;
+}
+
+function circularStrokeSegments(circle: Extract<PaintedShape, { type: 'circle' }>, width: number): PaintedShape[] {
+	const count = Math.max(16, Math.ceil((Math.PI * 2 * circle.r) / Math.max(width / 2, 0.1)));
+	const result: PaintedShape[] = [];
+	for (let index = 0; index < count; index++) {
+		const a = Math.PI * 2 * index / count, b = Math.PI * 2 * (index + 1) / count;
+		result.push({
+			type: 'segment',
+			x1: circle.cx + circle.r * Math.cos(a), y1: circle.cy + circle.r * Math.sin(a),
+			x2: circle.cx + circle.r * Math.cos(b), y2: circle.cy + circle.r * Math.sin(b), width,
+		});
+	}
+	return result;
+}
+
 export function distance(a: Vec2, b: Vec2): number {
 	return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function sweptArcShape(arc: { centerX: number; centerY: number; radius: number; startAngle: number; endAngle: number }, width: number): PaintedShape | null {
+	const outer = arc.radius + width / 2;
+	const inner = Math.max(0, arc.radius - width / 2);
+	if (!(outer > 0) || !Number.isFinite(arc.startAngle) || !Number.isFinite(arc.endAngle)) return null;
+	const sweep = arc.endAngle - arc.startAngle;
+	const steps = Math.max(4, Math.ceil(Math.abs(sweep) / (Math.PI / 12)));
+	const points: { x: number; y: number }[] = [];
+	for (let i = 0; i <= steps; i++) {
+		const angle = arc.startAngle + sweep * i / steps;
+		points.push({ x: arc.centerX + outer * Math.cos(angle), y: arc.centerY + outer * Math.sin(angle) });
+	}
+	for (let i = steps; i >= 0; i--) {
+		const angle = arc.startAngle + sweep * i / steps;
+		points.push({ x: arc.centerX + inner * Math.cos(angle), y: arc.centerY + inner * Math.sin(angle) });
+	}
+	return { type: 'polygon', points, closed: true };
 }

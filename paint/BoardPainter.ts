@@ -80,14 +80,9 @@ export interface LayeredBoardScene {
 	declaredLayers: string[];
 }
 
-/** A copper pour's authored OUTLINE (not the thermal-relief-carved fill
- * geometry from getFilledPolygons) on one copper layer — used by
- * BoardRatsnest to treat same-net pads/vias/tracks inside the pour as
- * electrically joined by it, the same way real KiCad's connectivity engine
- * tests a pad against a zone's outline rather than its fractured fill (the
- * fill has a clearance gap punched around every pad, so testing a pad's
- * center against IT would wrongly report "not connected" for the exact
- * pads the pour exists to join — see BoardRatsnest.ts). */
+/** One electrically continuous filled-zone island on one copper layer.
+ * Mirrors KiCad's CN_ZONE_LAYER construction: separate filled polygons are
+ * separate connectivity items, even when they share an editable zone. */
 export interface ZoneFillRegion {
 	netId: number;
 	layer: string;
@@ -194,7 +189,22 @@ export class BoardPainter {
 
 	build(board: any): LayeredBoardScene {
 		const layerBuckets = new Map<string, PaintedItem[]>();
+		const netIdsByName = boardNetIdsByName(board);
 		const pushItem = (item: PaintedItem) => {
+			// PCB_SHAPE (`gr_line`, `gr_arc`, …) persists a bare `(net
+			// "NAME")`, unlike tracks/pads which have a numeric net code.  The
+			// connectivity model is keyed by the board's numeric code, so resolve
+			// that name at the painter boundary instead of silently turning
+			// net-bearing copper drawings into disconnected decoration.
+			if (item.layer.endsWith('.Cu') && (item.netId === null || item.netId === undefined)
+				&& typeof item.element?.getNetName === 'function') {
+				const netName = item.element.getNetName();
+				const netId = typeof netName === 'string' ? netIdsByName.get(netName) : undefined;
+				if (netId !== undefined) {
+					item.netId = netId;
+					item.netName = netName;
+				}
+			}
 			const bucket = layerBuckets.get(item.layer);
 			if (bucket) {
 				bucket.push(item);
@@ -392,9 +402,8 @@ export class BoardPainter {
 			.map(ring => ring.map(point => new Vec2(point.x, point.y)));
 	}
 
-	/** One ZoneFillRegion per (zone, copper layer it pours onto) — see that
-	 *  interface's doc comment for why this uses the authored outline
-	 *  (getPolygon) rather than the thermal-relief-carved fill geometry. */
+	/** Builds the same per-filled-island connectivity inputs KiCad creates in
+	 * `CN_CONNECTIVITY_ALGO::Build`. An unfilled editable zone is not copper. */
 	protected buildZoneFills(zones: any[], copperLayers: string[]): ZoneFillRegion[] {
 		const regions: ZoneFillRegion[] = [];
 		for (const zone of zones) {
@@ -402,15 +411,12 @@ export class BoardPainter {
 			if (netId === null || netId <= 0) {
 				continue;
 			}
-			const outline = typeof zone.getPolygon === 'function' ? zone.getPolygon() : [];
-			if (outline.length < 3) {
-				continue;
-			}
-			const requested: string[] = typeof zone.getLayers === 'function' ? zone.getLayers() : [];
-			const layers = requested.flatMap(layer => layer === '*.Cu' ? copperLayers : [layer])
-				.filter(layer => layer.endsWith('.Cu'));
-			for (const layer of layers) {
-				regions.push({ netId, layer, points: outline });
+			const filledPolygons: { layer: string; points: { x: number; y: number }[] }[] =
+				typeof zone.getFilledPolygons === 'function' ? zone.getFilledPolygons() : [];
+			for (const polygon of filledPolygons) {
+				if (polygon.points.length >= 3 && copperLayers.includes(polygon.layer)) {
+					regions.push({ netId, layer: polygon.layer, points: polygon.points });
+				}
 			}
 		}
 		return regions;
@@ -2626,6 +2632,17 @@ function cubicBezierToPolyline(points: [Vec2, Vec2, Vec2, Vec2], steps = 32): Ve
 			u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
 			u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
 		));
+	}
+	return result;
+}
+
+function boardNetIdsByName(board: any): Map<string, number> {
+	const result = new Map<string, number>();
+	for (const child of board?.rootElement?.children ?? []) {
+		if (child?.name !== 'net') continue;
+		const id = Number(child.id ?? child.attributes?.[0]?.value);
+		const name = child.netName ?? child.attributes?.[1]?.value;
+		if (Number.isInteger(id) && id > 0 && typeof name === 'string' && name) result.set(name, id);
 	}
 	return result;
 }

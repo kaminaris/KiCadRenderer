@@ -186,84 +186,113 @@ export function pointInPolygon(points: { x: number; y: number }[], px: number, p
 	return inside;
 }
 
-/** Tessellates a filled PaintedShape into a plain point ring for overlap
- *  testing — a circle into a 24-gon (plenty for "do these two shapes
- *  touch", not a precision fill boundary), a rect into its 4 corners, a
- *  polygon as-is, a segment as its bare 2-point centerline (width-blind —
- *  no current caller needs a wide-segment overlap test; see
- *  shapesOverlap's own doc comment). */
-function shapeToOverlapRing(shape: PaintedShape): { x: number; y: number }[] {
-	switch (shape.type) {
-		case 'circle': {
-			const points: { x: number; y: number }[] = [];
-			const segments = 24;
-			for (let i = 0; i < segments; i++) {
-				const a = (i / segments) * Math.PI * 2;
-				points.push({ x: shape.cx + shape.r * Math.cos(a), y: shape.cy + shape.r * Math.sin(a) });
-			}
-			return points;
-		}
-		case 'rect':
-			return [
-				{ x: shape.x, y: shape.y }, { x: shape.x + shape.w, y: shape.y },
-				{ x: shape.x + shape.w, y: shape.y + shape.h }, { x: shape.x, y: shape.y + shape.h },
-			];
-		case 'polygon':
-			return shape.points;
-		case 'segment':
-			return [{ x: shape.x1, y: shape.y1 }, { x: shape.x2, y: shape.y2 }];
-	}
+type ShapePoint = { x: number; y: number };
+const COPPER_CONTACT_EPSILON = 1e-8;
+type PolygonalShape = Extract<PaintedShape, { type: 'rect' | 'polygon' }>;
+
+function isPolygonalShape(shape: PaintedShape): shape is PolygonalShape {
+	return shape.type === 'rect' || shape.type === 'polygon';
 }
 
-/** Whether two 2-point-or-more segments (as plain point pairs) cross —
- *  standard orientation-sign test, used by shapesOverlap's edge-crossing
- *  fallback. */
-function segmentsCross(
-	p1: { x: number; y: number }, p2: { x: number; y: number },
-	p3: { x: number; y: number }, p4: { x: number; y: number },
-): boolean {
-	const orient = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number =>
-		Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
-	const o1 = orient(p1, p2, p3), o2 = orient(p1, p2, p4);
-	const o3 = orient(p3, p4, p1), o4 = orient(p3, p4, p2);
-	return o1 !== o2 && o3 !== o4;
+function polygonRing(shape: PolygonalShape): ShapePoint[] {
+	return shape.type === 'polygon' ? shape.points : [
+		{ x: shape.x, y: shape.y }, { x: shape.x + shape.w, y: shape.y },
+		{ x: shape.x + shape.w, y: shape.y + shape.h }, { x: shape.x, y: shape.y + shape.h },
+	];
 }
 
-/**
- * Whether two FILLED shapes' own copper actually touches/overlaps —
- * general shape-vs-shape (not just point-vs-shape), for cases neither
- * `shapeContainsPoint` (needs one side to already be a bare point) nor a
- * plain bbox check (too coarse — two shapes can share a bbox without
- * touching) covers. Bbox pre-filtered, then a genuine polygon check: one
- * shape contains a vertex of the other (handles full containment and most
- * ordinary overlaps), OR any pair of edges crosses (handles the case where
- * neither shape's own sampled vertices happen to land inside the other —
- * e.g. two similarly-sized crossing shapes with no vertex inside either).
- * A circle is tessellated (24 segments — plenty for "do these touch",
- * unlike a fill boundary which needs real precision), so this stays exact
- * for rect/polygon and a close, more-than-good-enough approximation for
- * any shape involving a circle.
- */
-export function shapesOverlap(a: PaintedShape, b: PaintedShape): boolean {
-	if (!bboxesIntersect(shapeToBBox(a), shapeToBBox(b))) {
-		return false;
-	}
-	const ringA = shapeToOverlapRing(a), ringB = shapeToOverlapRing(b);
-	if (ringA.length === 0 || ringB.length === 0) {
-		return false;
-	}
-	for (const p of ringA) {
-		if (pointInPolygon(ringB, p.x, p.y)) return true;
-	}
-	for (const p of ringB) {
-		if (pointInPolygon(ringA, p.x, p.y)) return true;
-	}
-	for (let i = 0; i < ringA.length; i++) {
-		const a1 = ringA[i]!, a2 = ringA[(i + 1) % ringA.length]!;
-		for (let j = 0; j < ringB.length; j++) {
-			const b1 = ringB[j]!, b2 = ringB[(j + 1) % ringB.length]!;
-			if (segmentsCross(a1, a2, b1, b2)) return true;
-		}
+function pointOnSegment(point: ShapePoint, a: ShapePoint, b: ShapePoint): boolean {
+	return distanceToSegment(point.x, point.y, a.x, a.y, b.x, b.y) <= COPPER_CONTACT_EPSILON;
+}
+
+function pointInOrOnPolygon(points: ShapePoint[], point: ShapePoint): boolean {
+	if (pointInPolygon(points, point.x, point.y)) return true;
+	for (let i = 0; i < points.length; i++) {
+		if (pointOnSegment(point, points[i]!, points[(i + 1) % points.length]!)) return true;
 	}
 	return false;
+}
+
+function segmentsTouch(a1: ShapePoint, a2: ShapePoint, b1: ShapePoint, b2: ShapePoint): boolean {
+	const cross = (a: ShapePoint, b: ShapePoint, c: ShapePoint): number =>
+		(b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+	const aSide1 = cross(a1, a2, b1), aSide2 = cross(a1, a2, b2);
+	const bSide1 = cross(b1, b2, a1), bSide2 = cross(b1, b2, a2);
+	if (((aSide1 > COPPER_CONTACT_EPSILON && aSide2 < -COPPER_CONTACT_EPSILON)
+		|| (aSide1 < -COPPER_CONTACT_EPSILON && aSide2 > COPPER_CONTACT_EPSILON))
+		&& ((bSide1 > COPPER_CONTACT_EPSILON && bSide2 < -COPPER_CONTACT_EPSILON)
+			|| (bSide1 < -COPPER_CONTACT_EPSILON && bSide2 > COPPER_CONTACT_EPSILON))) return true;
+	return pointOnSegment(a1, b1, b2) || pointOnSegment(a2, b1, b2)
+		|| pointOnSegment(b1, a1, a2) || pointOnSegment(b2, a1, a2);
+}
+
+function segmentDistance(a1: ShapePoint, a2: ShapePoint, b1: ShapePoint, b2: ShapePoint): number {
+	if (segmentsTouch(a1, a2, b1, b2)) return 0;
+	return Math.min(
+		distanceToSegment(a1.x, a1.y, b1.x, b1.y, b2.x, b2.y),
+		distanceToSegment(a2.x, a2.y, b1.x, b1.y, b2.x, b2.y),
+		distanceToSegment(b1.x, b1.y, a1.x, a1.y, a2.x, a2.y),
+		distanceToSegment(b2.x, b2.y, a1.x, a1.y, a2.x, a2.y),
+	);
+}
+
+function circleTouchesPolygon(circle: Extract<PaintedShape, { type: 'circle' }>, polygon: ShapePoint[]): boolean {
+	const center = { x: circle.cx, y: circle.cy };
+	if (pointInOrOnPolygon(polygon, center)) return true;
+	for (let i = 0; i < polygon.length; i++) {
+		const point = polygon[i]!;
+		if (Math.hypot(point.x - circle.cx, point.y - circle.cy) <= circle.r + COPPER_CONTACT_EPSILON) return true;
+		if (distanceToSegment(circle.cx, circle.cy, point.x, point.y, polygon[(i + 1) % polygon.length]!.x, polygon[(i + 1) % polygon.length]!.y)
+			<= circle.r + COPPER_CONTACT_EPSILON) return true;
+	}
+	return false;
+}
+
+function segmentTouchesPolygon(segment: Extract<PaintedShape, { type: 'segment' }>, polygon: ShapePoint[]): boolean {
+	const a = { x: segment.x1, y: segment.y1 }, b = { x: segment.x2, y: segment.y2 };
+	const radius = segment.width / 2 + COPPER_CONTACT_EPSILON;
+	if (pointInOrOnPolygon(polygon, a) || pointInOrOnPolygon(polygon, b)) return true;
+	for (let i = 0; i < polygon.length; i++) {
+		const p = polygon[i]!, q = polygon[(i + 1) % polygon.length]!;
+		if (segmentDistance(a, b, p, q) <= radius) return true;
+	}
+	return false;
+}
+
+function polygonsTouch(a: ShapePoint[], b: ShapePoint[]): boolean {
+	for (const point of a) if (pointInOrOnPolygon(b, point)) return true;
+	for (const point of b) if (pointInOrOnPolygon(a, point)) return true;
+	for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
+		if (segmentsTouch(a[i]!, a[(i + 1) % a.length]!, b[j]!, b[(j + 1) % b.length]!)) return true;
+	}
+	return false;
+}
+
+/** Exact primitive collision for the renderer's physical-copper shapes.
+ * This deliberately treats tangent edges as touching: KiCad's connectivity
+ * engine sees a pad/via whose annulus reaches a filled-zone boundary as one
+ * electrical island, whereas a tessellated-circle approximation can leave a
+ * false airwire at precisely that common board geometry. */
+export function shapesOverlap(a: PaintedShape, b: PaintedShape): boolean {
+	const bboxA = shapeToBBox(a), bboxB = shapeToBBox(b);
+	if (bboxA.x > bboxB.x + bboxB.w + COPPER_CONTACT_EPSILON
+		|| bboxA.x + bboxA.w + COPPER_CONTACT_EPSILON < bboxB.x
+		|| bboxA.y > bboxB.y + bboxB.h + COPPER_CONTACT_EPSILON
+		|| bboxA.y + bboxA.h + COPPER_CONTACT_EPSILON < bboxB.y) return false;
+	if (a.type === 'circle' && b.type === 'circle') {
+		return Math.hypot(a.cx - b.cx, a.cy - b.cy) <= a.r + b.r + COPPER_CONTACT_EPSILON;
+	}
+	if (a.type === 'circle' && b.type === 'segment') {
+		return distanceToSegment(a.cx, a.cy, b.x1, b.y1, b.x2, b.y2) <= a.r + b.width / 2 + COPPER_CONTACT_EPSILON;
+	}
+	if (a.type === 'segment' && b.type === 'circle') return shapesOverlap(b, a);
+	if (a.type === 'segment' && b.type === 'segment') {
+		return segmentDistance({ x: a.x1, y: a.y1 }, { x: a.x2, y: a.y2 }, { x: b.x1, y: b.y1 }, { x: b.x2, y: b.y2 })
+			<= (a.width + b.width) / 2 + COPPER_CONTACT_EPSILON;
+	}
+	if (a.type === 'circle' && isPolygonalShape(b)) return circleTouchesPolygon(a, polygonRing(b));
+	if (b.type === 'circle' && isPolygonalShape(a)) return circleTouchesPolygon(b, polygonRing(a));
+	if (a.type === 'segment' && isPolygonalShape(b)) return segmentTouchesPolygon(a, polygonRing(b));
+	if (b.type === 'segment' && isPolygonalShape(a)) return segmentTouchesPolygon(b, polygonRing(a));
+	return isPolygonalShape(a) && isPolygonalShape(b) && polygonsTouch(polygonRing(a), polygonRing(b));
 }
