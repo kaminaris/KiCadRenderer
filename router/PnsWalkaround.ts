@@ -1,4 +1,4 @@
-import { pointInPolygon } from '../paint/PaintedShape';
+import { pointInPolygonCoords as pointInPolygon } from '../geometry/polygon';
 
 type Pt = { x: number; y: number };
 

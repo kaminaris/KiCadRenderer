@@ -1,5 +1,5 @@
-import { buildBoardRatsnest } from './paint/BoardRatsnest';
-import { buildCopperGraph } from './paint/BoardCopperGraph';
+import { buildBoardRatsnest } from './paint/legacy/BoardRatsnest';
+import { buildCopperGraph } from './paint/legacy/BoardCopperGraph';
 import { defaultLayerState } from './paint/BoardPainter';
 import { defaultSchLayerState } from './paint/SchematicPainter';
 import { refreshRatsnestForFootprints } from './layers';

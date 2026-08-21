@@ -198,6 +198,10 @@ export class Vec2 {
 		return this.x * b.y - this.y * b.x;
 	}
 
+	dot(b: Vec2) {
+		return this.x * b.x + this.y * b.y;
+	}
+
 	static segmentIntersect(a1: Vec2, b1: Vec2, a2: Vec2, b2: Vec2) {
 		const ray1 = b1.sub(a1);
 		const ray2 = b2.sub(a2);

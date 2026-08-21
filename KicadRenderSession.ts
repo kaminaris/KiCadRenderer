@@ -160,8 +160,11 @@ import {
 }                                                     from './paint/SchematicPainter';
 import { boardBackgroundColor, styleForLayer }        from './paint/LayerColors';
 import { layerPaintRank }                             from './paint/LayerOrder';
-import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/BoardRatsnest';
-import { buildCopperGraph, buildTrackChainGraph, type CopperGraph }         from './paint/BoardCopperGraph';
+import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/legacy/BoardRatsnest';
+import { buildCopperGraph, buildTrackChainGraph, type CopperGraph }         from './paint/legacy/BoardCopperGraph';
+import { buildKiCadRatsnest, flattenRatsnestEdges } from './connectivity/KicadRatsnest';
+import { buildBoardFacadeFromAst } from './connectivity/KicadBoardFacade';
+import { CONNECTIVITY_DATA } from './connectivity/ConnectivityData';
 import { buildInitialTrace }                          from './router/PnsDragger';
 import {
 	buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath,
@@ -470,6 +473,22 @@ export class KicadRenderSession {
 	 *  selection visible on a board, not a step toward full PCB interaction. */
 	protected boardHighlight: { bbox: { x: number; y: number; w: number; h: number } } | null = null;
 	protected ratsnestLines: BoardRatsnestLine[] = [];
+	protected previewRatsnestLines: BoardRatsnestLine[] = [];
+	protected previewRatsnestNetIds: Set<number> = new Set();
+	/** Persistent KiCad-port connectivity for the loaded board — kept alive
+	 * across renders so per-frame reads (and, via the C++-faithful
+	 * internalRecalculateRatsnest dirty-net path, incremental updates) reuse
+	 * the item map instead of rebuilding the whole engine each call. Rebuilt
+	 * from the board AST whenever the board is (re)loaded or structurally
+	 * edited (refreshBoardRatsnest). */
+	protected boardConnectivity: CONNECTIVITY_DATA | null = null;
+	/** The AST-backed board facade (KicadBoardFacade) last used to build
+	 * boardConnectivity. Retained so the SAME footprint/pad AstAdapter
+	 * instances are reused for static Build and the drag-path's
+	 * ComputeLocalRatsnest — AstAdapter caches its pads, so reference
+	 * identity between the connAlgo item map and the moving items holds
+	 * (mirroring KiCad's stable BOARD_ITEM pointers). */
+	protected boardFacade: any = null;
 	protected ratsnestVisible = true;
 	/** Position signature of the last fast-drag commit's moved footprints (see
 	 *  commitBoardDragFast's Fix-3 skip), so an unchanged-position re-commit
@@ -4252,8 +4271,14 @@ export class KicadRenderSession {
 		this.scene = this.painter.build(boardRoot);
 		const graph = buildCopperGraph(this.scene);
 		this.copperGraphCache = { scene: this.scene, graph };
-		// Synchronous initial build so the first frame has a ratsnest available.
-		this.ratsnestLines = buildBoardRatsnest(this.scene, undefined, graph);
+		// Use the new KiCad-based engine for behavioral equivalence with KiCad.
+		// AST-backed facade (pads grouped by footprint, arcs as PCB_ARC_T,
+		// via layers, netinfo) and a persistent CONNECTIVITY_DATA so
+		// subsequent ratsnest reads reuse the item map.
+		this.boardConnectivity = new CONNECTIVITY_DATA();
+		this.boardFacade = buildBoardFacadeFromAst(this.boardRoot.rootElement, this.scene);
+		this.boardConnectivity.Build(this.boardFacade);
+		this.ratsnestLines = flattenRatsnestEdges(this.boardConnectivity, undefined);
 		// Spawn a background Worker to recompute ratsnest from anchors and update
 		// the session when ready. This provides a non-blocking fallback for
 		// large boards while leaving the synchronous result visible immediately.
@@ -4876,7 +4901,18 @@ export class KicadRenderSession {
 		if (this.documentType !== 'board' || !this.scene) {
 			return;
 		}
-		this.ratsnestLines = buildBoardRatsnest(this.scene);
+
+		if (this.boardConnectivity && this.boardRoot) {
+			// Rebuild from the (possibly edited) AST into the persistent
+			// instance, then flatten its edges.
+			this.boardFacade = buildBoardFacadeFromAst(this.boardRoot.rootElement, this.scene);
+			this.boardConnectivity.Build(this.boardFacade);
+			this.ratsnestLines = flattenRatsnestEdges(this.boardConnectivity);
+		}
+		else {
+			this.ratsnestLines = buildKiCadRatsnest(this.scene);
+		}
+
 		this.lastRatsnestCommitSignature = null;
 		this.scheduleRender();
 	}
@@ -8737,8 +8773,28 @@ export class KicadRenderSession {
 		if (this.documentType !== 'board' || !this.ratsnestVisible) {
 			return;
 		}
+		// If there is a preview (from a drag operation) prefer preview lines for
+		// the nets being previewed; otherwise fall back to the full computed lines.
+		const previewNetIds = this.previewRatsnestNetIds ?? new Set<number>();
+		// Build a map of preview lines by netId for quick lookup.
+		const previewByNet = new Map<number, BoardRatsnestLine[]>();
+		for (const l of this.previewRatsnestLines) {
+			const arr = previewByNet.get(l.netId) ?? [];
+			arr.push(l);
+			previewByNet.set(l.netId, arr);
+		}
+		// Emit all non-preview nets from the main ratsnest, then append preview
+		// nets so the preview lines render on top.
 		for (const line of this.ratsnestLines) {
+			if (previewNetIds.has(line.netId)) {
+				continue;
+			}
 			renderer.line([line.from, line.to], { strokeColor: '#b7c7d8', strokeWidth: 0.05, capStyle: 'butt' });
+		}
+		for (const arr of previewByNet.values()) {
+			for (const line of arr) {
+				renderer.line([line.from, line.to], { strokeColor: '#b7c7d8', strokeWidth: 0.05, capStyle: 'butt' });
+			}
 		}
 	}
 

@@ -20,6 +20,7 @@
 		"paint/**/*.ts",
 		"render/**/*.ts",
 		"text/**/*.ts",
+		"connectivity/**/*.ts",
 		"PathUtils.ts",
 		"SheetTree.ts",
 		"RegisterDefaultClasses.ts"

@@ -246,3 +246,296 @@ function expandTextVarsOnce(
 		return Object.prototype.hasOwnProperty.call(vars, name!) ? vars[name!]! : whole;
 	});
 }
+
+/**
+ * The board/schematic title block — the set of title-block fields KiCad's
+ * drawing sheet shows (Title, Date, Rev, Company, Comment1..4).
+ */
+export interface TITLE_BLOCK {
+	title: string;
+	date: string;
+	rev: string;
+	company: string;
+	comment1: string;
+	comment2: string;
+	comment3: string;
+	comment4: string;
+}
+
+/** An empty title block. */
+export function emptyTitleBlock(): TITLE_BLOCK {
+	return { title: '', date: '', rev: '', company: '', comment1: '', comment2: '', comment3: '', comment4: '' };
+}
+
+/**
+ * Reads the KiCad title block from a parsed board/schematic root element
+ * (the `(title_block ...)` / `(title ...)` child), returning it as a
+ * TITLE_BLOCK.
+ */
+export function getTitleBlock(rootElement: any): TITLE_BLOCK {
+	const tbl: TITLE_BLOCK = emptyTitleBlock();
+
+	const readChild = (parent: any, key: string): string => {
+		for (const c of parent?.children ?? []) {
+			if (c?.name === key) {
+				return c.value ?? '';
+			}
+		}
+		return '';
+	};
+
+	// The title block may be a direct `(title ...)` child or a nested
+	// `(title_block (title ...)...)` child (KiCad newer schema wraps it).
+	let block: any = null;
+
+	for (const c of rootElement?.children ?? []) {
+		if (c?.name === 'title_block') {
+			block = c;
+			break;
+		}
+	}
+
+	const source = block ?? rootElement;
+
+	tbl.title = readChild(source, 'title');
+	tbl.date = readChild(source, 'date');
+	tbl.rev = readChild(source, 'rev');
+	tbl.company = readChild(source, 'company');
+	for (let i = 1; i <= 4; i++) {
+		(tbl as unknown as Record<string, string>)[`comment${ i }`] = readChild(source, `comment${ i }`);
+	}
+
+	return tbl;
+}
+
+/**
+ * Parses a `.kicad_wks` drawing-sheet file into a `{ setup, items }` model.
+ * Mirrors KiCad's WKS_READER (libs/kicad/drawing_sheet.cpp). The S-expression
+ * AST is produced by the shared @kicad-io KicadParser.
+ */
+export function parseWks(text: string): { setup: WksSetup; items: WksItem[] } {
+	const setup: WksSetup = { ...defaultWksSetup };
+	const items: WksItem[] = [];
+
+	// Minimal s-expression tokenizer (parentheses + atoms).
+	const tokens: string[] = [];
+	let i = 0;
+	const isSpace = (c: string): boolean => /[\s()]/.test(c);
+	while (i < text.length) {
+		const ch = text[i]!;
+		if (ch === '(' || ch === ')') {
+			tokens.push(ch);
+			i++;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			i++;
+			continue;
+		}
+		let tok = '';
+		while (i < text.length && !isSpace(text[i]!)) {
+			tok += text[i]!;
+			i++;
+		}
+		tokens.push(tok);
+	}
+
+	// Build the s-expression tree.
+	const build = (): any => {
+		// returns { name, children: any[] } for a list, or string for an atom
+		const t = tokens.shift();
+		if (t === '(') {
+			const list: { name: string; children: any[]; value?: string } = { name: '', children: [] };
+			while (tokens.length && tokens[0] !== ')') {
+				const child = build();
+				if (typeof child === 'string') {
+					if (!list.name && !list.children.length) {
+						list.name = child;
+					} else {
+						list.children.push(child);
+					}
+				} else {
+					list.children.push(child);
+				}
+			}
+			tokens.shift(); // ')'
+			return list;
+		}
+		return t ?? '';
+	};
+
+	const root = build();
+
+	const anchorFrom = (a: string): WksAnchor => {
+		switch (a) {
+			case 'ltcorner':
+			case 'rbcorner':
+			case 'lbcorner':
+			case 'rtcorner':
+				return a;
+			default:
+				return 'rbcorner';
+		}
+	};
+
+	const findChild = (node: any, name: string): any | undefined => {
+		if (!node || !node.children) return undefined;
+		for (const c of node.children) {
+			if (typeof c === 'object' && c.name === name) return c;
+		}
+		return undefined;
+	};
+
+	const childAtoms = (node: any): string[] => (node?.children ?? []).filter((c: any) => typeof c === 'string');
+
+	const numAt = (ch: any): number => {
+		const a = childAtoms(ch);
+		return a.length ? parseFloat(a[0]) || 0 : 0;
+	};
+
+	// Walk top-level forms.
+	const walk = (node: any): void => {
+		if (typeof node !== 'object' || !node.name) return;
+		if (node.name === 'setup') {
+			for (const c of node.children) {
+				if (typeof c !== 'object') continue;
+				if (c.name === 'textsize_ratio') {
+					// ratio relative to 2.5; keep the base size fixed
+				} else if (c.name === 'linewidth') {
+					setup.lineWidthMm = numAt(c);
+				} else if (c.name === 'left_margin') {
+					setup.leftMargin = numAt(c);
+				} else if (c.name === 'right_margin') {
+					setup.rightMargin = numAt(c);
+				} else if (c.name === 'top_margin') {
+					setup.topMargin = numAt(c);
+				} else if (c.name === 'bottom_margin') {
+					setup.bottomMargin = numAt(c);
+				}
+			}
+		} else if (node.name === 'line' || node.name === 'rect') {
+			const start = findChild(node, 'start');
+			const end = findChild(node, 'end');
+			const base: any = {
+				start: new Vec2(numAt(start), 0),
+				end: new Vec2(numAt(end), 0),
+			};
+			// `(start x y)` or `(start (x y))`?
+			// KiCad: `(start 5.5 6.0)`
+			const sa = childAtoms(start);
+			if (sa.length >= 2) {
+				base.start = new Vec2(parseFloat(sa[0]) || 0, parseFloat(sa[1]) || 0);
+			}
+			const ea = childAtoms(end);
+			if (ea.length >= 2) {
+				base.end = new Vec2(parseFloat(ea[0]) || 0, parseFloat(ea[1]) || 0);
+			}
+			if (node.name === 'line') {
+				items.push({
+					kind: 'line', ...base,
+					startAnchor: anchorFrom(childAtoms(findChild(node, 'start_anchor'))[0] ?? 'rbcorner'),
+					endAnchor: anchorFrom(childAtoms(findChild(node, 'end_anchor'))[0] ?? 'rbcorner'),
+					repeat: 1, incrx: 0, incry: 0,
+				});
+			} else {
+				items.push({
+					kind: 'rect', ...base,
+					startAnchor: anchorFrom(childAtoms(findChild(node, 'start_anchor'))[0] ?? 'rbcorner'),
+					endAnchor: anchorFrom(childAtoms(findChild(node, 'end_anchor'))[0] ?? 'rbcorner'),
+					repeat: 1, incrx: 0, incry: 0,
+				});
+			}
+		} else if (node.name === 'text') {
+			const pos = findChild(node, 'pos');
+			const pa = childAtoms(pos);
+			items.push({
+				kind: 'text',
+				text: childAtoms(node)[0] ?? '',
+				pos: pa.length >= 2 ? new Vec2(parseFloat(pa[0]) || 0, parseFloat(pa[1]) || 0) : new Vec2(),
+				anchor: anchorFrom(childAtoms(findChild(node, 'anchor'))[0] ?? 'rbcorner'),
+				hAlign: (childAtoms(findChild(node, 'halign'))[0] as WksHAlign) ?? 'left',
+				vAlign: (childAtoms(findChild(node, 'valign'))[0] as WksVAlign) ?? 'center',
+				bold: (childAtoms(findChild(node, 'bold'))[0] ?? 'no') === 'yes',
+				sizeMm: numAt(findChild(node, 'height')) || setup.textSizeMm,
+				repeat: 1, incrx: 0, incry: 0, incrlabel: 0,
+			});
+		}
+		// recurse for title_block / nested groups
+		for (const c of node.children ?? []) {
+			if (typeof c === 'object') walk(c);
+		}
+	};
+
+	walk(root);
+
+	return { setup, items };
+}
+
+/** A resolved drawing-sheet graphic: a line or a piece of text at world coords. */
+export type WksLayoutItem =
+	| { kind: 'line'; a: Vec2; b: Vec2; width: number }
+	| { kind: 'rect'; a: Vec2; b: Vec2; width: number }
+	| { kind: 'text'; text: string; pos: Vec2; size: number; align: WksHAlign; vAlign: WksVAlign };
+
+/**
+ * Computes the concrete drawing-sheet frame layout for a given sheet size:
+ * every WksItem (line/rect/text) resolved to world coordinates (with repeat
+ * offsets), ready to hand to the painter. Mirrors KiCad's drawing-sheet item
+ * instantiation for a sheet.
+ */
+export function computeWksLayout(
+	sheetSize: Vec2,
+	setup: WksSetup,
+	items: WksItem[]
+): WksLayoutItem[] {
+	const out: WksLayoutItem[] = [];
+
+	const resolve = (point: Vec2, anchor: WksAnchor): Vec2 =>
+		resolveWksAnchor(sheetSize, setup, anchor, point);
+
+	for (const item of items) {
+		for (let i = 0; i < item.repeat; i++) {
+			const ox = item.incrx * i;
+			const oy = item.incry * i;
+			if (item.kind === 'line' || item.kind === 'rect') {
+				const a = resolve(item.start, item.startAnchor).add(new Vec2(ox, oy));
+				const b = resolve(item.end, item.endAnchor).add(new Vec2(ox, oy));
+				out.push({
+					kind: item.kind,
+					a,
+					b,
+					width: setup.lineWidthMm,
+				});
+			} else {
+				const pos = resolve(item.pos, item.anchor).add(new Vec2(ox, oy));
+				const label = item.incrlabel * i;
+				const text = item.kind === 'text' && label ? appendIncrLabel(item.text, label) : item.text;
+				out.push({
+					kind: 'text',
+					text,
+					pos,
+					size: item.sizeMm || setup.textSizeMm,
+					align: item.hAlign,
+					vAlign: item.vAlign,
+				});
+			}
+		}
+	}
+
+	return out;
+}
+
+/** Appends an incrementing number to a label (KiCad's `&uN` incrlabel). */
+function appendIncrLabel(aText: string, aIncrement: number): string {
+	// KiCad increments a trailing decimal (TEXT id = '&uNN' unresolved). For a
+	// plain label we just append the number when there is a `&` placeholder.
+	if (aText.includes('&u')) {
+		return aText.replace(/&u\d*/, String(aIncrement));
+	}
+	return aText;
+}
+
+/** Builds the layout for the built-in default sheet (title block drawn). */
+export function computeDefaultWksLayout(sheetSize: Vec2): WksLayoutItem[] {
+	return computeWksLayout(sheetSize, defaultWksSetup, defaultWksItems);
+}

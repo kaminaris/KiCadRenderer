@@ -146,6 +146,24 @@ export { computeWireBend } from './utils';
 export { parseText, parseBoardText } from './parser';
 export { pushUndoSnapshot, clearUndoRedo, canUndo, canRedo, undo, redo, cancelLatestUndoSnapshot, getUndoStackDebug, beginBatch, endBatch, commitAstMutation } from './state';
 
+// Connectivity (ported from KiCad pcbnew/connectivity/connectivity_items.h/.cpp)
+export {
+	CN_ANCHOR,
+	CN_ITEM,
+	CN_ZONE_LAYER,
+	CN_CLUSTER,
+	CN_LIST,
+	CN_TRI,
+} from './connectivity/ConnectivityItems';
+export type {
+	CN_ITEM_PARENT,
+	CN_SHAPE,
+	KICAD_T_VALUE,
+	PAD_ATTRIB_VALUE,
+	PCB_LAYER_ID_VALUE,
+	CN_LAYER,
+} from './connectivity/ConnectivityItems';
+
 // Math
 export { Angle } from './math/Angle';
 export type { AngleLike } from './math/Angle';

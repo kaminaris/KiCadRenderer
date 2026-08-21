@@ -1,4 +1,5 @@
-import { type PaintedShape, distanceToSegment, polygonEdgeDistance, pointInPolygon } from '../paint/PaintedShape';
+import { type PaintedShape } from '../paint/PaintedShape';
+import { distanceToSegmentCoords as distanceToSegment, polygonEdgeDistanceCoords as polygonEdgeDistance, pointInPolygonCoords as pointInPolygon } from '../geometry/polygon';
 
 /** Standard segment-segment orientation test (used only for the crossing
  *  check below — real routing shapes are thin bands around these lines, so

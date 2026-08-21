@@ -1,6 +1,6 @@
-import { Vec2 } from '../math/Vec2';
-import { delaunator } from '../math/Delaunator';
-import type { LayeredBoardScene } from './BoardPainter';
+import { Vec2 } from '../../math/Vec2';
+import { delaunator } from '../../math/Delaunator';
+import type { LayeredBoardScene } from '../BoardPainter';
 import { buildCopperGraph, type CopperGraph } from './BoardCopperGraph';
 
 export interface BoardRatsnestLine {

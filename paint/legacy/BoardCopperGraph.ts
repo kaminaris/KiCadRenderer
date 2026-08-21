@@ -1,8 +1,8 @@
-import { Vec2 } from '../math/Vec2';
-import { distanceToSegment, pointInPolygon, shapeToBBox, shapesOverlap } from './PaintedShape';
-import type { PaintedShape } from './PaintedShape';
-import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
-import { buildZoneFillIndex } from './ZoneFillIndex';
+import { Vec2 } from '../../math/Vec2';
+import { distanceToSegment, pointInPolygon, shapeToBBox, shapesOverlap } from '../PaintedShape';
+import type { PaintedShape } from '../PaintedShape';
+import type { LayeredBoardScene, PaintedItem } from '../BoardPainter';
+import { buildZoneFillIndex } from '../ZoneFillIndex';
 
 /**
  * KiCad connectivity design adaptation. Based on pcbnew/connectivity/

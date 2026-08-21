@@ -1,8 +1,8 @@
 import assert from 'assert';
 import { delaunator } from '../math/Delaunator';
-import { buildBoardRatsnest } from '../paint/BoardRatsnest';
-import type { CopperGraph } from '../paint/BoardCopperGraph';
-import { buildCopperGraph } from '../paint/BoardCopperGraph';
+import { buildBoardRatsnest } from '../paint/legacy/BoardRatsnest';
+import type { CopperGraph } from '../paint/legacy/BoardCopperGraph';
+import { buildCopperGraph } from '../paint/legacy/BoardCopperGraph';
 import { buildZoneFillIndex } from '../paint/ZoneFillIndex';
 import { pointInPolygon } from '../paint/PaintedShape';
 import { Vec2 } from '../math/Vec2';

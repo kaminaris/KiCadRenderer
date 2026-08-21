@@ -1,5 +1,7 @@
-import { buildBoardRatsnest } from './paint/BoardRatsnest';
-import { buildCopperGraph, type CopperGraph } from './paint/BoardCopperGraph';
+import { buildBoardRatsnest } from './paint/legacy/BoardRatsnest';
+import { buildGreedyRatsnest } from './paint/legacy/BoardRatsnestPreview';
+import { buildCopperGraph, type CopperGraph } from './paint/legacy/BoardCopperGraph';
+import { buildLocalConnectivityForFootprints, flattenDynamicRatsnest } from './connectivity/KicadRatsnest';
 
 /**
  * Recompute ratsnest airwires only for the nets of the given footprints and
@@ -170,9 +172,47 @@ export function beginBoardDragPreview(session: any, paintIds: Iterable<string>):
 		}
 	}
 	if (changed) {
+		// Set up the dynamic (moving-selection) connectivity used by the
+		// ported ComputeLocalRatsnest drag path. Build it once over just the
+		// moving footprints; positions are read live from the AST so each
+		// frame's RecalculateRatsnest() picks up the new origins.
+		if (session.boardConnectivity && session.ratsnestVisible) {
+			try {
+				const moving = facadeFootprintsFor(session, session.dragPreviewFootprints.keys());
+				const dynamicData = buildLocalConnectivityForFootprints(
+					session.boardRoot.rootElement,
+					session.scene,
+					moving.map((f: any) => f.Element?.() ?? f)
+				);
+				session.boardConnectivity.SetDynamicConnectivity(dynamicData);
+			}
+			catch (err) {
+				console.info('beginBoardDragPreview: dynamic connectivity build failed', err);
+				session.boardConnectivity.SetDynamicConnectivity(null);
+			}
+		}
+		console.info('beginBoardDragPreview: seeded preview footprints=', session.dragPreviewFootprints ? session.dragPreviewFootprints.size : 0);
 		session.geometryDirty = true;
 		session.scheduleRender();
 	}
+}
+
+/** Resolves moving AST footprint elements to their retained board-facade
+ *  footprint adapters (stable AstAdapter instances whose cached pads match
+ *  the static connectivity item map by reference). Falls back to a fresh
+ *  facade footprint when the retained facade is unavailable. */
+function facadeFootprintsFor(session: any, footprintEls: Iterable<any>): any[] {
+	const result: any[] = [];
+	const els = [...footprintEls];
+	if (!session.boardFacade?.Footprints) {
+		return els;
+	}
+	for (const fp of session.boardFacade.Footprints()) {
+		if (els.includes(fp.Element?.())) {
+			result.push(fp);
+		}
+	}
+	return result;
 }
 
 export function updateBoardDragPreview(session: any): void {
@@ -189,24 +229,52 @@ export function updateBoardDragPreview(session: any): void {
 			}
 		}
 	}
-	if (session.ratsnestVisible && session.dragPreviewRatsnestEdges.length > 0) {
-		const padCenters = new Map<string, any>();
+	if (session.ratsnestVisible && previewPadItems.length > 0) {
+		let previewLines: any[] = [];
+		try {
+			const movingFootprints = facadeFootprintsFor(session, session.dragPreviewFootprints.keys());
+			// Ported two-connectivity drag model (ComputeLocalRatsnest):
+			// refresh the dynamic connectivity's ratsnest at the current
+			// (post-translate) positions, then ask the static connectivity
+			// for the dynamic (drag) lines between static and moving nets
+			// and within the moving set itself.
+			const bc = session.boardConnectivity;
+			if (bc) {
+				bc.SetDynamicConnectivity(
+					buildLocalConnectivityForFootprints(
+						session.boardRoot.rootElement,
+						session.scene,
+						movingFootprints.map((f: any) => f.Element?.() ?? f)
+					)
+				);
+				const dynamicData = bc.GetDynamicConnectivity?.();
+				if (dynamicData) {
+					dynamicData.RecalculateRatsnest();
+					bc.ComputeLocalRatsnest(movingFootprints);
+					previewLines = flattenDynamicRatsnest(bc.GetLocalRatsnest());
+				}
+			} else {
+				// Fallback: legacy greedy MST (no static connectivity built).
+				const netIdsF = new Set<number>();
+				for (const item of previewPadItems) {
+					if (item.netId != null) netIdsF.add(item.netId);
+				}
+				previewLines = buildGreedyRatsnest(session.scene, netIdsF);
+			}
+			console.info('updateBoardDragPreview: preview lines=%d', previewLines.length);
+		} catch (err) {
+			previewLines = [];
+			console.info('ComputeLocalRatsnest failed', err);
+		}
+		session.previewRatsnestLines = previewLines;
+		const netIdsSet = new Set<number>();
 		for (const item of previewPadItems) {
-			padCenters.set(item.id, { x: item.bbox.x + item.bbox.w / 2, y: item.bbox.y + item.bbox.h / 2 });
+			if (item.netId != null) netIdsSet.add(item.netId);
 		}
-		for (const edge of session.dragPreviewRatsnestEdges) {
-			const center = padCenters.get(edge.padId);
-			const line = session.ratsnestLines[edge.lineIndex];
-			if (!center || !line) {
-				continue;
-			}
-			if (edge.endpoint === 'from') {
-				line.from = center;
-			}
-			else {
-				line.to = center;
-			}
-		}
+		session.previewRatsnestNetIds = netIdsSet;
+	} else {
+		session.previewRatsnestLines = [];
+		session.previewRatsnestNetIds = new Set();
 	}
 	session.scheduleRender();
 }
@@ -218,6 +286,19 @@ export function endBoardDragPreview(session: any): void {
 	const footprints = [...session.dragPreviewFootprints.keys()];
 	session.dragPreviewFootprints.clear();
 	session.dragPreviewRatsnestEdges = [];
+	session.previewRatsnestLines = [];
+	session.previewRatsnestNetIds = new Set();
+	// Tear down the ported two-connectivity drag state: restore all anchors'
+	// no-line flags and detach the dynamic data so the static connectivity
+	// returns to its normal per-net ratsnest.
+	if (session.boardConnectivity) {
+		try {
+			session.boardConnectivity.ClearLocalRatsnest();
+		} catch (err) {
+			console.info('ClearLocalRatsnest failed', err);
+		}
+		session.boardConnectivity.SetDynamicConnectivity(null);
+	}
 	for (const footprint of footprints) {
 		session.painter.updateFootprintItems(session.scene, session.boardRoot, footprint);
 	}

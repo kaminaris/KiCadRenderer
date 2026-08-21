@@ -11,8 +11,8 @@ self.addEventListener('message', (ev: MessageEvent) => {
 	}
 	try {
 		const lines = buildRatsnestFromAnchors(map, !!data.bench);
-		(self as DedicatedWorkerGlobalScope).postMessage({ lines });
+		(self as any).postMessage({ lines });
 	} catch (err) {
-		(self as DedicatedWorkerGlobalScope).postMessage({ error: String(err) });
+		(self as any).postMessage({ error: String(err) });
 	}
 });
