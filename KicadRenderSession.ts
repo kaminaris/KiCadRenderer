@@ -164,6 +164,8 @@ import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/legacy/Board
 import { buildCopperGraph, buildTrackChainGraph, type CopperGraph }         from './paint/legacy/BoardCopperGraph';
 import { buildKiCadRatsnest, flattenRatsnestEdges } from './connectivity/KicadRatsnest';
 import { buildBoardFacadeFromAst } from './connectivity/KicadBoardFacade';
+import { createBoard } from './connectivity/board';
+import { buildSchematicNetlistFromRoot } from './connectivity/SchematicExtractor';
 import { CONNECTIVITY_DATA } from './connectivity/ConnectivityData';
 import { buildInitialTrace }                          from './router/PnsDragger';
 import {
@@ -489,6 +491,9 @@ export class KicadRenderSession {
 	 * identity between the connAlgo item map and the moving items holds
 	 * (mirroring KiCad's stable BOARD_ITEM pointers). */
 	protected boardFacade: any = null;
+	/** The canonical BOARD model wrapping the AST root + scene (see
+	 *  connectivity/board.ts). Built whenever the board is (re)loaded. */
+	protected board: any = null;
 	protected ratsnestVisible = true;
 	/** Position signature of the last fast-drag commit's moved footprints (see
 	 *  commitBoardDragFast's Fix-3 skip), so an unchanged-position re-commit
@@ -4277,6 +4282,7 @@ export class KicadRenderSession {
 		// subsequent ratsnest reads reuse the item map.
 		this.boardConnectivity = new CONNECTIVITY_DATA();
 		this.boardFacade = buildBoardFacadeFromAst(this.boardRoot.rootElement, this.scene);
+		this.board = createBoard(this.boardRoot.rootElement, this.scene);
 		this.boardConnectivity.Build(this.boardFacade);
 		this.ratsnestLines = flattenRatsnestEdges(this.boardConnectivity, undefined);
 		// Spawn a background Worker to recompute ratsnest from anchors and update
@@ -4906,6 +4912,7 @@ export class KicadRenderSession {
 			// Rebuild from the (possibly edited) AST into the persistent
 			// instance, then flatten its edges.
 			this.boardFacade = buildBoardFacadeFromAst(this.boardRoot.rootElement, this.scene);
+			this.board = createBoard(this.boardRoot.rootElement, this.scene);
 			this.boardConnectivity.Build(this.boardFacade);
 			this.ratsnestLines = flattenRatsnestEdges(this.boardConnectivity);
 		}
@@ -4915,6 +4922,25 @@ export class KicadRenderSession {
 
 		this.lastRatsnestCommitSignature = null;
 		this.scheduleRender();
+	}
+
+	/** The canonical BOARD model (connectivity/board.ts), or null. */
+	getBoard(): any {
+		return this.board;
+	}
+
+	/** The board's net info (net code -> name -> netclass), or a fresh list. */
+	getNetinfo(): any {
+		return this.boardConnectivity?.GetNetInfo?.() ?? null;
+	}
+
+	/** Builds a netlist from the (schematic) board root via the schematic
+	 *  extractor. Returns null for a board document with no schematic. */
+	getSchematicNetlist(): any {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return null;
+		}
+		return buildSchematicNetlistFromRoot(this.schematicRoot.rootElement);
 	}
 
 	/** Per-zone fill provenance — purely session/UI bookkeeping (e.g. a

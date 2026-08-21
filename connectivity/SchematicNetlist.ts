@@ -334,3 +334,108 @@ export function applyGlobalLabels(
 	}
 	return result;
 }
+
+/**
+ * A net-tie: an element that electrically joins two nets (a zero-ohm link).
+ * Each `net_tie` has two (or more) net names it connects.
+ */
+export interface NET_TIE {
+	nets: string[];
+}
+
+/**
+ * Merges nets joined by net-ties: any wire already netnamed with one of a
+ * net-tie's names is unified with the others (the first net-tie name wins).
+ * Extends KiCad's net-tie handling (a simple name-groups merge here).
+ */
+export function mergeNetTies(baseNetnames: Map<string, string>, ties: NET_TIE[]): Map<string, string> {
+	const result = new Map(baseNetnames);
+	for (const tie of ties) {
+		const canonical = tie.nets[0] ?? '';
+		if (!canonical) continue;
+		for (const [id, n] of result) {
+			if (tie.nets.includes(n)) {
+				result.set(id, canonical);
+			}
+		}
+	}
+	return result;
+}
+
+/**
+ * Maps a pin/point attached to a bus wire (whose label is a bus name like
+ * `ADDR[0..7]`) to one of the bus's expanded member nets, by the point's
+ * relative position along the bus wire (t from 0..1). Mirrors KiCad's bus
+ * member assignment (index = t * memberCount), a best-effort simplification.
+ */
+export function mapBusPinToMember(
+	aPoint: Vec2,
+	aBusWire: WIRE,
+	aBusLabel: string
+): string | null {
+	const members = expandBusLabel(aBusLabel);
+	if (!members) {
+		return aBusLabel; // not a bus — the label IS the net
+	}
+	if (members.length === 0) {
+		return null;
+	}
+	// Project the point onto the bus wire to get t.
+	const a = aBusWire.start;
+	const b = aBusWire.end;
+	const vx = b.x - a.x;
+	const vy = b.y - a.y;
+	const lenSq = vx * vx + vy * vy;
+	let t = 0;
+	if (lenSq > 1e-12) {
+		t = ((aPoint.x - a.x) * vx + (aPoint.y - a.y) * vy) / lenSq;
+		t = Math.max(0, Math.min(1, t));
+	}
+	const idx = Math.min(members.length - 1, Math.floor(t * members.length));
+	return members[idx] ?? null;
+}
+
+/**
+ * The net class a power symbol's net belongs to (a power flag declares a net
+ * class, e.g. a "POWER" group). Mirrors KiCad's netclass-on-power-flag concept.
+ */
+export function powerNetClassOf(aPowerName: string, aFallback = 'Default'): string {
+	// Common convention: the net class is derived from the power name for
+	// well-known rails; else Default.
+	const upper = aPowerName.toUpperCase();
+	if (upper === 'GND' || upper === 'VCC' || upper === 'VDD' || upper === 'VSS' || upper === 'VEE') {
+		return 'Default';
+	}
+	return aFallback;
+}
+
+/**
+ * A sheet instance carrying a bus label: the hierarchical sheet has a bus
+ * label (e.g. ADDR[0..7]) at a port; expand it to member nets for bus-aware
+ * hierarchical resolution. Mirrors KiCad's bus-through-sheet concept.
+ */
+export interface SHEET_BUS_INSTANCE {
+	// The sheet's pin name (a bus label).
+	busLabel: string;
+	// The expanded member net names.
+	members(): string[];
+}
+
+/**
+ * Expands a sheet-instance bus label to its members (or [label] if not a bus).
+ */
+export function sheetBusMembers(aBusLabel: string): string[] {
+	const m = expandBusLabel(aBusLabel);
+	return m !== null && m.length > 0 ? m : [aBusLabel];
+}
+
+/**
+ * returns the set of net classes declared on power symbols (best-effort).
+ */
+export function powerSymbolsDeclaredNetClasses(aFlags: POWER_FLAG[]): Map<string, string> {
+	const map = new Map<string, string>();
+	for (const f of aFlags) {
+		map.set(f.name, powerNetClassOf(f.name));
+	}
+	return map;
+}

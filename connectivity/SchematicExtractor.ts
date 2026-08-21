@@ -13,7 +13,7 @@
 
 import { Vec2 } from '../math/Vec2';
 import { NETLIST, NETLIST_COMPONENT, NETLIST_PIN, buildNetlist } from './netlist';
-import { NET_LABEL, POWER_FLAG, WIRE, resolveWireNetnamesWithFlags, expandBusLabel, isBusLabel } from './schematic_netlist';
+import { NET_LABEL, POWER_FLAG, WIRE, resolveWireNetnamesWithFlags, expandBusLabel, isBusLabel } from './SchematicNetlist';
 
 /** A schematic component instance (for extraction). */
 export interface SCH_COMPONENT {

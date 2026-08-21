@@ -34,7 +34,7 @@ import { SHAPE_LINE_CHAIN } from '../geometry/ShapeLineChain';
 import { SHAPE_POLY_SET } from '../geometry/ShapePolySet';
 import { pointInPolygon } from '../geometry/polygon';
 import { TransformShapeWithClearanceToPolygon } from '../geometry/ConvertToPolygon';
-import { PAD_CLEARANCES } from './pad_clearances';
+import { PAD_CLEARANCES } from './PadClearances';
 import type { LayeredBoardScene } from '../paint/BoardPainter';
 
 /** Element kinds the facade understands. */

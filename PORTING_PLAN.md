@@ -12,6 +12,8 @@ with KiCad translations; don't validate, just port as much as possible."
 - The actual draw calls (GAL/OpenGL/Cairo) are NOT portable — replaced by the
   repo's display layer. We port the geometry/computation, not the GPU calls.
 - mm throughout (KiCad's VECTOR2I(nm) is bridged at the Clipper boundary).
+- **File naming: ProperCase** (e.g. `SchGeometry.ts`, `TextReflow.ts`,
+  `SchematicNetlist.ts`) — NOT underscore_case. Follow this for all new files.
 
 ## Modules (all in `shared/kicad-render/`)
 
@@ -22,14 +24,14 @@ with KiCad translations; don't validate, just port as much as possible."
   Clipper2/Inflate/Triangulate/Area/Centroid/Distance/NearestPoint/Format/
   WriteFilledPolys), `ShapeCollision.ts` (SHAPE_COLLISION + lazy registration),
   `ShapeCompound.ts`, `ShapeIndexList.ts`, `Seg.ts`, `BOX2.ts`, `Transform.ts`,
-  `ConvertToPolygon.ts`, `polygon.ts`, `format.ts`, `units.ts`, `sch_geometry.ts`.
+  `ConvertToPolygon.ts`, `polygon.ts`, `format.ts`, `units.ts`, `SchGeometry.ts`.
 - README has the file->C++ mapping.
 
 ### `connectivity/` — KiCad connectivity + board model  [BROAD, COMPLETE-ISH]
 - Port: ConnectivityItems / ConnectivityAlgo / ConnectivityData / RatsnestData /
-  RtreeNode / DynamicRtree / netinfo / clearance / padstack / pad_clearances /
-  thermal_relief / LayerId / PlotLayer / ratsnest_view / drill_grid / BoardStackup /
-  netlist / board / track / footprint / board.ts
+  RtreeNode / DynamicRtree / netinfo / clearance / padstack / PadClearances /
+  ThermalRelief / LayerId / PlotLayer / RatsnestView / DrillGrid / BoardStackup /
+  netlist / board / track / footprint / board
 - Facades (scene + AST) use canonical SHAPE collision; zones triangulated into
   CN_ZONE_LAYER R-tree (fixes false airwires); full 32 copper + tech layers.
 - README documents the port.
@@ -43,10 +45,16 @@ with KiCad translations; don't validate, just port as much as possible."
   DrawingSheet (incl. .kicad_wks parser + title block) / KicadStringEscapes etc.
 
 ## Progress log (most recent first)
-- Board setup -> netclass wiring (applySetupToNetInfo), DRAW_MODE/visibility
-  config, text metrics (measureText)
+- Power-symbol netclass + sheet-instance bus members, file/export writer
+  (FILE_WRITER, XYZ placement, BOM), EDA_TEXT stroke-grown rotated text box
+- Board-outline smoothing builder (buildBoardOutlines from Edge.Cuts segments),
+  SHAPE_POLY_SET::OuterHull
+- Bus-member pin -> expanded net mapping (mapBusPinToMember)
+- Session public getters: getBoard / getNetinfo / getSchematicNetlist
+- PCB_DIMENSION model, Session BOARD wiring, layer Gerber/drill writer
+- Schematic exact endpoint matching + net-ties + SCH_POLYLINE
+- Board setup -> netclass wiring, DRAW_MODE/visibility, text metrics
 - Hierarchical sheet + global-label connectivity, schematic netlist from root
-  (buildSchematicNetlistFromRoot), power-flag + bus netname resolution
 - Schematic netname resolution (+ power flags, bus labels), schematic->netlist
 - DrawingSheet frame layout (computeWksLayout), fp-editor, plot/Gerber export
 - BEZIER geometry, text reflow, thermal-relief helper
@@ -57,14 +65,15 @@ with KiCad translations; don't validate, just port as much as possible."
 - PNS_*, BOARD model, units, EDA_TEXT, ConvertToPolygon, full layers, SEG
 
 ## Next batch candidates (in suggested order)
-1. **Wire the new canonical models into `KicadRenderSession`** (BOARD/TRACK/
-   FOOTPRINT/netlist/netname resolution) replacing ad-hoc session use
-2. **Solder-mask/paste + thermal-relief wiring into `BoardZoneFill`** — canonical
+1. **Solder-mask/paste + thermal-relief wiring into `BoardZoneFill`** — canonical
    API provided, fill kept as-is
-3. Schematic connectivity completion: exact pin/wire endpoint matching,
-   sheet hierarchy instance resolution, net-ties
+2. `CELL`/SMD-pad thermal tie + STEP/PCB-export primitives
+3. Schematic bus connectivity polish: sheet-instance bus labels done (members);
+   remaining = full instance-to-instance bus coupling
 4. `ClangFormat`-style KiCad test vectors -> unit-test parity (when we switch
    to validation)
+
+
 
 ## Known rework remaining / to finish
 - `KicadBoardFacade.Drawings()` `never[]` type quirk (pre-existing, benign).

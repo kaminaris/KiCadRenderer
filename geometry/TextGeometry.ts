@@ -89,9 +89,11 @@ export class EDA_TEXT {
 		const w = this.attrs.m_Size.x;
 		const h = this.attrs.m_Size.y;
 
-		// Un-rotated box centered on position (KiCad anchors via justify).
-		const cw = w * this.text.length * 0.5;
-		const ch = h * 0.5;
+		// Un-rotated box centered on position (KiCad anchors via justify),
+		// grown by half the stroke width (the filled glyph extent).
+		const stroke = this.attrs.m_StrokeWidth / 2;
+		const cw = w * this.text.length * 0.5 + stroke;
+		const ch = h * 0.5 + stroke;
 		let corners = [
 			new Vec2(-cw, -ch),
 			new Vec2(cw, -ch),

@@ -14,6 +14,7 @@
 import { Vec2 } from '../math/Vec2';
 import { BBox } from '../math/BBox';
 import { SEG } from './Seg';
+import { SHAPE_LINE_CHAIN } from './ShapeLineChain';
 
 /** Mirrors SCH_LINE_T: a wire, a bus, or a graphic line. */
 export enum SCH_LINE_TYPE {
@@ -155,5 +156,51 @@ export class SCH_NO_CONNECT {
 			new Vec2(this.position.x - a, this.position.y + a),
 			new Vec2(this.position.x + a, this.position.y - a),
 		];
+	}
+}
+
+/**
+ * A schematic polyline (a multi-vertex graphic shape). Mirrors KiCad's
+ * SCH_POLYLINE (a series of connected points).
+ */
+export class SCH_POLYLINE {
+	points: Vec2[] = [];
+	background: boolean = false;
+
+	constructor(aPoints?: Vec2[]) {
+		if (aPoints) {
+			this.points = aPoints.map(p => p.copy());
+		}
+	}
+
+	SetPoints(aPoints: Vec2[]): void {
+		this.points = aPoints.map(p => p.copy());
+	}
+
+	GetPoints(): Vec2[] {
+		return this.points.map(p => p.copy());
+	}
+
+	PointCount(): number {
+		return this.points.length;
+	}
+
+	/** Convert to a SHAPE_LINE_CHAIN (open). */
+	ToLineChain(): SHAPE_LINE_CHAIN {
+		return new SHAPE_LINE_CHAIN(this.points.map(p => p.copy()), false);
+	}
+
+	GetBoundingBox(): BBox {
+		if (this.points.length === 0) {
+			return new BBox();
+		}
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const p of this.points) {
+			minX = Math.min(minX, p.x);
+			minY = Math.min(minY, p.y);
+			maxX = Math.max(maxX, p.x);
+			maxY = Math.max(maxY, p.y);
+		}
+		return BBox.fromPoints([new Vec2(minX, minY), new Vec2(maxX, maxY)]);
 	}
 }

@@ -878,6 +878,18 @@ export class SHAPE_POLY_SET extends SHAPE {
 	}
 
 	/**
+	 * A rough outer hull: the first outline as a closed chain (holes ignored).
+	 * Mirrors the KiCad "outer hull" concept at a coarse level (for a single
+	 * outline the true hull is the outline itself).
+	 */
+	OuterHull(): SHAPE_LINE_CHAIN | null {
+		if (this.m_polys.length === 0) {
+			return null;
+		}
+		return this.m_polys[0]!.outline.Clone();
+	}
+
+	/**
 	 * S-expression text for this polygon set, mirroring KiCad's
 	 * `(poly_pts (xy x y)...)` / `(ps_add_xy ...)` style output. Emits each
 	 * outline, then its holes as separate `(poly_pts ...)` rings.
