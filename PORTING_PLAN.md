@@ -45,18 +45,21 @@ with KiCad translations; don't validate, just port as much as possible."
   DrawingSheet (incl. .kicad_wks parser + title block) / KicadStringEscapes etc.
 
 ## Progress log (most recent first)
-- Power-symbol netclass + sheet-instance bus members, file/export writer
-  (FILE_WRITER, XYZ placement, BOM), EDA_TEXT stroke-grown rotated text box
-- Board-outline smoothing builder (buildBoardOutlines from Edge.Cuts segments),
-  SHAPE_POLY_SET::OuterHull
-- Bus-member pin -> expanded net mapping (mapBusPinToMember)
-- Session public getters: getBoard / getNetinfo / getSchematicNetlist
-- PCB_DIMENSION model, Session BOARD wiring, layer Gerber/drill writer
+- Net driver/ERC pin ranking (pinDriverPriority/resolveNetDriver in PinInfo),
+  net-code assignment (NetCode: assignNetCodes/NETCODE_LIST), fixed
+  SHAPE_LINE_CHAIN closed-loop GetSegment wrapping
+- Pin electrical types/shapes (PinInfo), SMD thermal-tie helpers, STEP-like
+  solid export (StepExport)
+- [rename] standardized all port files to ProperCase
+- Power-symbol netclass + sheet-instance bus members, file/export writer,
+  EDA_TEXT stroke box
+- Board-outline smoothing, SHAPE_POLY_SET::OuterHull, bus-member pin mapping
+- Session getters, PCB_DIMENSION, layer Gerber/drill writer
 - Schematic exact endpoint matching + net-ties + SCH_POLYLINE
-- Board setup -> netclass wiring, DRAW_MODE/visibility, text metrics
+- Board setup -> netclass wiring, DRAW_MODE, text metrics
 - Hierarchical sheet + global-label connectivity, schematic netlist from root
 - Schematic netname resolution (+ power flags, bus labels), schematic->netlist
-- DrawingSheet frame layout (computeWksLayout), fp-editor, plot/Gerber export
+- DrawingSheet frame layout, fp-editor, plot/Gerber export
 - BEZIER geometry, text reflow, thermal-relief helper
 - BoardStackup, pad connection points, netlist extractor, .kicad_wks parser
 - KICAD_T (SCH_*) completion, drill geometry, angle helpers
@@ -66,10 +69,10 @@ with KiCad translations; don't validate, just port as much as possible."
 
 ## Next batch candidates (in suggested order)
 1. **Solder-mask/paste + thermal-relief wiring into `BoardZoneFill`** — canonical
-   API provided, fill kept as-is
-2. `CELL`/SMD-pad thermal tie + STEP/PCB-export primitives
-3. Schematic bus connectivity polish: sheet-instance bus labels done (members);
-   remaining = full instance-to-instance bus coupling
+   API provided; display fill kept as-is
+2. Schematic driver-based net resolution (use resolveNetDriver in
+   buildSchematicNetlist to resolve conflicting net names / power driver)
+3. Full sheet-instance-to-instance bus coupling + subgraph code assignment
 4. `ClangFormat`-style KiCad test vectors -> unit-test parity (when we switch
    to validation)
 

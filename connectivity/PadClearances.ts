@@ -82,3 +82,33 @@ export class PAD_CLEARANCES {
 		return this.customSpokeCount > 0 ? this.customSpokeCount : 4;
 	}
 }
+
+/**
+ * The effective pad-zone connection for a pad, mirroring KiCad's resolution:
+ * a THT pad defaulting to THERMAL unless overridden; SMD/NPTH default FULL.
+ */
+export function effectiveZoneConnection(
+	aPad: Pick<PAD_CLEARANCES, 'zoneConnection'>,
+	aIsThruHole: boolean
+): ZONE_CONNECTION {
+	const mode = aPad.zoneConnection;
+	// "Default" isn't a ZONE_CONNECTION enum here; if mode is FULL/THERMAL/NONE
+	// it's explicit; otherwise derive by hole-ness.
+	if (mode === ZONE_CONNECTION.FULL || mode === ZONE_CONNECTION.THERMAL || mode === ZONE_CONNECTION.NONE) {
+		return mode;
+	}
+	return aIsThruHole ? ZONE_CONNECTION.THERMAL : ZONE_CONNECTION.FULL;
+}
+
+/**
+ * The thermal spoke count for a pad (custom override else 4). Mirrors
+ * PAD::GetCustomSpokeCount / the default 4 spokes.
+ */
+export function effectiveSpokeCount(aPad: Pick<PAD_CLEARANCES, 'customSpokeCount'>): number {
+	return aPad.customSpokeCount > 0 ? aPad.customSpokeCount : 4;
+}
+
+/** The thermal gap + spoke width for a pad. */
+export function thermalDims(aPad: Pick<PAD_CLEARANCES, 'thermalGap' | 'thermalWidth'>): { gap: number; width: number } {
+	return { gap: aPad.thermalGap, width: aPad.thermalWidth };
+}

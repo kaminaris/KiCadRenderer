@@ -135,8 +135,9 @@ export class SHAPE_LINE_CHAIN extends SHAPE {
 	}
 
 	GetSegment(aIndex: number): { A: Vec2; B: Vec2 } {
-		if (aIndex === this.SegmentCount() && this.m_points.length > 0 && this.m_closed) {
-			return { A: this.m_points[this.m_points.length - 1]!, B: this.m_points[0]! };
+		const n = this.m_points.length;
+		if (this.m_closed) {
+			return { A: this.m_points[aIndex % n]!, B: this.m_points[(aIndex + 1) % n]! };
 		}
 		return { A: this.m_points[aIndex]!, B: this.m_points[aIndex + 1]! };
 	}
