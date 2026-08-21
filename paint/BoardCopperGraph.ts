@@ -2,6 +2,7 @@ import { Vec2 } from '../math/Vec2';
 import { distanceToSegment, pointInPolygon, shapeToBBox, shapesOverlap } from './PaintedShape';
 import type { PaintedShape } from './PaintedShape';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
+import { buildZoneFillIndex } from './ZoneFillIndex';
 
 /**
  * KiCad connectivity design adaptation. Based on pcbnew/connectivity/
@@ -269,11 +270,17 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	// KiCad's CN_ITEM search is item-vs-item, not a matrix of special-case
 	// pad/via/track rules.  Index every real copper shape by its bbox, then
 	// collide same-net, same-layer candidates through one shared path.
+	// Precompute each contact's bbox once so the (majority) non-overlapping
+	// candidate pairs are rejected by a cheap bbox test without re-deriving
+	// the bbox inside shapesOverlap on every call — the dominant per-pair cost
+	// on dense same-net copper.
+	const contactBboxes = new Array<{ x: number; y: number; w: number; h: number }>(copperContacts.length);
 	const shapeGrid = new Map<string, number[]>();
 	for (let contactIndex = 0; contactIndex < copperContacts.length; contactIndex++) {
 		const { node: index, shape } = copperContacts[contactIndex]!;
 		const node = nodes[index]!;
 		const bbox = shapeToBBox(shape);
+		contactBboxes[contactIndex] = bbox;
 		const min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
 		const key = bucketKey(node.netId, node.layer);
 		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) pushGridEntry(shapeGrid, gridKey(key, x, y), contactIndex);
@@ -283,7 +290,7 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	for (let contactIndex = 0; contactIndex < copperContacts.length; contactIndex++) {
 		const { node: index, shape } = copperContacts[contactIndex]!;
 		const node = nodes[index]!;
-		const bbox = shapeToBBox(shape), min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
+		const bbox = contactBboxes[contactIndex]!, min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
 		const key = bucketKey(node.netId, node.layer);
 		shapeVisit++;
 		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) for (const otherContactIndex of shapeGrid.get(gridKey(key, x, y)) ?? []) {
@@ -292,6 +299,14 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 			seenShapes[otherContactIndex] = shapeVisit;
 			const other = copperContacts[otherContactIndex]!;
 			if (nodes[other.node]!.itemId === node.itemId) continue;
+			const otherBbox = contactBboxes[otherContactIndex]!;
+			// BBox reject at least as permissive as shapesOverlap's own (using
+			// the connectivity epsilon, which is >> PaintedShape's 1e-8) so we
+			// never discard a pair shapesOverlap would accept.
+			if (bbox.x > otherBbox.x + otherBbox.w + CONNECT_EPSILON_MM
+				|| bbox.x + bbox.w + CONNECT_EPSILON_MM < otherBbox.x
+				|| bbox.y > otherBbox.y + otherBbox.h + CONNECT_EPSILON_MM
+				|| bbox.y + bbox.h + CONNECT_EPSILON_MM < otherBbox.y) continue;
 			if (shapesOverlap(shape, other.shape)) union(index, other.node);
 		}
 	}
@@ -360,23 +375,75 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	// against the zone's own bucket-matched nodes only (cheap: nodeBuckets
 	// is already keyed by net+layer).  Each ZoneFillRegion is an actual
 	// filled island, never the zone's authored outline.
+	//
+	// Each fill is triangulated once into a spatial index (ZoneFillIndex,
+	// mirroring KiCad's CN_ZONE_LAYER::BuildRTree) so "does this node/edge
+	// touch the pour" is a grid triangle lookup — O(1)-ish — instead of the
+	// previous O(fill_vertices) pointInPolygon + polygon-vs-polygon sweep
+	// over every same-net node, which was the dominant cost on zoned boards.
+	const zoneIndexes = new Map<typeof scene.zoneFills[number], ReturnType<typeof buildZoneFillIndex>>();
 	const zoneContacts: Array<{ fill: typeof scene.zoneFills[number]; node: number | null }> = [];
 	for (const fill of scene.zoneFills) {
 		if (activeNetFilter && !activeNetFilter.has(fill.netId)) continue;
 		const key = bucketKey(fill.netId, fill.layer);
 		const bucketNodes = nodeBuckets.get(key);
 		if (!bucketNodes) continue;
-		const fillShape: PaintedShape = { type: 'polygon', points: fill.points, closed: true };
+		const index = buildZoneFillIndex(fill.points);
+		// A degenerate fill (or one that can't be triangulated) still
+		// connects via the O(V) pointInPolygon fallback inside ZoneFillIndex's
+		// containsPoint/overlapsPolygon, so correctness never regresses.
+		if (index) zoneIndexes.set(fill, index);
+		// KiCad only tests an item against a zone when their bboxes are near
+		// (its R-tree FindNearby). Cull to that here: an item far outside the
+		// pour's bounding box (and whose shapes' bboxes don't reach it) can
+		// never touch it, so it is skipped instead of point-tested.
+		const fillBBox = index ? index.bbox : bboxOfPointsSimple(fill.points);
+		const reach = CONNECT_EPSILON_MM;
 		let first: number | null = null;
 		for (const nodeIndex of bucketNodes) {
 			const point = nodes[nodeIndex]!.point;
+			// Near-cull (R-tree-style): skip if neither the anchor point nor any
+			// of its copper shapes' bboxes can reach the fill bbox this pass.
+			if (point.x < fillBBox.x - reach || point.x > fillBBox.x + fillBBox.w + reach
+				|| point.y < fillBBox.y - reach || point.y > fillBBox.y + fillBBox.h + reach) {
+				const copperShapes0 = nodeCopperShapes.get(nodeIndex);
+				let near = false;
+				if (copperShapes0) {
+					for (const s of copperShapes0) {
+						const sb = shapeToBBox(s);
+						if (!(sb.x > fillBBox.x + fillBBox.w + reach
+							|| sb.x + sb.w + reach < fillBBox.x
+							|| sb.y > fillBBox.y + fillBBox.h + reach
+							|| sb.y + sb.h + reach < fillBBox.y)) { near = true; break; }
+					}
+				}
+				if (!near) continue;
+			}
 			// A via, pad, or track can legitimately meet a poured island while
 			// its anchor centre lies outside it (common at zone edges).  KiCad
 			// asks its CN_ZONE_LAYER to collide the item's actual shape; this
 			// adaptation keeps that same item-level rule in nodeCopperShapes.
+			// index.containsPoint is a fast triangle lookup; the node-copper
+			// shape fallback uses index.overlapsPolygon (also triangle-backed)
+			// instead of shapesOverlap against the whole fill polygon.
 			const copperShapes = nodeCopperShapes.get(nodeIndex);
-			if (!pointInPolygon(fill.points, point.x, point.y)
-				&& (!copperShapes || !copperShapes.some(shape => shapesOverlap(fillShape, shape)))) continue;
+			let touches = false;
+			if (index) {
+				if (index.containsPoint(point.x, point.y)) touches = true;
+				else if (copperShapes) {
+					for (const shape of copperShapes) {
+						if (shapeOverlapsZone(shape, index)) { touches = true; break; }
+					}
+				}
+			}
+			else {
+				// No usable zone index (e.g. zero-area/degenerate fill): fall
+				// back to the exact point-in-polygon / polygon-overlap path so
+				// a weird fill never changes connectivity.
+				if (pointInPolygon(fill.points, point.x, point.y)) touches = true;
+				else if (copperShapes && copperShapes.some(shape => shapesOverlap(fillShapeOf(fill), shape))) touches = true;
+			}
+			if (!touches) continue;
 			if (first === null) first = nodeIndex;
 			else union(first, nodeIndex);
 		}
@@ -392,8 +459,7 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	for (let index = 0; index < zoneContacts.length; index++) {
 		const contact = zoneContacts[index]!;
 		if (contact.node === null) continue;
-		const shape: PaintedShape = { type: 'polygon', points: contact.fill.points, closed: true };
-		const bbox = shapeToBBox(shape);
+		const bbox = shapeToBBox({ type: 'polygon', points: contact.fill.points, closed: true });
 		const min = gridCell(bbox.x, bbox.y);
 		const max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
 		const key = bucketKey(contact.fill.netId, contact.fill.layer);
@@ -406,21 +472,173 @@ export function buildCopperGraph(scene: LayeredBoardScene, netFilter?: ReadonlyS
 	for (let i = 0; i < zoneContacts.length; i++) {
 		const a = zoneContacts[i]!;
 		if (a.node === null) continue;
-		const shapeA: PaintedShape = { type: 'polygon', points: a.fill.points, closed: true };
+		const shapeA = { type: 'polygon' as const, points: a.fill.points, closed: true as const };
 		const bbox = shapeToBBox(shapeA);
 		const min = gridCell(bbox.x, bbox.y), max = gridCell(bbox.x + bbox.w, bbox.y + bbox.h);
 		zoneVisit++;
+		const indexA = zoneIndexes.get(a.fill);
 		for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) for (const j of zoneGrid.get(gridKey(bucketKey(a.fill.netId, a.fill.layer), x, y)) ?? []) {
 			if (j <= i || seenZoneContacts[j] === zoneVisit) continue;
 			seenZoneContacts[j] = zoneVisit;
 			const b = zoneContacts[j]!;
 			if (b.node === null) continue;
-			const shapeB: PaintedShape = { type: 'polygon', points: b.fill.points, closed: true };
-			if (shapesOverlap(shapeA, shapeB)) union(a.node, b.node);
+			// Zone-zone: use KiCad's checkZoneZoneConnection approach — two
+			// same-net fills touch if any vertex of one lies inside the other
+			// (fast triangle-R-tree ContainsPoint), so a large fill is never
+			// polygon-overlap-tested against another. On this board the bboxes
+			// of the 81 power-plane fills overlap heavily; the previous
+			// overlapsPolygon made this the dominant cost (~1s).
+			const indexB = zoneIndexes.get(b.fill);
+			let overlap = false;
+			if (indexA && indexB) {
+				if (a.fill.points.length <= b.fill.points.length) {
+					for (const p of a.fill.points) if (indexB.containsPoint(p.x, p.y)) { overlap = true; break; }
+					if (!overlap) for (const p of b.fill.points) if (indexA.containsPoint(p.x, p.y)) { overlap = true; break; }
+				}
+				else {
+					for (const p of b.fill.points) if (indexA.containsPoint(p.x, p.y)) { overlap = true; break; }
+					if (!overlap) for (const p of a.fill.points) if (indexB.containsPoint(p.x, p.y)) { overlap = true; break; }
+				}
+			}
+			else {
+				overlap = shapesOverlap(shapeA, { type: 'polygon', points: b.fill.points, closed: true });
+			}
+			if (overlap) union(a.node, b.node);
 		}
 	}
 
 	return { nodes, segments, find, adjacent: index => adjacency[index] ?? [] };
+}
+/** Returns a polygon `PaintedShape` for a zone fill region (used by the
+ *  no-index fallback so a degenerately-shaped fill still connects via the
+ *  exact polygon-overlap path). */
+function fillShapeOf(fill: { points: { x: number; y: number }[] }): PaintedShape {
+	return { type: 'polygon', points: fill.points, closed: true };
+}
+
+/**
+ * Builds a minimal TRACK-ONLY adjacency graph: nodes at every track/arc
+ * endpoint, unioned where two tracks' endpoints physically touch (same net,
+ * same layer, within CONNECT_EPSILON_MM). Pads, vias, graphics and zone fills
+ * are deliberately omitted.
+ *
+ * This is what walking a connected track chain needs and nothing more — the
+ * full `buildCopperGraph` (which also builds pad/via/zone connectivity) is
+ * orders of magnitude heavier on a zoned board, and assembleTrackLine triggers
+ * it on every mouse-down just to find the chain a clicked segment belongs to.
+ * KiCad never rebuilds full connectivity to walk a track: it queries the
+ * prebuilt topology. Mirroring that, this scoped builder gives the same
+ * chain-walk result (track-to-track contact is the only thing a chain walk
+ * depends on) without paying for the board-wide copper graphs.
+ *
+ * `adjacent` reflects only track-track contacts, so `walkTrackChainOutward` /
+ * `isTrackChainStop` see track nodes only and stop naturally at chain ends.
+ */
+export function buildTrackChainGraph(scene: LayeredBoardScene): CopperGraph {
+	const nodes: CopperGraphNode[] = [];
+	const segments: CopperGraphSegment[] = [];
+	const adjacency: number[][] = [];
+	const parent: number[] = [];
+	const addNode = (point: Vec2, layer: string, netId: number, itemId: string): number => {
+		const index = nodes.length;
+		nodes.push({ point, layer, netId, itemId, itemKind: 'track' });
+		parent.push(index);
+		adjacency.push([]);
+		return index;
+	};
+	const find = (index: number): number => {
+		while (parent[index] !== index) {
+			parent[index] = parent[parent[index]!]!;
+			index = parent[index]!;
+		}
+		return index;
+	};
+	const union = (a: number, b: number): void => {
+		if (a !== b && !adjacency[a]!.includes(b)) {
+			adjacency[a]!.push(b);
+			adjacency[b]!.push(a);
+		}
+		const ra = find(a), rb = find(b);
+		if (ra !== rb) parent[rb] = ra;
+	};
+
+	// Index track endpoints by (net, layer, grid cell) so touching endpoints
+	// are found in near-constant time instead of pairwise.
+	const endpointGrid = new Map<string, number[]>();
+	for (const items of scene.layerBuckets.values()) {
+		for (const item of items) {
+			if (item.kind !== 'track' || item.netId == null || item.netId <= 0) continue;
+			if (item.shape.type === 'segment') {
+				const a = addNode(new Vec2(item.shape.x1, item.shape.y1), item.layer, item.netId, item.id);
+				const b = addNode(new Vec2(item.shape.x2, item.shape.y2), item.layer, item.netId, item.id);
+				union(a, b);
+				segments.push({ a, b, layer: item.layer, netId: item.netId, width: item.shape.width });
+			}
+			else if (item.shape.type === 'circle' && typeof item.element?.getStartMidEnd === 'function') {
+				const { start, end } = item.element.getStartMidEnd();
+				const width = typeof item.element.getWidth === 'function' ? item.element.getWidth() : 0.25;
+				const a = addNode(new Vec2(start.x, start.y), item.layer, item.netId, item.id);
+				const b = addNode(new Vec2(end.x, end.y), item.layer, item.netId, item.id);
+				union(a, b);
+				segments.push({ a, b, layer: item.layer, netId: item.netId, width });
+			}
+		}
+	}
+	for (let index = 0; index < nodes.length; index++) {
+		const node = nodes[index]!;
+		const cell = gridCell(node.point.x, node.point.y);
+		const key = bucketKey(node.netId, node.layer);
+		for (let x = cell.x - 1; x <= cell.x + 1; x++) {
+			for (let y = cell.y - 1; y <= cell.y + 1; y++) {
+				for (const other of endpointGrid.get(gridKey(key, x, y)) ?? []) {
+					// Incremental insertion means every candidate in the grid was
+					// added before `index`, so there is no `other > index` here to
+					// dedup against (unlike buildCopperGraph's post-hoc sweep).
+					// The itemId guard avoids re-uniting a segment's own two ends.
+					if (nodes[other]!.itemId === node.itemId) continue;
+					// Tracks on different layers never touch (no via here).
+					if (nodes[other]!.layer !== node.layer) continue;
+					if (distance(node.point, nodes[other]!.point) <= CONNECT_EPSILON_MM) {
+						union(index, other);
+					}
+				}
+			}
+		}
+		pushGridEntry(endpointGrid, gridKey(key, cell.x, cell.y), index);
+	}
+
+	return { nodes, segments, find, adjacent: index => adjacency[index] ?? [] };
+}
+
+/** Does `shape` overlap a zone fill, using the fill's triangle index when
+ *  possible (fast) and falling back to an exact polygon overlap otherwise. */
+function shapeOverlapsZone(shape: PaintedShape, index: NonNullable<ReturnType<typeof buildZoneFillIndex>>): boolean {
+	// A segment is routed to the fill's exact width-honoring segment test
+	// (a track touching the pour boundary counts even when the centerline
+	// doesn't cross it — the dominant real-world case on routed power nets).
+	// Other shapes are represented as small polygons so the fill's edge-based
+	// overlapsPolygon gives a faithful answer; a circle is a 16-gon, plenty
+	// for the ~sub-mm via/pad radii versus the mm-scale index cell.
+	if (shape.type === 'segment') {
+		return index.segmentTouches(shape.x1, shape.y1, shape.x2, shape.y2, shape.width);
+	}
+	const pts: { x: number; y: number }[] = [];
+	if (shape.type === 'circle') {
+		const steps = 16;
+		for (let i = 0; i < steps; i++) {
+			const a = (i / steps) * Math.PI * 2;
+			pts.push({ x: shape.cx + shape.r * Math.cos(a), y: shape.cy + shape.r * Math.sin(a) });
+		}
+	}
+	else if (shape.type === 'rect') {
+		pts.push(
+			{ x: shape.x, y: shape.y }, { x: shape.x + shape.w, y: shape.y },
+			{ x: shape.x + shape.w, y: shape.y + shape.h }, { x: shape.x, y: shape.y + shape.h });
+	}
+	else {
+		pts.push(...shape.points);
+	}
+	return index.overlapsPolygon(pts, true);
 }
 
 /** Net+layer bucket key — a Unicode NUL separator so no netId/layer-name
@@ -432,6 +650,19 @@ function bucketKey(netId: number, layer: string): string {
 
 function gridCell(x: number, y: number): { x: number; y: number } {
 	return { x: Math.floor(x / CONNECT_GRID_CELL_MM), y: Math.floor(y / CONNECT_GRID_CELL_MM) };
+}
+
+/** Minimal bbox of a point ring (used only for the zone near-cull fallback). */
+function bboxOfPointsSimple(points: { x: number; y: number }[]): { x: number; y: number; w: number; h: number } {
+	let minX = Number.POSITIVE_INFINITY, minY = Number.POSITIVE_INFINITY;
+	let maxX = Number.NEGATIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY;
+	for (const p of points) {
+		if (p.x < minX) minX = p.x;
+		if (p.y < minY) minY = p.y;
+		if (p.x > maxX) maxX = p.x;
+		if (p.y > maxY) maxY = p.y;
+	}
+	return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
 function gridKey(bucket: string, x: number, y: number): string {

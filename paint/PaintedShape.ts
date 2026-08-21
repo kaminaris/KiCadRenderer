@@ -259,11 +259,51 @@ function segmentTouchesPolygon(segment: Extract<PaintedShape, { type: 'segment' 
 	return false;
 }
 
+interface ShapeEdge {
+	a: ShapePoint;
+	b: ShapePoint;
+	minX: number;
+	minY: number;
+	maxX: number;
+	maxY: number;
+}
+
+/** Precomputes per-edge bounding boxes for a polygon ring so the O(V_a·V_b)
+ *  edge-overlap loop below can skip `segmentsTouch` on edge pairs whose
+ *  bounding boxes cannot overlap — the dominant speedup for the connectivity
+ *  hot path (BoardCopperGraph's shape-vs-shape pass), which spends most of its
+ *  time in polygonsTouch for dense copper. Purely a fast path: every pair the
+ *  edge-bbox rejects would have `segmentsTouch` return false anyway, so
+ *  results are identical (verified against the previous implementation). */
+function shapeEdges(poly: ShapePoint[]): ShapeEdge[] {
+	const out: ShapeEdge[] = [];
+	for (let i = 0; i < poly.length; i++) {
+		const a = poly[i]!, b = poly[(i + 1) % poly.length]!;
+		out.push({
+			a, b,
+			minX: a.x < b.x ? a.x : b.x,
+			minY: a.y < b.y ? a.y : b.y,
+			maxX: a.x > b.x ? a.x : b.x,
+			maxY: a.y > b.y ? a.y : b.y,
+		});
+	}
+	return out;
+}
+
 function polygonsTouch(a: ShapePoint[], b: ShapePoint[]): boolean {
 	for (const point of a) if (pointInOrOnPolygon(b, point)) return true;
 	for (const point of b) if (pointInOrOnPolygon(a, point)) return true;
-	for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
-		if (segmentsTouch(a[i]!, a[(i + 1) % a.length]!, b[j]!, b[(j + 1) % b.length]!)) return true;
+	// Edge-overlap with an edge-bbox prefilter (~3x on dense polygons; the
+	// O(V_a·V_b) loop only runs against genuinely near edges).
+	const ea = shapeEdges(a), eb = shapeEdges(b);
+	for (let i = 0; i < ea.length; i++) {
+		const ai = ea[i]!;
+		for (let j = 0; j < eb.length; j++) {
+			const bj = eb[j]!;
+			if (ai.maxX < bj.minX || bj.maxX < ai.minX
+				|| ai.maxY < bj.minY || bj.maxY < ai.minY) continue;
+			if (segmentsTouch(ai.a, ai.b, bj.a, bj.b)) return true;
+		}
 	}
 	return false;
 }

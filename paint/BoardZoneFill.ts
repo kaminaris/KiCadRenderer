@@ -10,7 +10,7 @@ import { PaintedShape } from './PaintedShape';
 
 /**
  * A scoped, faithful translation of real KiCad's zone_filler.cpp pipeline —
- * ported to the Clipper2-TS engine (shared/clipper2-ts) rather than a
+ * ported to the clipper2-ts engine (shared/clipper2-ts) rather than a
  * closed-form approximation, per this project's standing "code parity"
  * preference (see the harmonic-munching-trinket plan).
  *

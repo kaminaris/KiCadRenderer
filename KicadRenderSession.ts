@@ -161,7 +161,7 @@ import {
 import { boardBackgroundColor, styleForLayer }        from './paint/LayerColors';
 import { layerPaintRank }                             from './paint/LayerOrder';
 import { buildBoardRatsnest, type BoardRatsnestLine } from './paint/BoardRatsnest';
-import { buildCopperGraph, type CopperGraph }         from './paint/BoardCopperGraph';
+import { buildCopperGraph, buildTrackChainGraph, type CopperGraph }         from './paint/BoardCopperGraph';
 import { buildInitialTrace }                          from './router/PnsDragger';
 import {
 	buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath,
@@ -471,6 +471,12 @@ export class KicadRenderSession {
 	protected boardHighlight: { bbox: { x: number; y: number; w: number; h: number } } | null = null;
 	protected ratsnestLines: BoardRatsnestLine[] = [];
 	protected ratsnestVisible = true;
+	/** Position signature of the last fast-drag commit's moved footprints (see
+	 *  commitBoardDragFast's Fix-3 skip), so an unchanged-position re-commit
+	 *  doesn't re-run the net-scoped copper-graph build. Invalidated whenever
+	 *  the whole scene is rebuilt (i.e. on any structural edit or a manual
+	 *  refreshBoardRatsnest), so it can never cause a stale skip. */
+	protected lastRatsnestCommitSignature: string | null = null;
 	protected zoneDisplayMode: ZoneDisplayMode = 'filled';
 	protected padDisplayMode: ItemDisplayMode = 'filled';
 	protected viaDisplayMode: ItemDisplayMode = 'filled';
@@ -1847,12 +1853,43 @@ export class KicadRenderSession {
 		for (const fp of footprintsToRefresh) {
 			this.painter.updateFootprintItems(this.scene, this.boardRoot, fp);
 		}
+		// Fix 3 — incremental drop: a fast-drag commit that leaves the moved
+		// footprint(s) at the SAME positions as the previous commit (e.g. a
+		// re-render / duplicate MouseUp on an already-baked position, or a
+		// component dragged in place) must not re-run the whole net-scoped
+		// copper-graph build — identical positions mean identical connectivity,
+		// so the ratsnest is already correct. Keyed by footprint uuid + origin
+		// on the current scene; any real movement changes the key and forces a
+		// fresh (now much cheaper, post Fix 1+2) rebuild.
+		const signature = this.ratnestCommitSignature(footprintsToRefresh);
+		if (signature !== null && signature === this.lastRatsnestCommitSignature) {
+			// Same positions as last commit — ratsnest already correct.
+			this.lastRatsnestCommitSignature = signature;
+			return;
+		}
 		this.copperGraphCache = null;
 		const ratsnestStartedAt = performance.now();
 		this.refreshRatsnestForFootprints(footprintsToRefresh);
 		if (this.activeBoardDragPerformance) {
 			this.activeBoardDragPerformance.ratsnestMs += performance.now() - ratsnestStartedAt;
 		}
+		this.lastRatsnestCommitSignature = signature;
+	}
+
+	/** A deterministic signature of the moved footprints' positions (uuid +
+	 *  origin each), used to skip redundant drop-commit ratsnest rebuilds.
+	 *  Returns null when a signature can't be computed (caller then always
+	 *  rebuilds — correctness never depends on this cache). */
+	private ratnestCommitSignature(footprints: Iterable<any>): string | null {
+		const parts: string[] = [];
+		for (const fp of footprints) {
+			const uuid = typeof fp.getUuid === 'function' ? fp.getUuid() : null;
+			const origin = typeof fp.getOrigin === 'function' ? fp.getOrigin() : null;
+			if (uuid === null || origin === null) return null;
+			parts.push(`${ uuid }:${ origin.x }:${ origin.y }:${ origin.rotation }`);
+		}
+		parts.sort();
+		return parts.join('|');
 	}
 
 	get isRatsnestVisible(): boolean { return this.ratsnestVisible; }
@@ -2166,7 +2203,14 @@ export class KicadRenderSession {
 		if (!item || item.kind !== 'track' || item.shape.type !== 'segment') {
 			return null;
 		}
-		const graph = this.currentCopperGraph();
+		// Walk the chain via a track-only adjacency graph — assembleTrackLine
+		// only needs track-to-track contact to find the clicked segment's chain,
+		// so it must NOT trigger the full buildCopperGraph (which also does the
+		// board-wide pad/via/zone connectivity and is the dominant cost on a
+		// zoned board, e.g. the 10s mouse-down in the trace). KiCad walks a
+		// track chain from prebuilt topology; this scoped builder gives the
+		// same result (a chain walk depends only on track contacts).
+		const graph = buildTrackChainGraph(this.scene);
 		const ownNodeIndices = graph.nodes
 			.map((node, index) => ({ node, index }))
 			.filter(({ node }) => node.itemId === paintId)
@@ -4209,6 +4253,7 @@ export class KicadRenderSession {
 		const graph = buildCopperGraph(this.scene);
 		this.copperGraphCache = { scene: this.scene, graph };
 		this.ratsnestLines = buildBoardRatsnest(this.scene, undefined, graph);
+		this.lastRatsnestCommitSignature = null;
 		const buildMs = performance.now() - t1;
 		this.layerState = defaultLayerState(this.scene.layersPresent);
 		// preserveView reloads the SAME document (undo/redo, resyncBoardFromAst
@@ -4315,6 +4360,7 @@ export class KicadRenderSession {
 		};
 		this.scene = previewScene;
 		this.ratsnestLines = [];
+		this.lastRatsnestCommitSignature = null;
 		this.layerState = defaultLayerState(previewScene.layersPresent);
 		this.geometryDirty = true;
 		this.selectedIds = new Set();
@@ -4771,6 +4817,7 @@ export class KicadRenderSession {
 			return;
 		}
 		this.ratsnestLines = buildBoardRatsnest(this.scene);
+		this.lastRatsnestCommitSignature = null;
 		this.scheduleRender();
 	}
 

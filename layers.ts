@@ -1,6 +1,20 @@
 import { buildBoardRatsnest } from './paint/BoardRatsnest';
+import type { CopperGraph } from './paint/BoardCopperGraph';
 
-export function refreshRatsnestForFootprints(session: any, footprints: Iterable<any>): void {
+/**
+ * Recompute ratsnest airwires only for the nets of the given footprints and
+ * splice those into `session.ratsnestLines`, leaving every other net's lines
+ * untouched (the net-scoped incremental path — see KicadRenderSession's
+ * refreshRatsnestForFootprints doc comment).
+ *
+ * `graph`, when given, is a prebuilt copper graph reused instead of rebuilding
+ * one internally. It may be net-filtered (built with the same net set) or the
+ * full-board graph — in both cases buildBoardRatsnest is handed the `netIds`
+ * filter so only the moved nets' lines are regenerated. This lets a caller
+ * build the (net-scoped) graph once and reuse it across refreshes rather than
+ * re-running touching-copper detection every call.
+ */
+export function refreshRatsnestForFootprints(session: any, footprints: Iterable<any>, graph?: CopperGraph): void {
 	if (!session.ratsnestVisible || !session.scene) {
 		return;
 	}
@@ -27,7 +41,7 @@ export function refreshRatsnestForFootprints(session: any, footprints: Iterable<
 	if (netIds.size === 0) {
 		return;
 	}
-	const freshLines = buildBoardRatsnest(session.scene, netIds);
+	const freshLines = buildBoardRatsnest(session.scene, netIds, graph);
 	session.ratsnestLines = [...session.ratsnestLines.filter((line: any) => !netIds.has(line.netId)), ...freshLines];
 }
 
