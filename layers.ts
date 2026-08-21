@@ -1,5 +1,5 @@
 import { buildBoardRatsnest } from './paint/BoardRatsnest';
-import type { CopperGraph } from './paint/BoardCopperGraph';
+import { buildCopperGraph, type CopperGraph } from './paint/BoardCopperGraph';
 
 /**
  * Recompute ratsnest airwires only for the nets of the given footprints and
@@ -41,7 +41,66 @@ export function refreshRatsnestForFootprints(session: any, footprints: Iterable<
 	if (netIds.size === 0) {
 		return;
 	}
+	// Synchronous incremental build so UI updates immediately.
 	const freshLines = buildBoardRatsnest(session.scene, netIds, graph);
+	// Background recompute in a Worker to avoid blocking on dense nets.
+	try {
+		if (typeof Worker !== 'undefined') {
+			const nodes = (graph ?? buildCopperGraph(session.scene)).nodes;
+			const find = (graph ?? buildCopperGraph(session.scene)).find;
+			const anchorsByNet: Record<string, { x: number; y: number; island: number }[]> = {};
+			const netToNodeIndices = new Map<number, number[]>();
+			for (let index = 0; index < nodes.length; index++) {
+				const netId = nodes[index]!.netId;
+				if (netId == null || netId <= 0) continue;
+				if (!netIds.has(netId)) continue;
+				const bucket = netToNodeIndices.get(netId) ?? [];
+				bucket.push(index);
+				netToNodeIndices.set(netId, bucket);
+			}
+			for (const [netId, netNodeIndices] of netToNodeIndices) {
+				const islandByNode = new Map<number, number>();
+				const islands: number[][] = [];
+				for (const index of netNodeIndices) {
+					const root = find(index);
+					let islandIndex = islandByNode.get(root);
+					if (islandIndex === undefined) {
+						islandIndex = islands.length;
+						islands.push([]);
+						islandByNode.set(root, islandIndex);
+					}
+					islands[islandIndex]!.push(index);
+				}
+				if (islands.length < 2) continue;
+				const anchors: { x: number; y: number; island: number }[] = [];
+				const positionToAnchor = new Map<string, number>();
+				for (let islandIndex = 0; islandIndex < islands.length; islandIndex++) {
+					for (const nodeIndex of islands[islandIndex]!) {
+						const point = nodes[nodeIndex]!.point;
+						const key = `${ islandIndex }\u0000${ point.x }\u0000${ point.y }`;
+						if (positionToAnchor.has(key)) continue;
+						positionToAnchor.set(key, anchors.length);
+						anchors.push({ x: point.x, y: point.y, island: islandIndex });
+					}
+				}
+				if (anchors.length < 2) continue;
+				anchorsByNet[String(netId)] = anchors;
+			}
+			const worker = new Worker(new URL('./paint/BoardRatsnestWorker.ts', import.meta.url), { type: 'module' });
+			worker.postMessage({ anchorsByNet, bench: false });
+			worker.onmessage = (ev: MessageEvent) => {
+				if (ev.data?.lines) {
+					session.ratsnestLines = [...session.ratsnestLines.filter((line: any) => !netIds.has(line.netId)), ...ev.data.lines.map((l: any) => ({ from: { x: l.from.x, y: l.from.y }, to: { x: l.to.x, y: l.to.y }, netId: l.netId }))];
+					session.scheduleRender();
+				} else if (ev.data?.error) {
+					console.debug('ratsnest worker error', ev.data.error);
+				}
+				worker.terminate();
+			};
+		}
+	} catch (err) {
+		console.debug('ratsnest worker spawn failed', err);
+	}
 	session.ratsnestLines = [...session.ratsnestLines.filter((line: any) => !netIds.has(line.netId)), ...freshLines];
 }
 
