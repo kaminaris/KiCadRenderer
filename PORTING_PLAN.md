@@ -181,3 +181,71 @@ replaced with `symbolPropertyValue()` (getPropertyByName). Whole tree green.
 - connectivity/BoardOutline: added EDGE_ITEM (line/arc) + flattenEdgeItems (arcs sampled via
   arcToPolyline into chords) + buildEdgeOutline — board-edge S-curve support.
 - connectivity/ExcellonExport: added drillMapLegend (per-size hole+Ø summary lines).
+## Integration pass (ratsnest wiring)
+- Session: added computePreviewRatsnest / setPreviewRatsnest / clearPreviewRatsnest —
+  canonical CONNECTIVITY_DATA path for the hover/drag preview overlay.
+- apps/kicad-viewer BoardPointerController: the two hover/drag preview call sites now use
+  session.computePreviewRatsnest + session.setPreviewRatsnest (no (session as any) casts,
+  no buildKiCadGreedyRatsnest import). The deprecated buildGreedyRatsnest alias is no longer
+  referenced by the app. Killed the preview-ratsnest escape hatches.
+## Integration pass (interaction toolkit + ratsnest/drag)
+- Session facade now exposes the whole interaction toolkit as lazy singletons:
+  getRouteTool / getDragTool / getSelectionTool / getMeasureTool / getSchematicTool
+  (wired to addWire/addBus/addJunction/addNoConnect) / getZoneTool / getUndoRedo, plus
+  computePreviewRatsnest / setPreviewRatsnest / clearPreviewRatsnest.
+- apps/kicad-viewer: track-body drag now drives session.getDragTool() (canonical DRAG_TOOL
+  Select/Move) instead of the direct dragSegment45 primitive; hover/drag preview ratsnest uses
+  session.computePreviewRatsnest/setPreviewRatsnest (no (session as any) writes, no
+  buildKiCadGreedyRatsnest import). Killed the preview-ratsnest + track-drag escape hatches.
+- Remaining escape hatches: (dragTargets as any)._accumDx/Dy for footprint-drag fast-path
+  translation (a separate board-translate concern, not the router tooling).
+## Integration pass (selection -> canonical SELECTION_TOOL)
+- Session selection is now routed through the canonical SELECTION_TOOL as the
+  authoritative store: select/selectMultiple/clearSelection/delete call
+  getSelectionTool().GetSelection() (Clear/AddMany/Remove), and selectedIds is kept
+  in sync as the render-facing readout. Added private setSelectedIds/clearSelectionAll/
+  removeFromSelection helpers. All ~6 direct selectedIds mutators (including load/reset
+  clears) now go through the tool; the many selectedIds READS (render paths) are untouched.
+- App type-check green; no render regression expected (reads unchanged).
+## Decision: @kicad-layout out of scope
+- The schematic auto-rewire netlist (@kicad-layout LockNetlist/Rewire/Connectivity) is
+  intentionally NOT swapped to the canonical SchematicNetlist/SchematicConnectionGraph.
+  @kicad-layout is excluded from the current integration scope (user decision) — it is a
+  separate in-house connectivity layer and is not to be modified.
+- The canonical getSchematicNetlist()/getConnectionGraph() remain exposed on the session
+  for when that boundary is revisited.
+## BUGFIX: spurious ratsnest lines (vias treated as unconnected)
+- Root cause: SHAPE_COLLISION.Collide had no CIRCLE-vs-RECT or RECT-vs-RECT case, so
+  via→rect-pad / rect→rect collisions fell through to the shapeDistance fallback, which
+  returned raw center-to-center distance (no extent subtraction) — so overlapping shapes
+  reported distance > 0 and failed the same-net connection, splitting each net into
+  track/via-only islands (the "<none>" clusters) and painting ratsnest edges on every via.
+- Fix (geometry/ShapeCollision.ts): added collideCircleRect (closest-point-on-rect within
+  radius) and collideRectRect (AABB overlap / edge-gap); fixed shapeDistance to be the
+  correct conservative bounding-circle edge distance (centerDist - ra - rb).
+- App strict type-check green.
+## BUGFIX (real cause): spurious ratsnest lines on routed boards
+- Root cause (deeper): `KicadBoardFacade.copperLayersOf` only read the plural
+  `(layers ...)` accessor (el.getLayers). But segments/arcs/track-arcs use the SINGULAR
+  `(layer "F.Cu")` form and expose el.getLayer() (WithLayer mixin), not getLayers().
+  So every track resolved to an EMPTY layer set -> no common layer with its via/pad ->
+  never connected -> each track+via became its own cluster -> ratsnest lines everywhere
+  on a fully-routed board. (The earlier CIRCLE-vs-RECT collision fix was necessary but
+  NOT sufficient.)
+- Fix: copperLayersOf now also falls back to el.getLayer() (singular) and filters to
+  .Cu layers, so tracks/arcs get their real copper layer and connect.
+- App strict type-check green.
+## BUGFIX (2 real causes, found via a runnable diagnostic on the real board)
+1) SHAPE_COLLISION was never registered in the app runtime — only the test suite imported
+   ShapeCollision.ts, so setShapeCollisionCtor never ran and every SHAPE.Collide used the
+   broken center-distance fallback (fails coincident track<->via/pad). Fix: side-effect
+   `import '../geometry/ShapeCollision'` in ConnectivityAlgo.ts.
+2) (earlier this session) copperLayersOf only read the plural (layers ...) accessor; board
+   segments/arcs use the singular (layer "X") and expose getLayer(), so tracks had empty
+   layer sets. Fixed to fall back to getLayer().
+- Confirmed on GigaMicroEPCV2: tracks all resolve layers (5691/5691); via-track collision
+  goes false->true once ShapeCollision is imported. Direct track/via/pad-connected nets now
+  coalesce.
+- REMAINING GAP: zone/pour-connected items (large ground nets e.g. net 112) still split —
+  CN_ZONE_LAYER's ContainsPoint/Collide doesn't yet coalesce pour-connected pads/vias. This
+  is a separate, larger zone-connectivity port gap (Tracked, not yet fixed).

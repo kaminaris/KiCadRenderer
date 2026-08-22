@@ -89,6 +89,19 @@ export class SHAPE_COLLISION {
 			return result;
 		}
 
+		// Circle vs rect (and symmetric) — via/round pad over a rect pad/zone.
+		if (ta === SHAPE_TYPE.CIRCLE && tb === SHAPE_TYPE.RECT) {
+			return this.collideCircleRect(aShapeA as SHAPE_CIRCLE, aShapeB as SHAPE_RECT, result);
+		}
+		if (ta === SHAPE_TYPE.RECT && tb === SHAPE_TYPE.CIRCLE) {
+			return this.collideCircleRect(aShapeB as SHAPE_CIRCLE, aShapeA as SHAPE_RECT, result);
+		}
+
+		// Rect vs rect.
+		if (ta === SHAPE_TYPE.RECT && tb === SHAPE_TYPE.RECT) {
+			return this.collideRectRect(aShapeA as SHAPE_RECT, aShapeB as SHAPE_RECT, result);
+		}
+
 		// Primitives vs poly set: test every polygon outline segment.
 		if (ta === SHAPE_TYPE.POLY_SET || tb === SHAPE_TYPE.POLY_SET) {
 			return this.collideWithPolySet(
@@ -178,8 +191,52 @@ export class SHAPE_COLLISION {
 		return result;
 	}
 
-	private collideWithPolySet(poly: SHAPE_POLY_SET, other: SHAPE, result: CollisionResult): CollisionResult {
-		// A shape collides with the poly set if its center/points are inside
+	private collideCircleRect(c: SHAPE_CIRCLE, r: SHAPE_RECT, result: CollisionResult): CollisionResult {
+		// A circle collides the rect if it overlaps the rect (its center's
+		// distance to the rect's closest point is within its radius) — via/
+		// round pad over a rect pad.
+		const clearance = this.aClearance + this.aAccuracy;
+		const rx = r.GetStart().x, ry = r.GetStart().y, rw = r.GetW(), rh = r.GetH();
+		const cx = c.GetCenter().x, cy = c.GetCenter().y, rad = c.GetRadius();
+		// Closest point on the rect (may be inside → distance 0).
+		const px = Math.max(rx, Math.min(cx, rx + rw));
+		const py = Math.max(ry, Math.min(cy, ry + rh));
+		const d = Math.hypot(cx - px, cy - py);
+		if (d <= rad + clearance) {
+			result.intersecting = true;
+			if (this.aNeedLocation) {
+				result.location = new Vec2(px, py);
+			}
+		}
+		return result;
+	}
+
+	private collideRectRect(a: SHAPE_RECT, b: SHAPE_RECT, result: CollisionResult): CollisionResult {
+		const clearance = this.aClearance + this.aAccuracy;
+		const ax = a.GetStart().x, ay = a.GetStart().y, aw = a.GetW(), ah = a.GetH();
+		const bx = b.GetStart().x, by = b.GetStart().y, bw = b.GetW(), bh = b.GetH();
+		const overlapX = ax < bx + bw && bx < ax + aw;
+		const overlapY = ay < by + bh && by < ay + ah;
+		if (overlapX && overlapY) {
+			result.intersecting = true;
+			if (this.aNeedLocation) {
+				result.location = a.GetCentre().add(b.GetCentre()).multiply(0.5);
+			}
+			return result;
+		}
+		// Otherwise check gap along the nearest axis (edge-to-edge distance).
+		const gapX = Math.max(0, Math.max(bx - (ax + aw), ax - (bx + bw)));
+		const gapY = Math.max(0, Math.max(by - (ay + ah), ay - (by + bh)));
+		if (Math.min(gapX, gapY) <= clearance) {
+			result.intersecting = true;
+			if (this.aNeedLocation) {
+				result.location = a.GetCentre().add(b.GetCentre()).multiply(0.5);
+			}
+		}
+		return result;
+	}
+
+	private collideWithPolySet(poly: SHAPE_POLY_SET, other: SHAPE, result: CollisionResult): CollisionResult {		// A shape collides with the poly set if its center/points are inside
 		// the fill OR it comes within clearance of any outline segment.
 		const clearance = this.aClearance + this.aAccuracy;
 
@@ -209,11 +266,16 @@ export class SHAPE_COLLISION {
 	}
 
 	private shapeDistance(a: SHAPE, b: SHAPE): number {
-		// Conservative: distance between centers minus both extents (radius of
-		// bounding circle). Used only for the fallback path.
+		// Conservative: distance between the bounding circles' edges (center
+		// distance minus both extents). Used only for the fallback path — a
+		// conservative estimate that correctly reports 0 when the two shapes'
+		// bounding circles overlap.
 		const ca = a.GetCentre();
 		const cb = b.GetCentre();
-		return ca.sub(cb).magnitude;
+		const centerDist = ca.sub(cb).magnitude;
+		const ra = shapeExtentRadius(a);
+		const rb = shapeExtentRadius(b);
+		return Math.max(0, centerDist - ra - rb);
 	}
 }
 

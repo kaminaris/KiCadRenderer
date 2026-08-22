@@ -13,6 +13,12 @@
  */
 
 import { BBox } from '../math/BBox';
+// Side-effect: register the canonical SHAPE_COLLISION engine (setShapeCollisionCtor).
+// Without this import the collision engine is never registered in the app runtime
+// (only the test suite imports it), so SHAPE.Collide silently falls back to the
+// conservative center-distance test and coincident track↔via/pad pairs fail to
+// connect — the cause of spurious ratsnest lines on routed boards.
+import '../geometry/ShapeCollision';
 import {
 	CN_ITEM,
 	CN_CLUSTER,

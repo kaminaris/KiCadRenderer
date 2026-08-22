@@ -66,9 +66,21 @@ function elementKind(el: any): AstKind | null {
 function copperLayersOf(el: any, scene: LayeredBoardScene): string[] {
 	const all = scene.copperLayerStack;
 
+	// Prefer the plural `(layers ...)` accessor (vias, some pads). If the
+	// element only exposes the singular `(layer "X")` form — segments, arcs,
+	// track arcs, gr/fp shapes — fall back to getLayer(). Missing either
+	// means the item has no resolvable copper layer (only non-copper items
+	// should hit this).
 	if (typeof el.getLayers === 'function') {
 		const layers: string[] = el.getLayers(all);
 		return layers.filter(l => l.endsWith('.Cu'));
+	}
+
+	if (typeof el.getLayer === 'function') {
+		const single = el.getLayer();
+		if (typeof single === 'string' && single.endsWith('.Cu')) {
+			return [single];
+		}
 	}
 
 	return [];

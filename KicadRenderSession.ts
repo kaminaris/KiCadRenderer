@@ -169,6 +169,12 @@ import { buildSchematicNetlistFromRoot } from './connectivity/SchematicExtractor
 import { buildConnectionGraph, collectSheetInstances } from './connectivity/SchematicConnectionGraph';
 import { PNS_ROUTER } from './router/PnsRouter';
 import { ROUTE_TOOL } from './interaction/RouteTool';
+import { DRAG_TOOL } from './interaction/DragTool';
+import { SELECTION_TOOL } from './interaction/Selection';
+import { MEASURE_TOOL } from './interaction/MeasureTool';
+import { SCHEMATIC_TOOL, type SchematicMutations } from './interaction/SchematicTool';
+import { ZONE_TOOL, type ZoneSink } from './interaction/ZoneTool';
+import { UNDO_REDO } from './interaction/UndoRedo';
 import { CONNECTIVITY_DATA } from './connectivity/ConnectivityData';
 import { buildInitialTrace }                          from './router/PnsDragger';
 import {
@@ -500,6 +506,12 @@ export class KicadRenderSession {
 	/** Lazily-created interactive PNS router over the loaded board scene. */
 	protected boardRouter: PNS_ROUTER | null = null;
 	protected routeTool: ROUTE_TOOL | null = null;
+	protected dragTool: DRAG_TOOL | null = null;
+	protected selectionTool: SELECTION_TOOL | null = null;
+	protected measureTool: MEASURE_TOOL | null = null;
+	protected schematicTool: SCHEMATIC_TOOL | null = null;
+	protected zoneTool: ZONE_TOOL | null = null;
+	protected undoRedo: UNDO_REDO | null = null;
 	protected ratsnestVisible = true;
 	/** Position signature of the last fast-drag commit's moved footprints (see
 	 *  commitBoardDragFast's Fix-3 skip), so an unchanged-position re-commit
@@ -1195,24 +1207,51 @@ export class KicadRenderSession {
 		this.selectMultiple(id ? [id] : [], 'replace');
 	}
 
-	/** Rectangle multi-select's mutator — also what select() delegates to.
-	 *  'replace' clears and sets the given ids; 'add'/'subtract' merge them
-	 *  into the current selection (a plain click with no modifier is
-	 *  'replace' with 0-or-1 ids, same as select() always was). */
+	/** Sets the selection from `ids`, keeping the canonical SELECTION_TOOL and
+	 *  the render-facing selectedIds in lock-step. */
+	private setSelectedIds(ids: Iterable<string>): void {
+		const sel = this.getSelectionTool().GetSelection();
+		sel.Clear();
+		sel.AddMany(ids);
+		this.selectedIds = new Set(sel.Ids());
+	}
+
+	/** Clears the selection in both the canonical tool and selectedIds. */
+	private clearSelectionAll(): void {
+		this.getSelectionTool().ClearSelection();
+		this.selectedIds.clear();
+	}
+
+	/** Removes a single id from selection (both stores). */
+	private removeFromSelection(id: string): void {
+		this.getSelectionTool().GetSelection().Remove(id);
+		this.selectedIds.delete(id);
+	}
+
+	/**
+	 * Rectangle multi-select's mutator — also what select() delegates to.
+	 * 'replace' clears and sets the given ids; 'add'/'subtract' merge them
+	 * into the current selection (a plain click with no modifier is
+	 * 'replace' with 0-or-1 ids, same as select() always was).
+	 *
+	 * The canonical SELECTION_TOOL is the authoritative store; selectedIds
+	 * stays in sync as the render-facing readout.
+	 */
 	selectMultiple(ids: string[], mode: 'replace' | 'add' | 'subtract'): void {
+		const sel = this.getSelectionTool().GetSelection();
 		if (mode === 'replace') {
-			this.selectedIds = new Set(ids);
+			sel.Clear();
+			sel.AddMany(ids);
 		}
 		else if (mode === 'add') {
-			for (const id of ids) {
-				this.selectedIds.add(id);
-			}
+			sel.AddMany(ids);
 		}
 		else {
 			for (const id of ids) {
-				this.selectedIds.delete(id);
+				sel.Remove(id);
 			}
 		}
+		this.selectedIds = new Set(sel.Ids());
 		// Board selection now draws through paintHighlightOverlay's cheap
 		// per-frame dynamic pass (see render()'s own doc comment) — no full
 		// static geometry rebuild needed just to recolor 1-2 items, which
@@ -2134,6 +2173,39 @@ export class KicadRenderSession {
 		return this.ratsnestLines;
 	}
 
+	/**
+	 * Computes ratsnest edges for a subset of nets over the current board
+	 * scene — the canonical hover/drag preview path (builds a fresh
+	 * CONNECTIVITY_DATA over the live scene and flattens its MST edges).
+	 * Returns the lines to paint as the preview overlay.
+	 */
+	computePreviewRatsnest(netIds: Set<number>): BoardRatsnestLine[] {
+		if (this.documentTypeLoaded !== 'board' || !this.scene) {
+			return [];
+		}
+		try {
+			return buildKiCadRatsnest(this.scene, netIds);
+		} catch (error) {
+			console.error('computePreviewRatsnest error:', error);
+			return [];
+		}
+	}
+
+	/** Replaces the preview (drag) ratsnest overlay lines + participating
+	 *  nets. The renderer draws these on top of the main ratsnest. */
+	setPreviewRatsnest(lines: BoardRatsnestLine[], netIds: Set<number>): void {
+		this.previewRatsnestLines = lines;
+		this.previewRatsnestNetIds = netIds;
+		this.scheduleRender();
+	}
+
+	/** Clears any preview (drag) ratsnest overlay. */
+	clearPreviewRatsnest(): void {
+		this.previewRatsnestLines = [];
+		this.previewRatsnestNetIds = new Set();
+		this.scheduleRender();
+	}
+
 	/** Creates one straight copper segment in the board root. Interactive
 	 *  routing composes a 45-degree path from several of these KiCad-native
 	 *  segment elements; copper junctions are implicit when endpoints touch. */
@@ -2400,7 +2472,7 @@ export class KicadRenderSession {
 			this.committedTrackOverlay.push(...this.painter.updateTrackItems(this.scene, this.boardRoot, wanted, replacements));
 			this.hiddenTrackDragIds.clear();
 			this.copperGraphCache = null;
-			this.selectedIds = new Set(replacements.map(segment => segment.getUuid()).filter((id): id is string => !!id));
+			this.setSelectedIds(replacements.map(segment => segment.getUuid()).filter((id): id is string => !!id));
 			this.scheduleRender();
 		}
 		else {
@@ -4375,7 +4447,7 @@ export class KicadRenderSession {
 			}
 		}
 		this.geometryDirty = true;
-		this.selectedIds = new Set();
+this.clearSelectionAll();
 		// A fresh parse means every element reference held elsewhere (undo/
 		// cancel reloading mid-drag, in particular) is now stale — a
 		// leftover drag-preview entry would otherwise keep drawing a ghost
@@ -4460,7 +4532,7 @@ export class KicadRenderSession {
 		this.lastRatsnestCommitSignature = null;
 		this.layerState = defaultLayerState(previewScene.layersPresent);
 		this.geometryDirty = true;
-		this.selectedIds = new Set();
+this.clearSelectionAll();
 		this.fitToItems(previewScene.hitTestItems);
 		return true;
 	}
@@ -4669,7 +4741,7 @@ export class KicadRenderSession {
 		const buildMs = performance.now() - t1;
 		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
 		this.geometryDirty = true;
-		this.selectedIds = new Set();
+this.clearSelectionAll();
 
 		if (!docInfo?.preserveView) {
 			this.fitSchematicContent();
@@ -5008,6 +5080,70 @@ export class KicadRenderSession {
 			this.routeTool.injectRouter(this.getRouter());
 		}
 		return this.routeTool;
+	}
+
+	/**
+	 * The interactive track-drag tool (the drag counterpart to the route
+	 * tool). Wraps the PnsDragger primitives behind a state machine; use
+	 * Select(points, index, kind) -> Move(target) -> Commit()/Cancel().
+	 */
+	getDragTool(): DRAG_TOOL {
+		if (!this.dragTool) {
+			this.dragTool = new DRAG_TOOL();
+		}
+		return this.dragTool;
+	}
+
+	/** The selection tool (click/box select state). Lazy singleton. */
+	getSelectionTool(): SELECTION_TOOL {
+		if (!this.selectionTool) {
+			this.selectionTool = new SELECTION_TOOL();
+		}
+		return this.selectionTool;
+	}
+
+	/** The measure tool (click/preview/finalize distance+angle). */
+	getMeasureTool(): MEASURE_TOOL {
+		if (!this.measureTool) {
+			this.measureTool = new MEASURE_TOOL();
+		}
+		return this.measureTool;
+	}
+
+	/** The schematic drawing/placement tool, wired to this session's
+	 *  schematic editing surface (addWire/addBus/addJunction/...). */
+	getSchematicTool(): SCHEMATIC_TOOL {
+		if (!this.schematicTool) {
+			const mutations: SchematicMutations = {
+				addWire: (x1, y1, x2, y2, w) => this.addWire(x1, y1, x2, y2, w),
+				addBus: (x1, y1, x2, y2, w) => this.addBus(x1, y1, x2, y2, w),
+				addJunction: (x, y) => this.addJunction(x, y),
+				addNoConnect: (x, y) => this.addNoConnect(x, y),
+				placeItem: (_kind, at, _net) => null,
+			};
+			this.schematicTool = new SCHEMATIC_TOOL(mutations);
+		}
+		return this.schematicTool;
+	}
+
+	/** The zone-outline drawing tool, wired to this session's zone surface. */
+	getZoneTool(): ZONE_TOOL {
+		if (!this.zoneTool) {
+			const sink: ZoneSink = {
+				addZoneOutline: () => null,
+				fillZone: () => false,
+			};
+			this.zoneTool = new ZONE_TOOL(sink);
+		}
+		return this.zoneTool;
+	}
+
+	/** A canonical UNDO_REDO stack (separate from the live snapshot undo). */
+	getUndoRedo(): UNDO_REDO {
+		if (!this.undoRedo) {
+			this.undoRedo = new UNDO_REDO();
+		}
+		return this.undoRedo;
 	}
 
 	/** Binds the route tool's world to the current board scene. No-op for a
@@ -7571,7 +7707,7 @@ export class KicadRenderSession {
 			}
 			children.splice(idx, 1);
 			removed++;
-			this.selectedIds.delete(id);
+			this.removeFromSelection(id);
 		}
 		if (removed > 0) {
 			this.commitAstMutation();
