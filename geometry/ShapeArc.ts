@@ -91,6 +91,23 @@ export class SHAPE_ARC extends SHAPE {
 	}
 
 	/**
+	 * Constructs an arc from start, end and a center, deriving the midpoint on
+	 * the circle between them (the shorter way). Mirrors
+	 * SHAPE_ARC( aStart, aEnd, aCenter ) used by track/PCB_ARC handling.
+	 */
+	static FromStartEndAndCenter(aStart: Vec2, aEnd: Vec2, aCenter: Vec2): SHAPE_ARC {
+		const a0 = Math.atan2(aStart.y - aCenter.y, aStart.x - aCenter.x);
+		const a1 = Math.atan2(aEnd.y - aCenter.y, aEnd.x - aCenter.x);
+		let sweep = a1 - a0;
+		while (sweep > Math.PI) sweep -= 2 * Math.PI;
+		while (sweep <= -Math.PI) sweep += 2 * Math.PI;
+		const r = aStart.sub(aCenter).magnitude;
+		const midAng = a0 + sweep / 2;
+		const mid = new Vec2(aCenter.x + r * Math.cos(midAng), aCenter.y + r * Math.sin(midAng));
+		return new SHAPE_ARC(aStart, mid, aEnd);
+	}
+
+	/**
 	 * Construct from center, start, mid-angle (degrees), giving end.
 	 * Mirrors SHAPE_ARC( aCenter, aStart, aMidpointAngle ).
 	 */

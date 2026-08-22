@@ -38,13 +38,23 @@ with KiCad translations; don't validate, just port as much as possible."
 
 ### `router/` — PNS router  [BROAD]
 - PnsNode (PNS_ITEM/LINE/SOLID/VIA/SEGMENT/DIFF_PAIR/NODE), PnsDragger,
-  PnsHull, PnsOptimizer, PnsWalkaround, RouterGeometry, DiffPair.
+  PnsHull, PnsOptimizer, PnsWalkaround, RouterGeometry, DiffPair, PnsRouter.
 
 ### `paint/` — display model/renderer  [RENDERER — KEEP, TS-NATIVE]
 - PaintedShape / HitTest / BoardPainter / BoardZoneFill / SchematicPainter /
   DrawingSheet (incl. .kicad_wks parser + title block) / KicadStringEscapes etc.
 
 ## Progress log (most recent first)
+- Ported top-level `PNS_ROUTER` (`router/PnsRouter.ts`) with StartRouting / Move /
+  FixRoute / Cancel cycle, wrapping RouterNode + PnsDragger + PnsHull +
+  PnsWalkaround + PnsOptimizer + RouterGeometry. Exported from package index.
+- Ported `CN_CONNECTIVITY_ALGO::FillIsolatedIslandsMap` / `CONNECTIVITY_DATA::FillIsolatedIslandsMap`
+  (isolated-copper-island removal; progress reporter + cluster-based classification).
+- Ported custom pad effective shape (`PAD_SHAPE::CUSTOM` → `SHAPE_POLY_SET` from
+  `(primitives (gr_poly ...))` + anchor rect, rotated by pad angle) in
+  `KicadBoardFacade.toShape()`.
+- Cleaned stale `.js` build artifacts from `connectivity/`.
+- Fixed `ConnectivityAlgo.ts` `IsDirty` method-call syntax error.
 - Net driver/ERC pin ranking (pinDriverPriority/resolveNetDriver in PinInfo),
   net-code assignment (NetCode: assignNetCodes/NETCODE_LIST), fixed
   SHAPE_LINE_CHAIN closed-loop GetSegment wrapping
@@ -59,6 +69,8 @@ with KiCad translations; don't validate, just port as much as possible."
 - Board setup -> netclass wiring, DRAW_MODE, text metrics
 - Hierarchical sheet + global-label connectivity, schematic netlist from root
 - Schematic netname resolution (+ power flags, bus labels), schematic->netlist
+- Schematic driver-based net resolution (resolveNetDriver + pin electrical types)
+- Sheet-instance-to-instance bus coupling + subgraph code assignment
 - DrawingSheet frame layout, fp-editor, plot/Gerber export
 - BEZIER geometry, text reflow, thermal-relief helper
 - BoardStackup, pad connection points, netlist extractor, .kicad_wks parser
@@ -70,11 +82,23 @@ with KiCad translations; don't validate, just port as much as possible."
 ## Next batch candidates (in suggested order)
 1. **Solder-mask/paste + thermal-relief wiring into `BoardZoneFill`** — canonical
    API provided; display fill kept as-is
-2. Schematic driver-based net resolution (use resolveNetDriver in
-   buildSchematicNetlist to resolve conflicting net names / power driver)
-3. Full sheet-instance-to-instance bus coupling + subgraph code assignment
-4. `ClangFormat`-style KiCad test vectors -> unit-test parity (when we switch
+2. `ClangFormat`-style KiCad test vectors -> unit-test parity (when we switch
    to validation)
+
+## Review (assistant, 2025) — your contributed code, verified
+Confirmed compiling under the app path mapping (tsc + @kicad-io/@clipper2-ts):
+- `connectivity/SchematicConnectionGraph.ts` — project-wide connection_graph
+  port (sheet instances, union-find subgraph merging, global/hierarchical/bus
+  coupling, driver-based naming, buildProjectNetlist). Solid.
+- `router/PnsRouter.ts` — PNS_ROUTER (start/move/fix/cancel, walkaround+shove).
+- Rewrote `FillIsolatedIslandsMap` (issue-24089-faithful; single-connection
+  outlines; progress; non-copper fix). Uses HasSingleConnection/SubpolyIndex.
+- `KicadBoardFacade.toShape` custom (gr_poly) pads unioned w/ anchor rect.
+- Driver-based net naming in `SchematicExtractor`; `NETLIST_NET.code`.
+Review FIXED real type errors in `SchematicConnectionGraph.ts`: `KicadElementSymbol`
+has NO `.Reference`/`.getValue()`/`.getFootprint()`/`.datasheet` (Reference is via
+`getReference()`, Value/Footprint/Datasheet via `(property ...)` children) —
+replaced with `symbolPropertyValue()` (getPropertyByName). Whole tree green.
 
 
 
@@ -82,5 +106,45 @@ with KiCad translations; don't validate, just port as much as possible."
 - `KicadBoardFacade.Drawings()` `never[]` type quirk (pre-existing, benign).
 - `BoardZoneFill` still uses its own ad-hoc tessellation (display-layer;
   optionally migrate to `ConvertToPolygon`).
-- Router geometry migrated off legacy `PaintedShape` coords; PNS_ROUTER top-level
-  tool not yet wired.
+- `PNS_ROUTER` exists in `router/PnsRouter.ts` but is not yet wired into
+  `BoardPointerController` (apps/kicad-viewer still composes router pieces
+  directly).
+
+## Next-steps completed (assistant)
+- Unified symbol property extraction: `connectivity/SymbolElement.ts` (symbolReference/
+  Value/Footprint/Datasheet via getPropertyByName+property children); used by both
+  `SchematicExtractor` and `SchematicConnectionGraph` (removed the local broken-API
+  accessors and the local symbolPropertyValue helper).
+- Session wiring: `getConnectionGraph()` (single-instance buildConnectionGraph for the
+  loaded root), `getRouter()` (lazy PNS_ROUTER, `boardRouter` field), `findLibSymbols`.
+- Bus-member netlist tightening: `SchematicExtractor.buildSchematicNetlist` now maps a
+  pin whose net is a bus label to its member net by position along the bus wire
+  (`memberNetForPin` + `mapBusPinToMember`), fallback to first member.
+
+- Canonical pad-to-zone connection: `connectivity/ZoneFillConnection.ts`
+  (resolveRoundPadConnection, buildPadKnockout) wiring PadClearances.effective
+  ZoneConnection + ThermalRelief spokes/ring + a Convert callback; the display
+  fill (BoardZoneFill) is kept as-is (canonical API is the opt-in).
+- Project-level connection graph: `buildProjectConnectionGraph(schematic)`
+  (collectSheetInstances + buildConnectionGraph) convenience for multi-sheet.
+- Session: getConnectionGraph()/getRouter() (PNS_ROUTER lazy).
+- Session: prepareRouterWorld() (rebinds PNS_ROUTER world from the board scene).
+- connectivity/PadZoneClearance.ts: pad/via/segment-to-zone clearance helpers.
+- padstack.PADSTACK.Collide(layer, pos, other, clearance): per-layer pad DRC.
+- connectivity/DrcItem.ts: DRC_ITEM + checkSegmentClearance (clearance-aware track-vs-obstacle).
+- geometry/ShapePolySet: DistanceToPolyset + DistanceToSegmentArray (zone-zone outline distance).
+- connectivity/ConnectivityData: NetHasAirwires (per-net unconnected check); RatsnestView highlight already present.
+- connectivity/PadZoneClearance: trackToViaDrillClearance (drill-aware via clearance).
+- FOOTPRINT.graphics + GetGraphics() (fp-editor FP_SHAPE primitives).
+- geometry/SchGeometry: SCH_RECTANGLE / SCH_CIRCLE / SCH_ARC graphic shapes.
+- geometry/ShapeArc::FromStartEndAndCenter (derive arc midpoint from start/end/center).
+- SchematicConnectionGraph: resolveSubgraphNetClasses (power/label netclass resolve).
+- FOOTPRINT.Flip() + IsNetTie() + GetConnectionPoints() (ordered) + duplicatePadNumbersAreJumpers.
+- BoardStackup.GetViaHeight() (through-via depth).
+- geometry/LibSymbolGeometry.ts: LIB_ITEM + libItemToShape/libBodyToCompound + fromSch* adapters
+  (schematic symbol body -> canonical SHAPE).
+- geometry/ShapeLineChain: FormatCluster() (points S-expr) + GetWidth() accessor.
+- interaction/RouteTool.ts: ROUTE_TOOL — interactive route-gesture state machine
+  over PNS_ROUTER (SelectStart/MoveCursor/Fix/FixPointAndContinue/Cancel,
+  ghost points, snap-to-anchor, setMode/corner/width/layer, injectRouter).
+- Session: getRouteTool()/prepareRouteTool() (shares the router instance).

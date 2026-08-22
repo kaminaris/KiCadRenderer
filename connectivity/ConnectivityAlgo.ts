@@ -24,6 +24,7 @@ import {
 	COPPER_LAYER_COUNT,
 } from './ConnectivityItems';
 import { RN_NET } from './RatsnestData';
+import { IsCuLayer } from './LayerId';
 
 /**
  * Search modes for cluster building.
@@ -43,6 +44,7 @@ export type CLUSTERS = CN_CLUSTER[];
  *  (island) indices on a zone layer that are not connected to anything. */
 export interface ISOLATED_ISLANDS {
 	m_IsolatedOutlines: number[];
+	m_SingleConnectionOutlines: number[];
 }
 
 // Enum values not present in the TS KICAD_T const (ConnectivityItems.ts),
@@ -1136,72 +1138,65 @@ export class CN_CONNECTIVITY_ALGO {
 	 * caller that has already run SearchClusters skip the re-search.
 	 */
 	FillIsolatedIslandsMap(
-		_result: Map<any, Map<number, ISOLATED_ISLANDS>>,
+		aMap: Map<any, Map<number, ISOLATED_ISLANDS>>,
 		aConnectivityAlreadyRebuilt = false
 	): void {
+		let progressDelta = 50;
+		let ii = 0;
+
+		progressDelta = Math.max(progressDelta, Math.floor(aMap.size / 4));
+
 		if (!aConnectivityAlreadyRebuilt) {
-			this.searchConnections();
+			for (const [zone, _islands] of aMap) {
+				this.Remove(zone);
+				this.Add(zone);
+				ii++;
+
+				if (this.m_progressReporter && progressDelta > 0 && (ii % progressDelta) === 0) {
+					this.m_progressReporter.SetCurrentProgress(ii / aMap.size);
+					if (this.m_progressReporter.KeepRefreshing) {
+						this.m_progressReporter.KeepRefreshing(false);
+					}
+				}
+
+				if (this.m_progressReporter && this.m_progressReporter.IsCancelled) {
+					return;
+				}
+			}
 		}
 
-		// Group zone items by their parent ZONE element.
-		const zoneItems = new Map<any, CN_ITEM[]>();
+		this.m_connClusters = this.SearchClusters(CLUSTER_SEARCH_MODE.CSM_CONNECTIVITY_CHECK);
 
-		for (const [mapItem, entry] of this.m_itemMap.entries()) {
-			if (!entry.IsLinked()) {
-				continue;
-			}
-			if (mapItem?.Type?.() !== KICAD_T.PCB_ZONE_T) {
-				continue;
-			}
-			zoneItems.set(mapItem, entry.GetItems());
-		}
-
-		const allCu = new LSET().AllCuMask();
-
-		for (const [zone, linkedItems] of zoneItems) {
-			// The CN_ZONE_LAYER items linked to this zone.
-			const zoneLayers = linkedItems.filter(it => it instanceof CN_ZONE_LAYER) as CN_ZONE_LAYER[];
-
-			for (const layer of allCu.Seq()) {
-				// The CN_ZONE_LAYER for this zone on this layer.
-				const zoneLayer = zoneLayers.find(zl => zl.GetLayer() === layer);
-				if (!zoneLayer) {
+		for (const [zone, zoneIslands] of aMap) {
+			for (const [layer, layerIslands] of zoneIslands) {
+				const fillPolys = zone.GetFilledPolysList?.(layer);
+				if (!fillPolys || fillPolys.IsEmpty()) {
 					continue;
 				}
 
-				const islandCount = zoneLayer.OutlinePointCount() > 0 ? 1 : 0;
-				// Determine which islands have any connected non-zone item.
-				const islandHasItem = new Array<boolean>(islandCount).fill(false);
+				let notInConnectivity = true;
 
-				for (const connected of zoneLayer.ConnectedItems()) {
-					if (!connected.Valid()) {
-						continue;
-					}
-					if (connected.Parent().Type() === KICAD_T.PCB_ZONE_T) {
-						continue; // zone-zone isn't a pad/via/track island connection
-					}
-					// The anchor's island is the subpolygon that contains it.
-					for (let i = 0; i < zoneLayer.AnchorCount(); i++) {
-						const anchor = zoneLayer.GetAnchor(i);
-						if (connected.Anchors().some(a => a.Pos().x === anchor.x && a.Pos().y === anchor.y)) {
-							islandHasItem[0] = true;
+				for (const cluster of this.m_connClusters) {
+					for (const item of cluster) {
+						if (item.Parent() === zone && item.GetBoardLayer() === layer) {
+							const z = item as CN_ZONE_LAYER;
+							notInConnectivity = false;
+
+							if (cluster.IsOrphaned()) {
+								layerIslands.m_IsolatedOutlines.push(z.SubpolyIndex());
+							} else if (z.HasSingleConnection()) {
+								layerIslands.m_SingleConnectionOutlines.push(z.SubpolyIndex());
+							}
 						}
 					}
 				}
 
-				if (!_result.has(zone)) {
-					_result.set(zone, new Map());
+				// Non-copper zones are never added to the connectivity graph, so
+				// notInConnectivity is always true for them. Only mark outline 0
+				// isolated for copper layers (matches KiCad issue 24089 fix).
+				if (notInConnectivity && IsCuLayer(layer)) {
+					layerIslands.m_IsolatedOutlines.push(0);
 				}
-				const layerMap = _result.get(zone)!;
-				const islands: ISOLATED_ISLANDS = { m_IsolatedOutlines: [] };
-
-				for (let i = 0; i < islandCount; i++) {
-					if (!islandHasItem[i]) {
-						islands.m_IsolatedOutlines.push(i);
-					}
-				}
-
-				layerMap.set(layer, islands);
 			}
 		}
 	}

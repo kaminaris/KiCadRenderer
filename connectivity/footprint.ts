@@ -144,6 +144,13 @@ export class FOOTPRINT {
 		return this.mirrored;
 	}
 
+	/** Flips the footprint to the opposite board side (mirrored), keeping its
+	 *  pad local positions (which mirror through the footprint transform). */
+	Flip(toBack = true): void {
+		this.mirrored = toBack;
+		this.layer = this.mirrored ? 'B.Cu' : 'F.Cu';
+	}
+
 	GetReference(): string {
 		return this.reference;
 	}
@@ -163,6 +170,43 @@ export class FOOTPRINT {
 
 	Pads(): FP_PAD[] {
 		return this.pads;
+	}
+
+	/** True if this footprint is a net-tie (has duplicated pad numbers, which
+	 *  KiCad treats as electrically-joined pads). Mirrors
+	 *  PAD::GetDuplicatePadNumbersAreJumpers / net-tie detection. */
+	IsNetTie(): boolean {
+		if (this.duplicatePadNumbersAreJumpers) {
+			return true;
+		}
+		const seen = new Set<string>();
+		for (const p of this.pads) {
+			if (seen.has(p.number)) {
+				return true;
+			}
+			seen.add(p.number);
+		}
+		return false;
+	}
+
+	duplicatePadNumbersAreJumpers = false;
+
+	/** Connection points for all pads (ordered by pad number). */
+	GetConnectionPoints(): Vec2[] {
+		// Order pads by their number (string-numeric) for stable anchors.
+		const sorted = [...this.pads].sort((a, b) =>
+			(+a.number || 0) - (+b.number || 0) || a.number.localeCompare(b.number)
+		);
+		return sorted.map(p => p.position.copy());
+	}
+
+	/** The footprint's graphics (fp_line/rect/circle/arc/poly/bezier) — the
+	 *  fp-editor shape primitives this footprint body is drawn from. */
+	graphics: import('../geometry/FpPrimitives').FP_SHAPE[] = [];
+
+	/** Returns the fp-editor graphics primitives. */
+	GetGraphics(): import('../geometry/FpPrimitives').FP_SHAPE[] {
+		return this.graphics;
 	}
 
 	/** The transform that maps footprint-local coords to board coords. */

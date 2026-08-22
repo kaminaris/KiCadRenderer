@@ -781,6 +781,54 @@ export class SHAPE_POLY_SET extends SHAPE {
 		return best;
 	}
 
+	/**
+	 * Minimum distance between this polygon set's outline and another set's
+	 * outline (zone-to-zone clearance). Mirrors the DRC zone-zone distance.
+	 */
+	DistanceToPolyset(aOther: SHAPE_POLY_SET): number {
+		let best = Infinity;
+		for (const poly of this.m_polys) {
+			const consider = (chain: SHAPE_LINE_CHAIN): void => {
+				const n = chain.PointCount();
+				for (let i = 0; i < n; i++) {
+					const a = chain.Point(i);
+					const b = chain.Point((i + 1) % n);
+					best = Math.min(best, aOther.DistanceToSegmentArray(a, b));
+				}
+			};
+			consider(poly.outline);
+			for (const hole of poly.holes) {
+				consider(hole);
+			}
+			if (best <= 0) {
+				break;
+			}
+		}
+		return best;
+	}
+
+	/** Distance from the segment (a..b) to every ring of this set. */
+	DistanceToSegmentArray(a: Vec2, b: Vec2): number {
+		let best = Infinity;
+		for (const poly of this.m_polys) {
+			const consider = (chain: SHAPE_LINE_CHAIN): void => {
+				const n = chain.PointCount();
+				for (let i = 0; i < n; i++) {
+					const x1 = chain.Point(i);
+					const x2 = chain.Point((i + 1) % n);
+					best = Math.min(best, segmentSegmentDistL(a, b, x1, x2));
+				}
+			};
+			consider(poly.outline);
+			for (const hole of poly.holes) {
+				consider(hole);
+			}
+			if (best <= 0) {
+				break;
+			}
+		}
+		return best;
+	}
 	/** Total area of the set (outer areas minus hole areas). */
 	Area(aOutline = -1): number {
 		const process = (poly: POLYGON): number => {

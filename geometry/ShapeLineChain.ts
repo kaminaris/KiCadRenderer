@@ -81,6 +81,21 @@ export class SHAPE_LINE_CHAIN extends SHAPE {
 		this.m_width = aWidth;
 	}
 
+	/** Serializes to the `(points (xy x y) (xy x y) ...)` S-expr used by KiCad
+	 *  writers (plot/gerber/zone filled-poly points). Points in mm. */
+	FormatCluster(): string {
+		const fmtCoord = (v: number): string => {
+			const n = Math.round(v * 1e6) / 1e6;
+			return Object.is(n, -0) ? '0' : String(n);
+		};
+		const pts: string[] = [];
+		for (const p of this.m_points) {
+			pts.push(`(xy ${ fmtCoord( p.x ) } ${ fmtCoord( p.y ) })`);
+		}
+		return `(points ${ pts.join(' ') })`;
+	}
+
+	/** Returns this chain's width (the stroked line width). */
 	GetWidth(): number {
 		return this.m_width;
 	}

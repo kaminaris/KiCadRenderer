@@ -166,6 +166,9 @@ import { buildKiCadRatsnest, flattenRatsnestEdges } from './connectivity/KicadRa
 import { buildBoardFacadeFromAst } from './connectivity/KicadBoardFacade';
 import { createBoard } from './connectivity/board';
 import { buildSchematicNetlistFromRoot } from './connectivity/SchematicExtractor';
+import { buildConnectionGraph, collectSheetInstances } from './connectivity/SchematicConnectionGraph';
+import { PNS_ROUTER } from './router/PnsRouter';
+import { ROUTE_TOOL } from './interaction/RouteTool';
 import { CONNECTIVITY_DATA } from './connectivity/ConnectivityData';
 import { buildInitialTrace }                          from './router/PnsDragger';
 import {
@@ -494,6 +497,9 @@ export class KicadRenderSession {
 	/** The canonical BOARD model wrapping the AST root + scene (see
 	 *  connectivity/board.ts). Built whenever the board is (re)loaded. */
 	protected board: any = null;
+	/** Lazily-created interactive PNS router over the loaded board scene. */
+	protected boardRouter: PNS_ROUTER | null = null;
+	protected routeTool: ROUTE_TOOL | null = null;
 	protected ratsnestVisible = true;
 	/** Position signature of the last fast-drag commit's moved footprints (see
 	 *  commitBoardDragFast's Fix-3 skip), so an unchanged-position re-commit
@@ -4941,6 +4947,89 @@ export class KicadRenderSession {
 			return null;
 		}
 		return buildSchematicNetlistFromRoot(this.schematicRoot.rootElement);
+	}
+
+	/**
+	 * Builds the connection graph for the currently loaded schematic (a single
+	 * sheet instance wrapping the loaded root). For a multi-sheet project,
+	 * callers should walk the project and pass all instances to
+	 * collectSheetInstances + buildConnectionGraph directly.
+	 */
+	getConnectionGraph(): any {
+		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+			return null;
+		}
+		const singleInstance = {
+			id: '/',
+			path: '',
+			rootElement: this.schematicRoot.rootElement,
+			libSymbols: this.findLibSymbols(this.schematicRoot.rootElement),
+			parent: null,
+			children: [],
+		};
+		return buildConnectionGraph([singleInstance]);
+	}
+
+	/**
+	 * A lazily-created interactive PNS_ROUTER over the current board scene.
+	 * Call router.setWorld(scene, copperLayers) before startRouting/move/fix.
+	 */
+	getRouter(): PNS_ROUTER {
+		if (!this.boardRouter) {
+			this.boardRouter = new PNS_ROUTER();
+		}
+		return this.boardRouter;
+	}
+
+	/**
+	 * Rebinds the interactive router's world to the current board scene (the
+	 * collision world from the painted copper). Returns the router ready for
+	 * startRouting(). No-op for a non-board document.
+	 */
+	prepareRouterWorld(): PNS_ROUTER | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const router = this.getRouter();
+		router.setWorld(this.scene, this.scene.copperLayerStack);
+		return router;
+	}
+
+	/**
+	 * The interactive route tool (a gesture state machine over the PNS_ROUTER).
+	 * Lazily created; shared with the router via the same underlying router
+	 * instance. Call prepareRouteTool() to bind it to the board scene.
+	 */
+	getRouteTool(): ROUTE_TOOL {
+		if (!this.routeTool) {
+			this.routeTool = new ROUTE_TOOL();
+			// Share the router instance so the tool and direct router use
+			// the same collision world and settings.
+			this.routeTool.injectRouter(this.getRouter());
+		}
+		return this.routeTool;
+	}
+
+	/** Binds the route tool's world to the current board scene. No-op for a
+	 *  non-board document. Returns the tool ready for SelectStart(). */
+	prepareRouteTool(): ROUTE_TOOL | null {
+		if (this.documentType !== 'board' || !this.scene) {
+			return null;
+		}
+		const tool = this.getRouteTool();
+		tool.setWorld(this.scene, this.scene.copperLayerStack);
+		return tool;
+	}
+
+	/** Finds the `(lib_symbols ...)` block in a schematic root, or null. */
+	private findLibSymbols(rootElement: any): any {
+		if (!rootElement?.children) return null;
+		for (const c of rootElement.children) {
+			if (c?.name === 'lib_symbols') {
+				return c;
+			}
+		}
+		return null;
 	}
 
 	/** Per-zone fill provenance — purely session/UI bookkeeping (e.g. a

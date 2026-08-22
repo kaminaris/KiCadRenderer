@@ -140,6 +140,12 @@ export class BOARD_STACKUP {
 		return t;
 	}
 
+	/** The through-via height (the total board thickness). Mirrors
+	 *  BOARD_STACKUP used for via/v-score depth in 3D/DRC. */
+	GetViaHeight(): number {
+		return this.GetBoardThickness();
+	}
+
 	/** The copper layers in the stackup (in stackup order). */
 	CopperLayers(): STACKUP_ITEM[] {
 		return this.m_layers.filter(l => l.IsCopperLayer());

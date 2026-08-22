@@ -32,6 +32,7 @@ import { SHAPE_CIRCLE } from '../geometry/ShapeCircle';
 import { SHAPE_SEGMENT } from '../geometry/ShapeSegment';
 import { SHAPE_LINE_CHAIN } from '../geometry/ShapeLineChain';
 import { SHAPE_POLY_SET } from '../geometry/ShapePolySet';
+import { Angle } from '../math/Angle';
 import { pointInPolygon } from '../geometry/polygon';
 import { TransformShapeWithClearanceToPolygon } from '../geometry/ConvertToPolygon';
 import { PAD_CLEARANCES } from './PadClearances';
@@ -467,16 +468,54 @@ export class AstAdapter implements CN_ITEM_PARENT {
 
 		switch (this.m_kind) {
 			case 'pad': {
-				const origin = el.getOrigin?.() ?? { x: 0, y: 0 };
+				const origin = el.getOrigin?.() ?? { x: 0, y: 0, rotation: 0 };
 				const size = el.getSize?.() ?? { width: 0, height: 0 };
 				const shape: string = el.shape ?? 'rect';
+				const pos = new Vec2(origin.x, origin.y);
+				const rotation = origin.rotation ?? 0;
+
+				// Custom pads: use the primitive gr_poly rings as the effective shape,
+				// unioned with the anchor rect. Mirrors PAD::GetEffectiveShape for
+				// PAD_SHAPE::CUSTOM (pcbnew/pad.cpp).
+				if (shape === 'custom') {
+					const rings = typeof el.getCustomPolygonPoints === 'function'
+						? el.getCustomPolygonPoints()
+						: [];
+
+					if (rings.length > 0) {
+						const polySet = new SHAPE_POLY_SET();
+						const angle = new Angle(rotation);
+
+						for (const ring of rings) {
+							const pts = ring.map(p => {
+								const local = new Vec2(p.x, p.y);
+								return angle.rotatePoint(local, new Vec2(0, 0)).add(pos);
+							});
+							polySet.AddOutline(new SHAPE_LINE_CHAIN(pts, true));
+						}
+
+						// KiCad custom pads are the union of the primitive polygons
+						// with the anchor (size) rectangle.
+						const anchorHalfW = size.width / 2;
+						const anchorHalfH = size.height / 2;
+						const anchorPts = [
+							new Vec2(-anchorHalfW, -anchorHalfH),
+							new Vec2(anchorHalfW, -anchorHalfH),
+							new Vec2(anchorHalfW, anchorHalfH),
+							new Vec2(-anchorHalfW, anchorHalfH),
+						].map(p => angle.rotatePoint(p, new Vec2(0, 0)).add(pos));
+						polySet.AddOutline(new SHAPE_LINE_CHAIN(anchorPts, true));
+
+						return polySet;
+					}
+				}
 
 				// Map the KiCad pad shape to the canonical SHAPE geometry,
 				// mirroring PAD::GetEffectiveShape (pcbnew/pad.cpp): an oval
 				// pad is a wide segment between the two rounded caps; a circle
 				// is a disc; rect/roundrect default to an axis-aligned box.
 				if (shape === 'circle') {
-					return new SHAPE_CIRCLE(new Vec2(origin.x, origin.y), size.width / 2);
+					return new SHAPE_CIRCLE(pos, size.width / 2);
 				}
 				if (shape === 'oval') {
 					const d = size.width; // oval diameter = min dimension
@@ -496,7 +535,7 @@ export class AstAdapter implements CN_ITEM_PARENT {
 						d
 					);
 				}
-				// rect / roundrect / trapezoid / custom (bounded approximation)
+				// rect / roundrect / trapezoid (bounded approximation)
 				return new SHAPE_RECT(
 					new Vec2(origin.x - size.width / 2, origin.y - size.height / 2),
 					new Vec2(size.width, size.height)

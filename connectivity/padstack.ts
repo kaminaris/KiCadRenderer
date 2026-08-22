@@ -97,6 +97,28 @@ export class PADSTACK {
 			r * 2
 		);
 	}
+
+	/**
+	 * Tests whether `aOther` (a canonical SHAPE) collides with any of this
+	 * padstack's per-layer copper shapes on `aLayer`, within `aClearance`.
+	 * Mirrors the DRC pad-vs-shape collision on a specific layer.
+	 */
+	Collide(aLayer: number, aPosition: Vec2, aOther: SHAPE, aClearance = 0): boolean {
+		for (const item of this.m_items) {
+			if (item.layer !== aLayer) {
+				continue;
+			}
+			const shape = padShapeToShape(item.shape, aPosition, item.size, item.cornerRadius);
+			try {
+				if (shape.Collide(aOther, aClearance)) {
+					return true;
+				}
+			} catch {
+				// collision not implemented for this pair — skip
+			}
+		}
+		return false;
+	}
 }
 
 function padShapeToShape(

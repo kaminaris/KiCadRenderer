@@ -120,15 +120,15 @@ collision. Zones additionally feed a real `SHAPE_POLY_SET::Triangulate()` into
 
 ## Known limitations (inherited from the port scope)
 
-- **Layers:** the ported `LSET`/layer numbering only distinguishes F.Cu (0)
-  and B.Cu (2). Internal copper layers all collapse to layer 1 and are not
-  individually connectable. Vias span 0..INT_MAX (through-hole assumption).
-- **Zones:** `CN_ZONE_LAYER` R-trees are empty (the facade reports zero
-  triangulated polys), so zone↔item connections via `ContainsPoint`/`Collide`
-  don't fire yet. Zone outline anchors are still added, so zone islands
-  appear as ratsnest nodes.
-- **Pad shapes:** pad effective shapes are bbox rects from `(size ...)`;
-  custom (gr_poly) pad outlines are not used for collision.
+- **Layers:** `LSET` supports all 32 copper layers; the AST facade maps layer
+  names to these ids. Vias span 0..INT_MAX (through-hole assumption) unless the
+  `(layers ...)` span says otherwise.
+- **Zones:** `CN_ZONE_LAYER` R-trees are populated from
+  `SHAPE_POLY_SET::Triangulate()` via `KicadBoardFacade::GetFilledPolysList`,
+  so zone↔item collisions fire for scene-filled zones.
+- **Pad shapes:** circle, oval, rect, roundrect, trapezoid and custom
+  `(primitives (gr_poly ...))` pads are supported via `toShape()`. Roundrect
+  corner radius and trapezoid taper are still approximated by a bounding rect.
 - **Drag route:** the `ComputeLocalRatsnest` drag path is wired and working,
   but the dynamic data is rebuilt fresh each pointer-move frame (cheap for a
   single moving footprint; a multi-footprint group drag would benefit from
@@ -138,11 +138,10 @@ collision. Zones additionally feed a real `SHAPE_POLY_SET::Triangulate()` into
 
 ## Adding more KiCad code
 
-Future ports (e.g. `FillIsolatedIslandsMap`, proper zone triangulation +
-`SHAPE_POLY_SET`, full `LSET` layer set, `BulkLoad`, `NearestNeighbors`)
-should follow the same pattern: port the C++ file 1:1 into this folder,
-extend the facades (`BoardAdapter`/`KicadBoardFacade`) only where the scene
-or AST can supply the data, and document any gaps here.
+Future ports (e.g. full roundrect/trapezoid `SHAPE` exact geometry, `BulkLoad`,
+`NearestNeighbors`) should follow the same pattern: port the C++ file 1:1 into
+this folder, extend the facades (`BoardAdapter`/`KicadBoardFacade`) only where
+the scene or AST can supply the data, and document any gaps here.
 
 ## More parity added (KiCad 10 API breadth)
 
@@ -157,14 +156,6 @@ or AST can supply the data, and document any gaps here.
 
 ### Not yet ported — why
 
-- **`FillIsolatedIslandsMap`** (the last substantial public
-  `CN_CONNECTIVITY_ALGO` method in KiCad 10) is deliberately NOT ported yet:
-  it is only consumed by `zone_filler.cpp` (isolated-copper-island removal)
-  and it depends on filled-zone polygon triangulation (`SHAPE_POLY_SET`,
-  `ZONE::GetFilledPolysList` → `TriangulatedPolyCount`) — exactly the zone
-  gap the facade reports as 0 triangles. Porting it before zone triangulation
-  would be dead, unverifiable code. It should be ported together with
-  `SHAPE_POLY_SET` triangulation and `LSET::Seq()`.
 - **`BulkLoad` / `AddSources` / `AddSource`** (older-KiCad net-source APIs)
   are not in the KiCad 10 `CN_CONNECTIVITY_ALGO` public surface, so they are
   not ported.

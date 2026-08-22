@@ -204,3 +204,71 @@ export class SCH_POLYLINE {
 		return BBox.fromPoints([new Vec2(minX, minY), new Vec2(maxX, maxY)]);
 	}
 }
+
+/**
+ * A schematic rectangle (a graphic box). Mirrors KiCad's SCH_RECTANGLE.
+ */
+export class SCH_RECTANGLE {
+	start = new Vec2();
+	end = new Vec2();
+
+	GetStart(): Vec2 { return this.start.copy(); }
+	GetEnd(): Vec2 { return this.end.copy(); }
+
+	SetStart(aP: Vec2): void { this.start = aP; }
+	SetEnd(aP: Vec2): void { this.end = aP; }
+
+	GetBoundingBox(): BBox {
+		return BBox.fromPoints([
+			new Vec2(Math.min(this.start.x, this.end.x), Math.min(this.start.y, this.end.y)),
+			new Vec2(Math.max(this.start.x, this.end.x), Math.max(this.start.y, this.end.y)),
+		]);
+	}
+}
+
+/**
+ * A schematic circle. Mirrors KiCad's SCH_CIRCLE (a point + radius).
+ */
+export class SCH_CIRCLE {
+	start = new Vec2();
+	end = new Vec2(); // a point on the circle; radius = start..end distance
+
+	GetCenter(): Vec2 { return this.start.copy(); }
+	GetRadius(): number { return this.start.sub(this.end).magnitude; }
+
+	SetCenter(aP: Vec2): void { this.start = aP; }
+	SetEnd(aP: Vec2): void { this.end = aP; }
+
+	GetBoundingBox(): BBox {
+		const r = this.GetRadius();
+		return new BBox(this.start.x - r, this.start.y - r, r * 2, r * 2);
+	}
+}
+
+/**
+ * A schematic arc (a start/end and midpoint on the arc). Mirrors SCH_ARC.
+ */
+export class SCH_ARC {
+	start = new Vec2();
+	end = new Vec2();
+	mid = new Vec2();
+
+	GetStart(): Vec2 { return this.start.copy(); }
+	GetEnd(): Vec2 { return this.end.copy(); }
+	GetMid(): Vec2 { return this.mid.copy(); }
+
+	SetStart(aP: Vec2): void { this.start = aP; }
+	SetEnd(aP: Vec2): void { this.end = aP; }
+	SetMid(aP: Vec2): void { this.mid = aP; }
+
+	GetBoundingBox(): BBox {
+		// Box over the control points + the arc's circle extremes (best-effort).
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		const all = [this.start, this.end, this.mid];
+		for (const p of all) {
+			minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+			maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+		}
+		return BBox.fromPoints([new Vec2(minX, minY), new Vec2(maxX, maxY)]);
+	}
+}

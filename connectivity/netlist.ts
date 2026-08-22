@@ -33,6 +33,8 @@ export interface NETLIST_COMPONENT {
 /** One net in the netlist: its name and the member pins. */
 export interface NETLIST_NET {
 	name: string;
+	/** Optional subgraph / net code (KiCad-style connection code). */
+	code?: number;
 	// (reference, pin number) members.
 	members: { reference: string; pinNumber: string }[];
 }

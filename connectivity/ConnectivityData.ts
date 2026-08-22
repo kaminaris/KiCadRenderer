@@ -20,7 +20,7 @@ import {
 	KICAD_T,
 } from "./ConnectivityItems";
 import { CN_EDGE, RN_NET, RN_DYNAMIC_LINE } from "./RatsnestData";
-import { CN_CONNECTIVITY_ALGO } from "./ConnectivityAlgo";
+import { CN_CONNECTIVITY_ALGO, ISOLATED_ISLANDS } from "./ConnectivityAlgo";
 import { Vec2 } from "../math/Vec2";
 import { NETINFO_LIST, NETINFO_ITEM, NETCLASS } from "./netinfo";
 import { NetClassClearance } from "./clearance";
@@ -128,8 +128,25 @@ export class CONNECTIVITY_DATA {
 		return this.m_nets[aNet] ?? null;
 	}
 
+	/** True if the net has unfilled ratsnest edges (not fully connected). */
+	NetHasAirwires(aNet: number): boolean {
+		const rn = this.GetRatsnestForNet(aNet);
+		return rn ? rn.GetEdges().length > 0 : false;
+	}
+
 	PropagateNets(aCommit: any = null): void {
 		this.m_connAlgo.PropagateNets(aCommit);
+	}
+
+	/**
+	 * Mirrors CONNECTIVITY_DATA::FillIsolatedIslandsMap().
+	 * Delegates to CN_CONNECTIVITY_ALGO::FillIsolatedIslandsMap.
+	 */
+	FillIsolatedIslandsMap(
+		aMap: Map<any, Map<number, ISOLATED_ISLANDS>>,
+		aConnectivityAlreadyRebuilt = false
+	): void {
+		this.m_connAlgo.FillIsolatedIslandsMap(aMap, aConnectivityAlreadyRebuilt);
 	}
 
 	RecalculateRatsnest(aCommit: any = null): void {

@@ -164,6 +164,33 @@ export type {
 	CN_LAYER,
 } from './connectivity/ConnectivityItems';
 
+// Schematic connection graph / netlist (ported from eeschema/connection_graph.cpp)
+export {
+	CONNECTION_SUBGRAPH,
+	buildProjectNetlist,
+	collectSheetInstances,
+	buildConnectionGraph,
+	resolveSubgraphNames,
+} from './connectivity/SchematicConnectionGraph';
+export type {
+	SHEET_INSTANCE,
+	CONNECTION_NODE,
+	PROJECT_NETLIST_OPTIONS,
+	SUBGRAPH_NAME,
+} from './connectivity/SchematicConnectionGraph';
+
+// PNS interactive router (ported from pcbnew/router/pns_router.h/.cpp)
+export { PNS_ROUTER } from './router/PnsRouter';
+export type {
+	PnsRouterMode,
+	PnsCornerMode,
+	PNS_ROUTER_SETTINGS,
+	PNS_ROUTE_RESULT,
+	PNS_COMMITTED_SEGMENT,
+	PNS_ROUTE_COMMIT,
+	PnsClearanceResolver,
+} from './router/PnsRouter';
+
 // Math
 export { Angle } from './math/Angle';
 export type { AngleLike } from './math/Angle';
