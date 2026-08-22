@@ -18,6 +18,7 @@
 import { Vec2 } from '../math/Vec2';
 import { PNS_ROUTER, PNS_ROUTE_RESULT, PNS_ROUTE_COMMIT, PNS_ROUTER_SETTINGS, PnsRouterMode, PnsCornerMode } from '../router/PnsRouter';
 import { PNS_LINE } from '../router/PnsNode';
+import { COMMIT, UNDO_REDO_ITEM } from './UndoRedo';
 
 /** The route tool's internal state (mirrors the KiCad route tool state). */
 export type RoutePhase = 'idle' | 'starting' | 'routing' | 'placing-via';
@@ -100,9 +101,9 @@ export class ROUTE_TOOL {
 	 * Moves the cursor while routing; returns the ghost line plus collision /
 	 * detour state. Mirrors the route tool's OnMouseMove -> router.Move().
 	 */
-	MoveCursor(cursor: Vec2): RouteGesture {
+	MoveCursor(cursor: Vec2): Extract<RouteGesture, { kind: 'routing' }> {
 		if (this.phase === 'idle') {
-			return { kind: 'idle' };
+			throw new Error('ROUTE_TOOL.MoveCursor() called with no active route');
 		}
 		if (this.phase === 'starting') {
 			this.phase = 'routing';
@@ -126,16 +127,33 @@ export class ROUTE_TOOL {
 	/**
 	 * Fixes/commits the route at `cursor`. Returns the commit (segments to add
 	 * + shoved tracks), or null if it couldn't be committed (collision /
-	 * degenerate). Mirrors DoubleClickFix. The commit resets to idle.
+	 * degenerate). Mirrors DoubleClickFix. When `aFinish` is false the tool
+	 * stays in 'routing' from the committed endpoint (continuing a run);
+	 * when true it returns to idle.
 	 */
-	Fix(cursor: Vec2): PNS_ROUTE_COMMIT | null {
+	Fix(cursor: Vec2, aFinish = false): PNS_ROUTE_COMMIT | null {
 		if (this.phase === 'idle') {
 			return null;
 		}
-		this.phase = 'starting';
 		const commit = this.router.fixRoute(this.snapToSegmentCursor(cursor));
-		this.phase = 'idle';
 		this.lastCommit = commit;
+		if (aFinish) {
+			this.phase = 'idle';
+			this.startPoint = null;
+			return commit;
+		}
+		// Keep routing from the committed endpoint so the next corner's
+		// preview works (the router reset its line on commit).
+		if (commit && commit.segments.length > 0) {
+			const last = commit.segments[commit.segments.length - 1]!;
+			this.startPoint = new Vec2(last.x2, last.y2);
+			this.router.startRouting(this.startPoint, this.layer, this.width, this.netId);
+			this.phase = 'routing';
+		}
+		else {
+			this.phase = 'idle';
+			this.startPoint = null;
+		}
 		return commit;
 	}
 
@@ -163,6 +181,17 @@ export class ROUTE_TOOL {
 	/** Sets the corner style (45 / 90 / free). */
 	SetCornerMode(cornerMode: PnsCornerMode): void {
 		this.router.setSettings({ ...this.router.getSettings(), cornerMode });
+	}
+
+	/** Sets whether a still-colliding route may be committed (mirrors
+	 *  RouterSettings.allowDrcViolations). */
+	SetAllowDrcViolations(allow: boolean): void {
+		this.router.setSettings({ ...this.router.getSettings(), allowDrcViolations: allow });
+	}
+
+	/** Sets whether redundant/collinear points are merged on commit. */
+	SetRemoveRedundantTracks(remove: boolean): void {
+		this.router.setSettings({ ...this.router.getSettings(), removeRedundantTracks: remove });
 	}
 
 	/** Sets the trace width (mm) for subsequently started routes. */
@@ -198,6 +227,28 @@ export class ROUTE_TOOL {
 		const c = this.lastCommit;
 		this.lastCommit = null;
 		return c;
+	}
+
+	/**
+	 * Wraps the last committed route (if any) in a canonical COMMIT/
+	 * UNDO_REDO_ITEM (segments added; shoved segment chains changed), so a
+	 * caller following the KiCad commit pattern can fold it into the undo
+	 * stack without re-deriving it from the AST diff.
+	 */
+	TakeCommitAsUndoRedo(description = 'Route track'): UNDO_REDO_ITEM | null {
+		const c = this.lastCommit;
+		this.lastCommit = null;
+		if (!c) {
+			return null;
+		}
+		const commit = new COMMIT(description);
+		for (const seg of c.segments) {
+			commit.Add(seg);
+		}
+		for (const shoved of c.shoved) {
+			commit.Modify(shoved.obstacle.element, null, shoved.segments);
+		}
+		return commit.Commit();
 	}
 
 	/** Snaps a cursor position to the segment start/end points (KiCad's route

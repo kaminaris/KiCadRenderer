@@ -13,7 +13,8 @@
 
 import { Vec2 } from '../math/Vec2';
 import { SHAPE_POLY_SET } from '../geometry/ShapePolySet';
-import { SHAPE_LINE_CHAIN, isColinear } from '../geometry/ShapeLineChain';
+import { SHAPE_LINE_CHAIN, arcToPolyline, isColinear } from '../geometry/ShapeLineChain';
+import { SHAPE_ARC } from '../geometry/ShapeArc';
 
 /** An Edge.Cuts outline segment source (line or an arc approximated as a line). */
 export interface EDGE_SEGMENT {
@@ -115,4 +116,50 @@ export function isOutlineClosed(aOutline: SHAPE_LINE_CHAIN): boolean {
 /** Helpers used by the outline builder. */
 export function colinear(a: Vec2, b: Vec2, c: Vec2): boolean {
 	return isColinear(a, b, c);
+}
+
+/**
+ * An edge item on the board outline: either a straight segment or an arc.
+ * Mirrors KiCad's board edge items (EDGE_SEGMENT / EDGE_ARC).
+ */
+export interface EDGE_ITEM {
+	kind: 'line' | 'arc';
+	start: Vec2;
+	end: Vec2;
+	// For an arc: the center and the arc's mid-point (defines the bow).
+	center?: Vec2;
+	mid?: Vec2;
+}
+
+/**
+ * Flattens a mixed list of board-edge items (straight lines + arcs) into a
+ * contiguous list of straight EDGE_SEGMENTs. Arcs are sampled into short
+ * polyline chords (mirrors KiCad flattening edge arcs to segments for the
+ * outline). Returns an empty list if there are too few items to form a
+ * closed outline.
+ */
+export function flattenEdgeItems(aItems: EDGE_ITEM[]): EDGE_SEGMENT[] {
+	const segs: EDGE_SEGMENT[] = [];
+	for (const it of aItems) {
+		if (it.kind === 'line') {
+			segs.push({ start: it.start.copy(), end: it.end.copy() });
+			continue;
+		}
+		// Arc: sample into chords via SHAPE_ARC from the three points.
+		const arc = new SHAPE_ARC(it.start, it.mid ?? midpoint(it.start, it.end), it.end);
+		const pts = arcToPolyline(arc);
+		for (let i = 0; i < pts.length - 1; i++) {
+			segs.push({ start: pts[i]!.copy(), end: pts[i + 1]!.copy() });
+		}
+	}
+	return segs;
+}
+
+/** Builds the closed board outline from mixed line/arc edge items. */
+export function buildEdgeOutline(aItems: EDGE_ITEM[]): SHAPE_POLY_SET {
+	return buildBoardOutlines(flattenEdgeItems(aItems));
+}
+
+function midpoint(a: Vec2, b: Vec2): Vec2 {
+	return new Vec2((a.x + b.x) / 2, (a.y + b.y) / 2);
 }

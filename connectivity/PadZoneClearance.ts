@@ -14,6 +14,7 @@
 import { SHAPE } from '../geometry/Shape';
 import { SHAPE_POLY_SET } from '../geometry/ShapePolySet';
 import { SEG } from '../geometry/Seg';
+import { Vec2 } from '../math/Vec2';
 import { PAD_CLEARANCES, effectiveZoneConnection } from './PadClearances';
 import { ZONE_CONNECTION } from './PadClearances';
 
@@ -35,7 +36,7 @@ export function padToZoneClearance(aPadShape: SHAPE, aZone: SHAPE_POLY_SET): num
 /**
  * The minimum distance from a pad or via (center) to a zone outline.
  */
-export function viaToZoneClearance(aViaCenter: { x: number; y: number }, aViaRadius: number, aZone: SHAPE_POLY_SET): number {
+export function viaToZoneClearance(aViaCenter: Vec2, aViaRadius: number, aZone: SHAPE_POLY_SET): number {
 	const d = aZone.Distance(aViaCenter);
 	return Math.max(0, d - aViaRadius);
 }

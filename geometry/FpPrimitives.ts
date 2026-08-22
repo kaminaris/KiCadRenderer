@@ -46,6 +46,9 @@ export class FP_SHAPE {
 	// For poly/bezier: the point list (poly) or control points (bezier).
 	points: Vec2[] = [];
 	width = 0.15;
+	// For ellipse: radii along the local X / Y axes (before rotation).
+	rx = 0;
+	ry = 0;
 	// Mirror / rotate (footprint-local transform hints).
 	flipped = false;
 	rotationDeg = 0;
@@ -100,6 +103,31 @@ export class FP_SHAPE {
 				}
 				return ps;
 			}
+			case FP_SHAPE_TYPE.ELLIPSE: {
+				// KiCad's fp_ellipse is a stroked/closed ellipse: sample to a
+				// polyline (mirrors ConvertToPolygon's ellipse flattening) so it
+				// renders + collides as a closed outline, not a bare segment.
+				const cx = this.center?.x ?? this.start.x;
+				const cy = this.center?.y ?? this.start.y;
+				const rx = this.rx || (this.end.x - cx);
+				const ry = this.ry || (this.end.y - cy);
+				const rad = (this.rotationDeg * Math.PI) / 180;
+				const cosR = Math.cos(rad);
+				const sinR = Math.sin(rad);
+				const pts: Vec2[] = [];
+				const N = 48;
+				for (let i = 0; i <= N; i++) {
+					const a = (i / N) * Math.PI * 2;
+					const ex = rx * Math.cos(a);
+					const ey = ry * Math.sin(a);
+					const x = cx + ex * cosR - ey * sinR;
+					const y = cy + ex * sinR + ey * cosR;
+					pts.push(new Vec2(x, y));
+				}
+				const ps = new SHAPE_POLY_SET();
+				ps.AddOutline(new SHAPE_LINE_CHAIN(pts, true));
+				return ps;
+			}
 			default:
 				return new SHAPE_SEGMENT(this.start, this.end, this.width);
 		}
@@ -117,5 +145,79 @@ export class FP_SHAPE {
 
 	GetEnd(): Vec2 {
 		return this.end.copy();
+	}
+}
+
+/**
+ * A footprint text item (reference designator, value, or a user text). Mirrors
+ * KiCad's FP_TEXT (a footprint text layer item with position/rotation and a
+ * clip-box). Text rendering is handled by TextGeometry; this carries the
+ * footprint-editor text metadata.
+ */
+export class FP_TEXT {
+	text = '';
+	layer = 'F.SilkS';
+	at = new Vec2();
+	rotationDeg = 0;
+	justify: 'left' | 'center' | 'right' = 'left';
+	size = 1;
+	thickness = 0.15;
+
+	constructor(aText = '') {
+		this.text = aText;
+	}
+
+	/** The text as rendered (a footprint reference/value/user string). */
+	GetText(): string {
+		return this.text;
+	}
+
+	SetText(aText: string): void {
+		this.text = aText;
+	}
+
+	/** Text anchor position. */
+	GetPosition(): Vec2 {
+		return this.at.copy();
+	}
+}
+
+/** The footprint field kinds. Mirrors KiCad's FP_FIELD (id 0..4). */
+export enum FP_FIELD_ID {
+	REFERENCE = 0,
+	VALUE = 1,
+	FOOTPRINT = 2,
+	DATASHEET = 3,
+	DESCRIPTION = 4,
+}
+
+/**
+ * A footprint field (reference/value/footprint/datasheet/description) — a
+ * named FP_TEXT with a fixed role id. Mirrors KiCad's FP_FIELD.
+ */
+export class FP_FIELD extends FP_TEXT {
+	id: FP_FIELD_ID = FP_FIELD_ID.REFERENCE;
+
+	constructor(aId: FP_FIELD_ID = FP_FIELD_ID.REFERENCE, aText = '') {
+		super(aText);
+		this.id = aId;
+	}
+
+	/** The field's role name (KiCad FP_FIELD::GetName). */
+	Name(): string {
+		switch (this.id) {
+			case FP_FIELD_ID.REFERENCE:
+				return 'Reference';
+			case FP_FIELD_ID.VALUE:
+				return 'Value';
+			case FP_FIELD_ID.FOOTPRINT:
+				return 'Footprint';
+			case FP_FIELD_ID.DATASHEET:
+				return 'Datasheet';
+			case FP_FIELD_ID.DESCRIPTION:
+				return 'Description';
+			default:
+				return 'Reference';
+		}
 	}
 }

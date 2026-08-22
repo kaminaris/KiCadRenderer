@@ -14,6 +14,15 @@ import { SHAPE } from './Shape';
 import { SHAPE_TYPE } from './Shape';
 import { fmtN } from './format';
 
+/** Coerces a point that may arrive as a plain `{x,y}` into a Vec2 (the
+ *  connectivity layer sometimes passes plain point objects). */
+function toPoint(p: Vec2 | { x: number; y: number }): Vec2 {
+	if (p instanceof Vec2 || typeof (p as Vec2).sub === 'function') {
+		return p as Vec2;
+	}
+	return new Vec2(p.x, p.y);
+}
+
 /**
  * Represents an arc.  Holds the start and end points, the center, and whether
  * the arc is clockwise.
@@ -122,8 +131,9 @@ export class SHAPE_ARC extends SHAPE {
 
 		if (typeof aEndOrAngle === 'number') {
 			// (center, start, midpointAngle)
-			const center = aCenterOrStart;
-			const start = aStartOrMid;
+			const centerAny = aCenterOrStart as { x: number; y: number } | Vec2;
+			const center = toPoint(centerAny);
+			const start = toPoint(aStartOrMid as Vec2);
 			const midAngle = aEndOrAngle;
 			this.m_center = center;
 			this.m_start = start;
@@ -139,9 +149,9 @@ export class SHAPE_ARC extends SHAPE {
 			this.m_width = aWidth;
 		} else {
 			// (start, mid, end)
-			const start = aCenterOrStart;
-			const mid = aStartOrMid;
-			const end = aEndOrAngle as Vec2;
+			const start = toPoint(aCenterOrStart);
+			const mid = toPoint(aStartOrMid);
+			const end = toPoint(aEndOrAngle as Vec2);
 			this.m_start = start;
 			this.m_midPoint = mid;
 			this.m_end = end;

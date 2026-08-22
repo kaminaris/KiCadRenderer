@@ -109,6 +109,9 @@ export class PADSTACK {
 				continue;
 			}
 			const shape = padShapeToShape(item.shape, aPosition, item.size, item.cornerRadius);
+			if (!shape) {
+				continue;
+			}
 			try {
 				if (shape.Collide(aOther, aClearance)) {
 					return true;

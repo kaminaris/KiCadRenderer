@@ -14,6 +14,15 @@ import { SHAPE } from './Shape';
 import { SHAPE_TYPE } from './Shape';
 import { fmtN } from './format';
 
+/** Coerces a point that may arrive as a plain `{x,y}` into a Vec2 (the
+ *  connectivity layer sometimes hands shapes plain point objects). */
+export function toVec2(p: { x: number; y: number } | Vec2): Vec2 {
+	if (p instanceof Vec2 || typeof (p as Vec2).sub === 'function') {
+		return p as Vec2;
+	}
+	return new Vec2(p.x, p.y);
+}
+
 /**
  * Represents a circle (filled disc), not an outline.
  * Mirrors KiCad's SHAPE_CIRCLE (libs/kimath/include/geometry/shape_circle.h).
@@ -24,7 +33,7 @@ export class SHAPE_CIRCLE extends SHAPE {
 
 	constructor(aCenter = new Vec2(), aRadius = 0) {
 		super(SHAPE_TYPE.CIRCLE);
-		this.m_center = aCenter;
+		this.m_center = toVec2(aCenter as Vec2);
 		this.m_radius = aRadius;
 	}
 
@@ -83,11 +92,11 @@ export class SHAPE_CIRCLE extends SHAPE {
 	}
 
 	CollidePoint(aP: Vec2, aClearance: number): boolean {
-		return aP.sub(this.m_center).magnitude <= this.m_radius + aClearance;
+		return toVec2(aP).sub(this.m_center).magnitude <= this.m_radius + aClearance;
 	}
 
 	Distance(aP: Vec2): number {
-		return Math.max(0, aP.sub(this.m_center).magnitude - this.m_radius);
+		return Math.max(0, toVec2(aP).sub(this.m_center).magnitude - this.m_radius);
 	}
 
 	/** S-expression text: `(circle (center x y) (radius r))`. */

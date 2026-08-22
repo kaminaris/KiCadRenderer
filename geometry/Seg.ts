@@ -59,7 +59,7 @@ export class SEG {
 	}
 
 	/** Dot product of the two endpoint vectors. */
-	Dot(aSeg?: SEG): number;
+	Dot(aSeg: SEG): number;
 	Dot(aVec: Vec2): number;
 	Dot(aOther: SEG | Vec2): number {
 		if (aOther instanceof SEG) {

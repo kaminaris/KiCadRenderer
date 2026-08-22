@@ -13,6 +13,7 @@
 
 import { Vec2 } from '../math/Vec2';
 import { BBox } from '../math/BBox';
+import { PIN_TYPE, PIN_SHAPE } from './PinInfo';
 import { SEG } from './Seg';
 import { SHAPE_LINE_CHAIN } from './ShapeLineChain';
 
@@ -270,5 +271,61 @@ export class SCH_ARC {
 			maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
 		}
 		return BBox.fromPoints([new Vec2(minX, minY), new Vec2(maxX, maxY)]);
+	}
+}
+
+/**
+ * A schematic symbol pin — the electrical connection geometry on a symbol
+ * body. Mirrors KiCad's LIB_PIN/SCH_PIN: an anchor position, an orientation
+ * (which side the pin extends toward), a length, the electrical type, and
+ * number/name. Drives netlist connectivity + ERC.
+ */
+export class SCH_PIN {
+	number = '';
+	name = '';
+	/** The pin's electrical type (INPUT/OUTPUT/BIDIRECTIONAL/...). */
+	type: PIN_TYPE = PIN_TYPE.PASSIVE;
+	/** The pin shape (line/inverted/clock/...) for the graphic. */
+	shape: PIN_SHAPE = PIN_SHAPE.LINE;
+	/** The pin anchor position (the connection point). */
+	position = new Vec2();
+	/** Orientation in degrees (0 = extends +X, 90 = +Y, ...). */
+	orientation = 0;
+	length = 2.54;
+
+	constructor(aNumber = '1') {
+		this.number = aNumber;
+	}
+
+	/** The connection point (pin anchor). */
+	GetPosition(): Vec2 {
+		return this.position.copy();
+	}
+
+	/** The pin length. */
+	GetLength(): number {
+		return this.length;
+	}
+
+	/** The far end of the pin graphic (anchor + orientation * length). */
+	GetEnd(): Vec2 {
+		const rad = (this.orientation * Math.PI) / 180;
+		return new Vec2(
+			this.position.x + Math.cos(rad) * this.length,
+			this.position.y + Math.sin(rad) * this.length
+		);
+	}
+
+	/** The pin's electrical type. */
+	GetType(): PIN_TYPE {
+		return this.type;
+	}
+
+	GetNumber(): string {
+		return this.number;
+	}
+
+	GetName(): string {
+		return this.name;
 	}
 }

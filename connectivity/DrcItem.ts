@@ -44,6 +44,8 @@ export class DRC_ITEM {
 	posB = new Vec2();
 	isPoint = true;
 	description = '';
+	/** The other item involved in the violation (obstacle owner id). */
+	owner = '';
 
 	constructor(aKind: DRCE, aDescription = '') {
 		this.kind = aKind;

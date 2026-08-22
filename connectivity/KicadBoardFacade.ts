@@ -487,7 +487,7 @@ export class AstAdapter implements CN_ITEM_PARENT {
 						const angle = new Angle(rotation);
 
 						for (const ring of rings) {
-							const pts = ring.map(p => {
+							const pts = ring.map((p: { x: number; y: number }) => {
 								const local = new Vec2(p.x, p.y);
 								return angle.rotatePoint(local, new Vec2(0, 0)).add(pos);
 							});
@@ -544,7 +544,7 @@ export class AstAdapter implements CN_ITEM_PARENT {
 			case 'via': {
 				const origin = el.getOrigin?.() ?? { x: 0, y: 0 };
 				const size = el.getSize?.() ?? { width: 0, height: 0 };
-				return new SHAPE_CIRCLE(origin, size.width / 2);
+				return new SHAPE_CIRCLE(new Vec2(origin.x, origin.y), size.width / 2);
 			}
 			case 'track':
 			case 'arc': {

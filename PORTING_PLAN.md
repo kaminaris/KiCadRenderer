@@ -148,3 +148,36 @@ replaced with `symbolPropertyValue()` (getPropertyByName). Whole tree green.
   over PNS_ROUTER (SelectStart/MoveCursor/Fix/FixPointAndContinue/Cancel,
   ghost points, snap-to-anchor, setMode/corner/width/layer, injectRouter).
 - Session: getRouteTool()/prepareRouteTool() (shares the router instance).
+- apps/kicad-viewer/src/editor/BoardPointerController: routing rewritten to drive the
+  canonical ROUTE_TOOL (prepareRouteTool + SelectStart/MoveCursor/Fix/TakeCommit +
+  SetAllowDrcViolations), applying the canonical PNS_ROUTE_COMMIT via the session's
+  addTrackSegment/shoveTrackSegment. Deleted legacy in-house routing path (computeRoutePath,
+  attemptShove, planShove, buildRoutePath, miterPath); kept shared drag helpers.
+- ROUTE_TOOL: Fix(cursor, aFinish) re-starts routing from the committed endpoint so
+  multi-corner runs keep working; SetAllowDrcViolations/SetRemoveRedundantTracks; MoveCursor
+  returns the narrowed routing gesture.
+- Fixed app-build errors surfaced by the strict app tsconfig: Seg.Dot overload, KicadBoardFacade
+  implicit-any ring.map, padstack null shape, PadZoneClearance Vec2 import, DRC_ITEM.owner.
+- interaction/UndoRedo.ts: UNDO_REDO container + COMMIT pattern (Add/Remove/Modify,
+  Commit->UNDO_REDO_ITEM, Revert), UNDO_REDO_T enum — canonical transaction shape.
+- interaction/DragTool.ts: DRAG_TOOL interactive segment/via drag gesture over the
+  PnsDragger primitives (Select/Move/Commit/Cancel, 45/90/free) + makeInitialTrace.
+- interaction/NetHighlight.ts: netToHighlight + NET_HIGHLIGHT brush state (session's
+  highlightBoardNetAtScreen/clearBoardNetHighlight are the live renderer).
+- RouteTool.TakeCommitAsUndoRedo() folds a canonical route commit into a COMMIT.
+- interaction/Selection.ts: SELECTION set + SELECTION_TOOL (click/box select,
+  REPLACE/ADD/TOGGLE/SUBTRACT modifiers, cancel-on-empty, geometry-lookup box membership).
+- interaction/SchematicTool.ts: SCHEMATIC_TOOL gesture layer (wire/bus/line draw run,
+  junction/no-connect/label/symbol/power placement) over a mutation injection surface.
+- interaction/MeasureTool.ts: MEASURE_TOOL (click-preview-finalize, distance/dx/dy/angle).
+- interaction/ZoneTool.ts: ZONE_TOOL (zone-outline polygon gesture -> commit outline -> fill
+  via a ZoneSink injection surface).
+- geometry/FpPrimitives: FP_SHAPE ELLIPSE Shape() fixed (sampled polyline, not segment);
+  added rx/ry fields; added FP_TEXT + FP_FIELD (reference/value/footprint/datasheet/description).
+- geometry/SchGeometry: added SCH_PIN (position/orientation/length/electrical type/number/name).
+- connectivity/ExcellonExport.ts: Excellon drill-file (.drl) writer — M48/METRIC tool defs
+  (T1Csize per distinct drill diameter), G90/G00/G71/G85, grouped G85 hits, M30 end.
+  Consumes DRILL_LAYOUT. (+ collectDrillHits convenience.)
+- connectivity/BoardOutline: added EDGE_ITEM (line/arc) + flattenEdgeItems (arcs sampled via
+  arcToPolyline into chords) + buildEdgeOutline — board-edge S-curve support.
+- connectivity/ExcellonExport: added drillMapLegend (per-size hole+Ø summary lines).
