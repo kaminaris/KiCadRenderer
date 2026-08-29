@@ -7,6 +7,7 @@ import { Vec2 } from '../math/Vec2';
 import type { LayeredBoardScene, PaintedItem } from './BoardPainter';
 import { getClipperEngine } from './ClipperEngine';
 import { PaintedShape } from './PaintedShape';
+import { layerNameFromId } from '@kicad-model/src/pcb/layerNames';
 
 /**
  * A scoped, faithful translation of real KiCad's zone_filler.cpp pipeline —
@@ -16,8 +17,13 @@ import { PaintedShape } from './PaintedShape';
  *
  * Steps mirrored from zone_filler.cpp (ZONE_FILLER::fillSingleZone) and
  * ZONE::BuildSmoothedPoly:
- *  1. outline = the zone's own authored polygon (skips BuildSmoothedPoly's
- *     corner-smoothing nuance for now — see the deferred list below).
+ *  1. outline = the zone's own authored polygon, with its Corner Smoothing
+ *     setting (None/Chamfer/Fillet) applied first — see smoothZoneOutline,
+ *     a direct port of BuildSmoothedPoly's core chamfer/fillet corner
+ *     treatment (corner_operations.cpp's chamferFilletPolygon). The
+ *     same-net-intersecting-zone divot-avoidance refinement on top of that
+ *     core treatment is NOT ported — see smoothZoneOutline's own doc
+ *     comment.
  *  2. Intersect the outline against the board's own physical outline
  *     (Edge.Cuts, assembled into outer-perimeter + cutout regions — see
  *     buildBoardOutlineRegionNm) — matches ZONE::BuildSmoothedPoly's own
@@ -80,11 +86,20 @@ import { PaintedShape } from './PaintedShape';
  *
  * Deliberately deferred (each needs infrastructure this pass doesn't have —
  * not simplified approximations, just not attempted yet):
- *  - Same-net multi-zone priority interaction (needs whole-board zone
- *    iteration + a priority field).
- *  - Island removal (needs board connectivity data — BoardRatsnest.ts's
- *    union-find is the natural extension point for this later).
- *  - Min-width pruning.
+ *  - Same-net multi-zone priority interaction and island removal are BOTH
+ *    actually implemented (buildZonePriorityKnockouts / applyIslandRemoval,
+ *    further down this file) — this stale note (left over from an earlier
+ *    pass) was corrected 2026-08-28; see apps/KiOnline/KiCadFidelityPlan.md's
+ *    DRC audit entry for how the staleness was first found.
+ *  - Min-width pruning IS implemented (computeFillFromRings' deflate/inflate
+ *    "opening" pass, right before fracture), including the reconnection
+ *    real KiCad needs `connect_nearby_polys()` for: confirmed (2026-08-28,
+ *    synthetic dumbbell-shape check) that Clipper2's own `inflatePaths`
+ *    already reunions two regions the deflate step severed at a narrow
+ *    neck — `connect_nearby_polys()` exists to paper over a limitation in
+ *    KiCad's OWN `SHAPE_POLY_SET::Inflate` that doesn't reliably do this,
+ *    which doesn't apply to a different, already-robust polygon library.
+ *    Not a missing port; a verified library-capability difference.
  *  - The real EDGE_CLEARANCE_CONSTRAINT/CopperEdgeClearance value comes from
  *    a project's DRC rules / board design settings (.kicad_pro), which this
  *    app doesn't parse yet — DEFAULT_EDGE_CLEARANCE_MM below is real KiCad's
@@ -566,6 +581,20 @@ function collectEdgeCutsFromElement(el: any, transform: Transform, closedLoops: 
  * absent — which could leave `buildBoardOutlineRegionNm` seeing only a
  * disconnected fragment of the real outline. */
 function collectEdgeCutsGeometry(board: any): { closedLoops: MmPath[]; openEdges: MmPath[] } {
+	if (Array.isArray(board?.drawings) && Array.isArray(board?.footprints)) {
+		const closedLoops: MmPath[] = [];
+		const openEdges: MmPath[] = [];
+		for (const graphic of board.drawings) {
+			collectModelEdgeCutsGraphic(graphic, identityTransform, closedLoops, openEdges);
+		}
+		for (const footprint of board.footprints) {
+			const transform = footprintTransform(footprint);
+			for (const graphic of footprint.drawings ?? []) {
+				collectModelEdgeCutsGraphic(graphic, transform, closedLoops, openEdges);
+			}
+		}
+		return { closedLoops, openEdges };
+	}
 	const children: any[] = board?.rootElement?.children ?? [];
 	const closedLoops: MmPath[] = [];
 	const openEdges: MmPath[] = [];
@@ -581,6 +610,67 @@ function collectEdgeCutsGeometry(board: any): { closedLoops: MmPath[]; openEdges
 		collectEdgeCutsFromElement(el, identityTransform, closedLoops, openEdges);
 	}
 	return { closedLoops, openEdges };
+}
+
+/** Model-native counterpart to collectEdgeCutsFromElement. BoardShape uses
+ *  numeric shapeKind and footprint graphics use a string `kind`, but both
+ *  store PCB internal units and share the same Edge.Cuts semantics. */
+function collectModelEdgeCutsGraphic(
+	graphic: any, transform: Transform, closedLoops: MmPath[], openEdges: MmPath[]
+): void {
+	const layer = typeof graphic.getLayer === 'function' ? graphic.getLayer()
+		: typeof graphic.layer === 'number' ? layerNameFromId(graphic.layer) : '';
+	if (layer !== 'Edge.Cuts') return;
+	const mmPoint = (p: any): MmPoint => ({ x: Number(p?.x ?? 0) / NM_PER_MM, y: Number(p?.y ?? 0) / NM_PER_MM });
+	const kind = typeof graphic.kind === 'string' ? graphic.kind
+		: graphic.shapeKind === 0 ? 'line'
+			: graphic.shapeKind === 1 ? 'rect'
+				: graphic.shapeKind === 2 ? 'circle'
+					: graphic.shapeKind === 3 ? 'arc'
+						: graphic.shapeKind === 4 ? 'poly' : '';
+	const start = mmPoint(graphic.start), end = mmPoint(graphic.end);
+	if (kind === 'line') {
+		openEdges.push([transform(start), transform(end)]);
+	}
+	else if (kind === 'rect') {
+		const corners = [start, { x: end.x, y: start.y }, end, { x: start.x, y: end.y }].map(transform);
+		for (let i = 0; i < 4; i++) openEdges.push([corners[i]!, corners[(i + 1) % 4]!]);
+	}
+	else if (kind === 'circle') {
+		const center = graphic.center ? mmPoint(graphic.center) : start;
+		const radius = graphic.radius != null ? Number(graphic.radius) / NM_PER_MM : Math.hypot(end.x - center.x, end.y - center.y);
+		closedLoops.push(tessellateCircleMm(center.x, center.y, radius).map(transform));
+	}
+	else if (kind === 'arc') {
+		const geometry = threePointArcMm(start, mmPoint(graphic.mid), end);
+		if (geometry) {
+			openEdges.push(arcCenterlineMm(
+				geometry.centerX, geometry.centerY, geometry.radius, geometry.startAngle, geometry.endAngle).map(transform));
+		}
+	}
+	else if (kind === 'poly') {
+		const points = (graphic.points ?? []).map(mmPoint);
+		if (points.length >= 3) closedLoops.push(points.map(transform));
+	}
+}
+
+function threePointArcMm(start: MmPoint, mid: MmPoint, end: MmPoint):
+	{ centerX: number; centerY: number; radius: number; startAngle: number; endAngle: number } | null {
+	const ax = start.x, ay = start.y, bx = mid.x, by = mid.y, cx = end.x, cy = end.y;
+	const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+	if (Math.abs(d) < 1e-10) return null;
+	const centerX = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay)
+		+ (cx * cx + cy * cy) * (ay - by)) / d;
+	const centerY = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx)
+		+ (cx * cx + cy * cy) * (bx - ax)) / d;
+	const radius = Math.hypot(ax - centerX, ay - centerY);
+	const a0 = Math.atan2(ay - centerY, ax - centerX);
+	const am = Math.atan2(by - centerY, bx - centerX);
+	const a1 = Math.atan2(cy - centerY, cx - centerX);
+	const forward = (from: number, to: number) => ((to - from) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+	return forward(a0, am) < forward(a0, a1)
+		? { centerX, centerY, radius, startAngle: a0, endAngle: a0 + forward(a0, a1) }
+		: { centerX, centerY, radius, startAngle: a1, endAngle: a1 + Math.PI * 2 - forward(a0, a1) };
 }
 
 /**
@@ -791,6 +881,77 @@ export function buildZonePriorityKnockouts(
 	return { differentNetKnockoutRingsMm, sameNetKnockoutRingsMm };
 }
 
+/**
+ * Corner-smoothing "apron" zones — direct port of `ZONE::BuildSmoothedPoly`'s
+ * (zone.cpp) same-net-zone loop, confirmed against the real source: a
+ * same-net zone on this layer that touches this one gets temporarily unioned
+ * into the outline BEFORE corner smoothing runs (see computeFillFromRings),
+ * so the chamfer/fillet algorithm never sees a false "corner" at a point
+ * where two same-net zones are meant to blend seamlessly — real KiCad's own
+ * comment: avoids "undesired divots between the intersecting zones" (#2752).
+ * The result gets intersected back down to this zone's own extents right
+ * after smoothing, so a same-net neighbor's own area never actually leaks
+ * into this zone's final fill — only the smoothing SHAPE at the shared seam
+ * is affected.
+ *
+ * Carries over real KiCad's own exception (#13915): a same-net zone that's
+ * fully enclosed by higher-priority DIFFERENT-net zones on this layer is
+ * "isolated" and does NOT get unioned in — computed independently from
+ * `buildZonePriorityKnockouts` because this needs every higher-priority
+ * diff-net zone touching the OTHER (same-net) zone, not just ones touching
+ * THIS zone.
+ */
+export function collectSameNetSmoothingApronsMm(
+	zone: { uuid: string; netId: number | null; outlinePoints: MmPath },
+	layer: string,
+	copperLayers: readonly string[],
+	allZones: readonly OtherZoneInput[],
+): MmPath[] {
+	const engine = getClipperEngine();
+	const onLayer = (z: OtherZoneInput) =>
+		z.layers.flatMap(l => l === '*.Cu' ? copperLayers : [l]).includes(layer);
+	// A plain Intersection test misses the common real case of two zones
+	// sharing an edge with zero overlap AREA (touching, not overlapping) —
+	// inflate one side by a tiny (1um) epsilon first so an exactly-touching
+	// boundary still registers as "interacting", matching what a same-net
+	// zone drawn to visually continue its neighbor actually looks like.
+	const TOUCH_EPSILON_MM = 0.001;
+	const overlaps = (a: Path, b: Path) => {
+		const inflatedA = engine.inflatePaths([a], TOUCH_EPSILON_MM * NM_PER_MM, JoinType.Round, EndType.Polygon);
+		return engine.booleanOp(ClipType.Intersection, FillRule.NonZero, inflatedA, [b]).length > 0;
+	};
+
+	const zoneOutlineNm = toClipperPath(zone.outlinePoints);
+	const aprons: MmPath[] = [];
+
+	for (const other of allZones) {
+		if (other.uuid === zone.uuid || other.netId !== zone.netId || other.outlinePoints.length < 3) continue;
+		if (!onLayer(other)) continue;
+		const otherOutlineNm = toClipperPath(other.outlinePoints);
+		if (!overlaps(zoneOutlineNm, otherOutlineNm)) continue;
+
+		const diffNetHigherNm: Path[] = [];
+		for (const candidate of allZones) {
+			if (candidate.netId === zone.netId || candidate.outlinePoints.length < 3) continue;
+			if (candidate.priority <= other.priority) continue;
+			if (!onLayer(candidate)) continue;
+			const candidateNm = toClipperPath(candidate.outlinePoints);
+			if (overlaps(otherOutlineNm, candidateNm)) diffNetHigherNm.push(candidateNm);
+		}
+
+		let isolated = false;
+		if (diffNetHigherNm.length > 0) {
+			const unionedNm = engine.booleanOp(ClipType.Union, FillRule.NonZero, diffNetHigherNm, []);
+			const remainingNm = engine.booleanOp(ClipType.Difference, FillRule.NonZero, [otherOutlineNm], unionedNm);
+			isolated = remainingNm.length === 0;
+		}
+		if (!isolated) {
+			aprons.push(other.outlinePoints);
+		}
+	}
+	return aprons;
+}
+
 // ---------------------------------------------------------------------------
 // Core fill pipeline
 // ---------------------------------------------------------------------------
@@ -928,6 +1089,148 @@ function applyIslandRemoval(
 	});
 }
 
+// --- Corner smoothing (ZONE::BuildSmoothedPoly's chamfer/fillet step) ----
+
+/** Real KiCad's MIN_SEGCOUNT_FOR_CIRCLE (libs/kimath/src/geometry/
+ *  geometry_utils.cpp) — a floor on the arc-tessellation increment so a
+ *  very small fillet radius doesn't get an absurdly coarse approximation. */
+const MIN_SEGCOUNT_FOR_CIRCLE = 8;
+
+/** Direct port of real KiCad's GetArcToSegmentCount (libs/kimath/src/
+ *  geometry/geometry_utils.cpp) — how many straight segments approximate an
+ *  arc of `arcAngleRad` radians/`radiusMm` radius within `maxErrorMm` of
+ *  sagitta error. Unit-agnostic (radius/error just need to share units);
+ *  this file always calls it in mm. */
+function getArcToSegmentCount(radiusMm: number, maxErrorMm: number, arcAngleRad: number): number {
+	const radius = Math.max(1e-9, radiusMm);
+	const errorMax = Math.max(1e-9, maxErrorMm);
+	const relError = errorMax / radius;
+	let arcIncrementDeg = (180 / Math.PI) * Math.acos(1 - relError) * 2;
+	arcIncrementDeg = Math.min(360 / MIN_SEGCOUNT_FOR_CIRCLE, arcIncrementDeg);
+	const segCount = Math.round(Math.abs(arcAngleRad * 180 / Math.PI) / arcIncrementDeg);
+	return Math.max(segCount, 2);
+}
+
+/** Direct port of real KiCad's SHAPE_POLY_SET::chamferFilletPolygon
+ *  (libs/kimath/src/geometry/corner_operations.cpp) for one closed ring —
+ *  the per-vertex corner-replacement math shared by both smoothing modes.
+ *  Operates on world-mm floats (radiusMm/maxErrorMm in the same units)
+ *  rather than real KiCad's integer IU + KiROUND — this file's own
+ *  established convention (mm everywhere except right at the Clipper2
+ *  boundary, see toClipperPath) rather than replicating IU rounding that
+ *  Clipper2's own nm-integer grid re-rounds moments later anyway. */
+function chamferFilletRing(ring: MmPath, mode: 'chamfer' | 'fillet', distanceMm: number, maxErrorMm: number): MmPath {
+	const out: MmPath = [];
+	const n = ring.length;
+	for (let i = 0; i < n; i++) {
+		const p = ring[i]!;
+		const prev = ring[(i - 1 + n) % n]!;
+		const next = ring[(i + 1) % n]!;
+
+		const xa = prev.x - p.x, ya = prev.y - p.y;
+		const xb = next.x - p.x, yb = next.y - p.y;
+
+		if (Math.abs(xa + xb) < Number.EPSILON && Math.abs(ya + yb) < Number.EPSILON) {
+			continue;
+		}
+
+		const lena = Math.hypot(xa, ya);
+		const lenb = Math.hypot(xb, yb);
+
+		if (mode === 'chamfer') {
+			let distance = distanceMm;
+			if (0.5 * lena < distance) distance = 0.5 * lena;
+			if (0.5 * lenb < distance) distance = 0.5 * lenb;
+
+			out.push({ x: p.x + distance * xa / lena, y: p.y + distance * ya / lena });
+			out.push({ x: p.x + distance * xb / lenb, y: p.y + distance * yb / lenb });
+			continue;
+		}
+
+		// mode === 'fillet'
+		const cosine = (xa * xb + ya * yb) / (lena * lenb);
+		const denom = Math.sqrt(2 / (1 + cosine) - 1);
+		if (!Number.isFinite(denom)) continue; // parallel edges — nothing to fillet
+
+		let radius = distanceMm;
+		if (0.5 * lena * denom < radius) radius = 0.5 * lena * denom;
+		if (0.5 * lenb * denom < radius) radius = 0.5 * lenb * denom;
+
+		let k = radius / Math.sqrt(0.5 * (1 - cosine));
+		const lenab = Math.hypot(xa / lena + xb / lenb, ya / lena + yb / lenb);
+		const xc = p.x + k * (xa / lena + xb / lenb) / lenab;
+		const yc = p.y + k * (ya / lena + yb / lenb) / lenab;
+
+		k = radius / denom;
+		const xs = p.x + k * xa / lena - xc;
+		const ys = p.y + k * ya / lena - yc;
+		const xe = p.x + k * xb / lenb - xc;
+		const ye = p.y + k * yb / lenb - yc;
+
+		let argument = (xs * xe + ys * ye) / (radius * radius);
+		argument = Math.max(-1, Math.min(1, argument));
+		const arcAngle = Math.acos(argument);
+		const segments = getArcToSegmentCount(radius, maxErrorMm, arcAngle);
+
+		let deltaAngle = arcAngle / segments;
+		const startAngle = Math.atan2(-ys, xs);
+		if (xa * yb - ya * xb <= 0) deltaAngle *= -1;
+
+		let nx = xc + xs, ny = yc + ys;
+		if (!Number.isFinite(nx) || !Number.isFinite(ny)) continue;
+		out.push({ x: nx, y: ny });
+		let prevX = nx, prevY = ny;
+
+		for (let j = 0; j < segments; j++) {
+			nx = xc + Math.cos(startAngle + (j + 1) * deltaAngle) * radius;
+			ny = yc - Math.sin(startAngle + (j + 1) * deltaAngle) * radius;
+			if (!Number.isFinite(nx) || !Number.isFinite(ny)) continue;
+			if (nx !== prevX || ny !== prevY) {
+				out.push({ x: nx, y: ny });
+				prevX = nx; prevY = ny;
+			}
+		}
+	}
+	return out;
+}
+
+/** Applies the zone's own Corner Smoothing setting (Zone.getCornerSmoothing())
+ *  to its authored outline ring — real KiCad's ZONE::BuildSmoothedPoly step,
+ *  which runs BEFORE any board-outline intersection or obstacle exclusion
+ *  (zone.cpp: the smoothed poly is what gets `BooleanIntersection`'d against
+ *  the board outline, not the other way around). `maxErrorMm` defaults to
+ *  real KiCad's own ARC_HIGH_DEF_MM stock default (base_units.h) — the same
+ *  "real stock default, not invented" pattern as this file's
+ *  DEFAULT_EDGE_CLEARANCE_MM.
+ *
+ *  The same-net-intersecting-zone divot-avoidance pass (zone.cpp's own
+ *  comment: keeping corners unsmoothed at a same-net zone intersection
+ *  "produces undesired divots between the intersecting zones") is ported
+ *  separately — see collectSameNetSmoothingApronsMm and its use in
+ *  computeFillFromRings, which calls this function per-ring AFTER unioning
+ *  in same-net "apron" zones, not this function's own concern. Still NOT
+ *  ported: `m_ZoneKeepExternalFillets`, an unrelated toggle for keeping
+ *  fillets on CONCAVE corners (this project's `Zone` model has no such
+ *  setting exposed yet). 'none' (a zone that's never touched the Corner
+ *  Smoothing dropdown — the default and, before this port, the only
+ *  behavior) is a complete no-op. */
+export function smoothZoneOutline(
+	ring: MmPath, type: 'none' | 'chamfer' | 'fillet', radiusMm: number, maxErrorMm = 0.005,
+): MmPath {
+	if (type === 'none' || radiusMm <= 0 || ring.length < 3) return ring;
+	const smoothed = chamferFilletRing(ring, type, radiusMm, maxErrorMm);
+	return smoothed.length >= 3 ? smoothed : ring;
+}
+
+/** Zone.getCornerSmoothing()'s settings, as needed by the fill pipeline —
+ *  see smoothZoneOutline. `maxErrorMm` defaults to real KiCad's own
+ *  ARC_HIGH_DEF_MM stock default when omitted. */
+export interface ZoneFillCornerSmoothingSettings {
+	type: 'chamfer' | 'fillet';
+	radiusMm: number;
+	maxErrorMm?: number;
+}
+
 export function computeFillFromRings(
 	outlinePoints: MmPath,
 	exclusionRingsMm: MmPath[],
@@ -957,12 +1260,44 @@ export function computeFillFromRings(
 	// CN_CLUSTER::Add rule (see applyIslandRemoval's doc comment).
 	sameNetPadRingsMm?: MmPath[],
 	islandRemoval?: ZoneFillIslandRemovalSettings,
+	// Zone's own "Minimum width" setting (ZONE::GetMinThickness()) — see
+	// the deflate/inflate "opening" pass below, right before fracture.
+	minWidthMm?: number,
+	// Zone's own Corner Smoothing setting (Zone.getCornerSmoothing()) — see
+	// smoothZoneOutline. Applied to the outline before ANYTHING else below,
+	// matching ZONE::BuildSmoothedPoly running before the board-outline
+	// intersection.
+	cornerSmoothing?: ZoneFillCornerSmoothingSettings,
+	// Same-net zones (see collectSameNetSmoothingApronsMm) temporarily
+	// unioned in only for the smoothing step, then intersected back out —
+	// real KiCad's own divot-avoidance at same-net zone seams. No effect
+	// without cornerSmoothing set.
+	sameNetSmoothingApronsMm?: MmPath[],
 ): Paths /* world-mm point rings — always simple (hole-free) polygons after
 	fracture AND island removal, one per disjoint, surviving fill region */ {
 	if (outlinePoints.length < 3) return [];
 
 	const engine = getClipperEngine();
-	let outlineRingsNm: Paths = [toClipperPath(outlinePoints)];
+	let outlineRingsNm: Paths;
+	if (cornerSmoothing && sameNetSmoothingApronsMm && sameNetSmoothingApronsMm.length > 0) {
+		// Union self + same-net aprons, smooth EACH resulting ring (a real
+		// polygon can legitimately end up with more than one outline after
+		// this union), then intersect back down to this zone's own outline
+		// — the neighbor's borrowed area never leaks into the final fill,
+		// only the smoothing SHAPE at the shared seam is affected.
+		const selfNm: Paths = [toClipperPath(outlinePoints)];
+		const withApronNm = engine.booleanOp(ClipType.Union, FillRule.NonZero,
+			[...selfNm, ...sameNetSmoothingApronsMm.map(toClipperPath)], []);
+		const smoothedNm = withApronNm.map(ring => toClipperPath(smoothZoneOutline(
+			fromClipperPath(ring), cornerSmoothing.type, cornerSmoothing.radiusMm, cornerSmoothing.maxErrorMm)));
+		outlineRingsNm = engine.booleanOp(ClipType.Intersection, FillRule.NonZero, smoothedNm, selfNm);
+	}
+	else {
+		const smoothedOutline = cornerSmoothing
+			? smoothZoneOutline(outlinePoints, cornerSmoothing.type, cornerSmoothing.radiusMm, cornerSmoothing.maxErrorMm)
+			: outlinePoints;
+		outlineRingsNm = [toClipperPath(smoothedOutline)];
+	}
 	if (boardOutlineNm && boardOutlineNm.length > 0) {
 		outlineRingsNm = engine.booleanOp(ClipType.Intersection, FillRule.NonZero, outlineRingsNm, boardOutlineNm);
 		if (outlineRingsNm.length === 0) return []; // zone doesn't overlap the board at all
@@ -1002,6 +1337,30 @@ export function computeFillFromRings(
 	if (sameNetKnockoutRingsMm && sameNetKnockoutRingsMm.length > 0 && fillNm.length > 0) {
 		const knockoutsNm = sameNetKnockoutRingsMm.map(toClipperPath);
 		fillNm = engine.booleanOp(ClipType.Difference, FillRule.NonZero, fillNm, knockoutsNm);
+	}
+
+	// Port of zone_filler.cpp's min-width pruning (e.g. line ~2747-2782,
+	// confirmed against the real source): a morphological "opening" —
+	// Deflate by half the min width, then Inflate back by the same
+	// amount. A feature narrower than min-width vanishes entirely on the
+	// deflate (there's no core left once eroded from both sides by more
+	// than half its own width) and never reappears on the inflate; a
+	// wide-enough feature survives the round-trip at its original size.
+	// Real KiCad also runs `connect_nearby_polys()` between the deflate
+	// and inflate to reconnect regions the erosion severed at a narrow
+	// neck — confirmed unnecessary here (2026-08-28): Clipper2's own
+	// `engine.inflatePaths` below already reunions such regions on its
+	// own, since inflate's boolean union naturally re-merges overlapping
+	// offset results. `connect_nearby_polys()` exists to guarantee this
+	// for KiCad's own less-robust `SHAPE_POLY_SET::Inflate`, not a gap in
+	// this port.
+	if (minWidthMm && minWidthMm > 0 && fillNm.length > 0) {
+		const halfMinWidthNm = (minWidthMm / 2) * NM_PER_MM;
+		const epsilonNm = 1;
+		if (halfMinWidthNm - epsilonNm > epsilonNm) {
+			const eroded = engine.inflatePaths(fillNm, -(halfMinWidthNm - epsilonNm), JoinType.Bevel, EndType.Polygon);
+			fillNm = engine.inflatePaths(eroded, halfMinWidthNm - epsilonNm, JoinType.Round, EndType.Polygon);
+		}
 	}
 
 	const fragments = applyIslandRemoval(fractureFillResult(fillNm), sameNetPadRingsMm, islandRemoval);
@@ -1111,13 +1470,16 @@ export function computeZoneFillForLayer(
 	// board-edge/keepout exclusions.
 	sameNetKnockoutRingsMm?: MmPath[],
 	islandRemoval?: ZoneFillIslandRemovalSettings,
+	minWidthMm?: number,
+	cornerSmoothing?: ZoneFillCornerSmoothingSettings,
+	sameNetSmoothingApronsMm?: MmPath[],
 ): Paths {
 	const { exclusionRingsMm, preInflatedExclusionRingsMm, spokeCandidates, sameNetPadRingsMm } =
 		collectExclusionRingsMm(scene, layer, zoneNetId, clearanceMm, padConnection);
 	return computeFillFromRings(
 		outlinePoints, exclusionRingsMm, clearanceMm, boardOutlineNm,
 		[...(extraExclusionRingsMm ?? []), ...preInflatedExclusionRingsMm], spokeCandidates, sameNetKnockoutRingsMm,
-		sameNetPadRingsMm, islandRemoval);
+		sameNetPadRingsMm, islandRemoval, minWidthMm, cornerSmoothing, sameNetSmoothingApronsMm);
 }
 
 /** One (zone, layer) unit of work for the Clipper2 pipeline — plain,
@@ -1145,6 +1507,16 @@ export interface ZoneFillJob {
 	/** See applyIslandRemoval — null means the zone's own mode is 'never'
 	 *  (or unresolvable), a complete no-op for this job. */
 	islandRemoval: ZoneFillIslandRemovalSettings | null;
+	/** Zone's own "Minimum width" setting (mm) — see computeFillFromRings'
+	 *  deflate/inflate opening pass. 0/undefined is a complete no-op. */
+	minWidthMm: number;
+	/** Zone's own Corner Smoothing setting — see smoothZoneOutline. null/'none'
+	 *  is a complete no-op. */
+	cornerSmoothing: ZoneFillCornerSmoothingSettings | null;
+	/** See collectSameNetSmoothingApronsMm — same-net zones on this layer
+	 *  temporarily unioned in only for the corner-smoothing step. Empty is a
+	 *  complete no-op. */
+	sameNetSmoothingApronsMm: MmPath[];
 }
 
 /**
@@ -1163,6 +1535,14 @@ export function buildZoneFillJobs(
 		priority?: number;
 		padConnection?: ZoneFillPadConnectionSettings;
 		islandRemoval?: ZoneFillIslandRemovalSettings;
+		/** Zone's own "Minimum width" setting (mm) — see computeFillFromRings'
+		 *  deflate/inflate opening pass. Omitted/0 is a complete no-op,
+		 *  matching a zone that never touches the min-width field at all. */
+		minWidthMm?: number;
+		/** Zone's own Corner Smoothing setting (Zone.getCornerSmoothing()) —
+		 *  see smoothZoneOutline. Omitted/'none' is a complete no-op, matching
+		 *  every zone in this app before this port. */
+		cornerSmoothing?: ZoneFillCornerSmoothingSettings | null;
 	}[],
 	scene: LayeredBoardScene,
 	boardOutlineNm: Paths | null,
@@ -1197,6 +1577,10 @@ export function buildZoneFillJobs(
 			const { differentNetKnockoutRingsMm, sameNetKnockoutRingsMm } = buildZonePriorityKnockouts(
 				{ uuid: zone.uuid, netId: zone.netId, priority: zone.priority ?? 0, clearanceMm: zone.clearanceMm },
 				layer, copperLayers, priorityZones);
+			const sameNetSmoothingApronsMm = zone.cornerSmoothing
+				? collectSameNetSmoothingApronsMm(
+					{ uuid: zone.uuid, netId: zone.netId, outlinePoints: zone.outlinePoints }, layer, copperLayers, priorityZones)
+				: [];
 			jobs.push({
 				zoneUuid: zone.uuid,
 				layer,
@@ -1212,6 +1596,9 @@ export function buildZoneFillJobs(
 				sameNetKnockoutRingsMm,
 				sameNetPadRingsMm,
 				islandRemoval: zone.islandRemoval ?? null,
+				minWidthMm: zone.minWidthMm ?? 0,
+				cornerSmoothing: zone.cornerSmoothing ?? null,
+				sameNetSmoothingApronsMm,
 			});
 		}
 	}
@@ -1224,7 +1611,8 @@ export function runZoneFillJob(job: ZoneFillJob): { zoneUuid: string; layer: str
 	const fills = computeFillFromRings(
 		job.outlinePoints, job.exclusionRingsMm, job.clearanceMm, job.boardOutlineNm,
 		job.extraExclusionRingsMm, job.spokeCandidates, job.sameNetKnockoutRingsMm,
-		job.sameNetPadRingsMm, job.islandRemoval ?? undefined);
+		job.sameNetPadRingsMm, job.islandRemoval ?? undefined, job.minWidthMm || undefined,
+		job.cornerSmoothing ?? undefined, job.sameNetSmoothingApronsMm);
 	return fills.filter(ring => ring.length >= 3).map(points => ({ zoneUuid: job.zoneUuid, layer: job.layer, points }));
 }
 

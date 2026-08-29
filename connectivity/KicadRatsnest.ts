@@ -25,6 +25,9 @@ import { CONNECTIVITY_DATA } from './ConnectivityData';
 import { BoardAdapter } from './BoardAdapter';
 import { buildBoardFacadeFromAst, AstAdapter } from './KicadBoardFacade';
 import type { RN_DYNAMIC_LINE } from './RatsnestData';
+import { BoardConnectivity } from './BoardConnectivity';
+
+export { BoardConnectivity };
 
 /**
  * Builds the ratsnest for a whole board from the parsed AST — the

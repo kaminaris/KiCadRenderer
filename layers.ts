@@ -140,7 +140,7 @@ export function captureDragPreviewRatsnestEdges(session: any, footprint: any): v
 }
 
 export function beginBoardDragPreview(session: any, paintIds: Iterable<string>): void {
-	if (session.documentType !== 'board' || !session.boardRoot || !session.scene) {
+	if (session.documentType !== 'board' || !session.boardModel || !session.scene) {
 		return;
 	}
 	let changed = false;
@@ -167,7 +167,7 @@ export function beginBoardDragPreview(session: any, paintIds: Iterable<string>):
 			// never moves (mousedown+mouseup with no mousemove between)
 			// could paint one frame with the footprint gone from both the
 			// static scene AND the preview.
-			session.dragPreviewFootprints.set(el, session.painter.buildFootprintPreviewItems(session.boardRoot, el));
+			session.dragPreviewFootprints.set(el, session.painter.buildFootprintPreviewItems(session.boardModel, el));
 			changed = true;
 		}
 	}
@@ -176,7 +176,7 @@ export function beginBoardDragPreview(session: any, paintIds: Iterable<string>):
 		// ported ComputeLocalRatsnest drag path. Build it once over just the
 		// moving footprints; positions are read live from the AST so each
 		// frame's RecalculateRatsnest() picks up the new origins.
-		if (session.boardConnectivity && session.ratsnestVisible) {
+		if (session.boardConnectivity && session.boardRoot && session.ratsnestVisible) {
 			try {
 				const moving = facadeFootprintsFor(session, session.dragPreviewFootprints.keys());
 				const dynamicData = buildLocalConnectivityForFootprints(
@@ -216,12 +216,12 @@ function facadeFootprintsFor(session: any, footprintEls: Iterable<any>): any[] {
 }
 
 export function updateBoardDragPreview(session: any): void {
-	if (!session.boardRoot || session.dragPreviewFootprints.size === 0) {
+	if (!session.boardModel || session.dragPreviewFootprints.size === 0) {
 		return;
 	}
 	const previewPadItems: any[] = [];
 	for (const footprint of session.dragPreviewFootprints.keys()) {
-		const items = session.painter.buildFootprintPreviewItems(session.boardRoot, footprint);
+		const items = session.painter.buildFootprintPreviewItems(session.boardModel, footprint);
 		session.dragPreviewFootprints.set(footprint, items);
 		for (const item of items) {
 			if (item.kind === 'pad' && item.netId != null) {
@@ -239,7 +239,7 @@ export function updateBoardDragPreview(session: any): void {
 			// for the dynamic (drag) lines between static and moving nets
 			// and within the moving set itself.
 			const bc = session.boardConnectivity;
-			if (bc) {
+			if (bc && session.boardRoot) {
 				bc.SetDynamicConnectivity(
 					buildLocalConnectivityForFootprints(
 						session.boardRoot.rootElement,
@@ -280,7 +280,7 @@ export function updateBoardDragPreview(session: any): void {
 }
 
 export function endBoardDragPreview(session: any): void {
-	if (!session.boardRoot || !session.scene || session.dragPreviewFootprints.size === 0) {
+	if (!session.boardModel || !session.scene || session.dragPreviewFootprints.size === 0) {
 		return;
 	}
 	const footprints = [...session.dragPreviewFootprints.keys()];
@@ -299,8 +299,16 @@ export function endBoardDragPreview(session: any): void {
 		}
 		session.boardConnectivity.SetDynamicConnectivity(null);
 	}
+	// The footprints' positions were mutated directly during the drag
+	// (moveFootprintByPaintId/translateBoardSelection), landing correctly
+	// in the live boardModel since paint items reference the model's own
+	// objects. Reverse-resync the derived compatibility/serialization tree at
+	// drag end; structural repaint now continues from boardModel itself.
+	if (typeof session.resyncBoardAstFromModel === 'function') {
+		session.resyncBoardAstFromModel();
+	}
 	for (const footprint of footprints) {
-		session.painter.updateFootprintItems(session.scene, session.boardRoot, footprint);
+		session.painter.updateFootprintItems(session.scene, session.boardModel, footprint);
 	}
 	refreshRatsnestForFootprints(session, footprints);
 	session.geometryDirty = true;

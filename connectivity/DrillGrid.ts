@@ -12,10 +12,17 @@
 
 import { Vec2 } from '../math/Vec2';
 
-/** One drill hit: a position and the drill diameter. */
+/** One drill hit: a position and the drill diameter. Port of the relevant
+ *  fields of `HOLE_INFO` (gendrill_excellon_writer.h) — `shape`/`end`
+ *  mirror `m_Hole_Shape`/the oblong hole's computed end point, needed so
+ *  the Excellon writer can emit a real start+`G85`+end slot sequence
+ *  instead of two independent round holes. */
 export interface DRILL_HIT {
 	position: Vec2;
 	drillSize: number;
+	shape: 'round' | 'oblong';
+	/** Oblong holes only — the slot's other end. */
+	end?: Vec2;
 	// Which pad/via produced this hit (for grouping / G85 fanout).
 	owner: string;
 }
@@ -29,14 +36,15 @@ export class DRILL_LAYOUT {
 
 	/** Adds a round drill hole at the given position. */
 	AddHole(aPosition: Vec2, aDrillSize: number, aOwner = ''): void {
-		this.m_hits.push({ position: aPosition.copy(), drillSize: aDrillSize, owner: aOwner });
+		this.m_hits.push({ position: aPosition.copy(), drillSize: aDrillSize, shape: 'round', owner: aOwner });
 	}
 
-	/** Adds a slot (two ends + width) as an oval drill hit. */
+	/** Adds a slot (oblong hole): one hit carrying both ends, matching real
+	 *  KiCad's `HOLE_INFO` (a single record with `m_Hole_Shape=1`, not two
+	 *  independent round holes) — the Excellon writer needs both ends to
+	 *  emit the real start+`G85`+end sequence. */
 	AddSlot(aStart: Vec2, aEnd: Vec2, aWidth: number, aOwner = ''): void {
-		// Model a slot as its two endpoints (KiCad writes a G85-slot).
-		this.m_hits.push({ position: aStart.copy(), drillSize: aWidth, owner: aOwner });
-		this.m_hits.push({ position: aEnd.copy(), drillSize: aWidth, owner: aOwner });
+		this.m_hits.push({ position: aStart.copy(), end: aEnd.copy(), drillSize: aWidth, shape: 'oblong', owner: aOwner });
 	}
 
 	/** All drill hits. */

@@ -3,6 +3,8 @@ import { buildCopperGraph } from './paint/legacy/BoardCopperGraph';
 import { defaultLayerState } from './paint/BoardPainter';
 import { defaultSchLayerState } from './paint/SchematicPainter';
 import { refreshRatsnestForFootprints } from './layers';
+import { parseSchematic } from '@kicad-model/src/schematic/sch_io';
+import { parseBoard } from '@kicad-model/src/pcb/io';
 
 export function rebuildActiveScene(session: any): void {
 	if (session.documentType === 'schematic') {
@@ -25,7 +27,7 @@ export function scheduleFootprintRebuild(session: any, footprint: any): void {
 export function rebuildAfterFootprintGeometryEdit(session: any, footprint: any): void {
 	if (session.dragPreviewFootprints.has(footprint)) {
 		session.dragPreviewFootprints.set(
-			footprint, session.painter.buildFootprintPreviewItems(session.boardRoot, footprint));
+			footprint, session.painter.buildFootprintPreviewItems(session.boardModel, footprint));
 		session.geometryDirty = true;
 		session.scheduleRender();
 		return;
@@ -34,9 +36,29 @@ export function rebuildAfterFootprintGeometryEdit(session: any, footprint: any):
 }
 
 export function rebuildSchScene(session: any): void {
-	if (!session.schematicRoot) {
+	if (!session.schematicModel && !session.schematicRoot) {
 		return;
 	}
+	// The retained Schematic is canonical. Parse AST only to recover from a
+	// legacy load whose initial model construction failed.
+	try {
+		if (!session.schematicModel) {
+			const text = typeof session.schematicRoot?.rootElement?.write === 'function'
+				? session.schematicRoot.rootElement.write() : null;
+			if (!text) throw new Error('no schematic text');
+			session.schematicModel = parseSchematic(text);
+		}
+		session.schScene = session.schematicPainter.buildSchematicFromModel(
+			session.schematicModel, session.schematicDocInfo);
+		session.schLayerState = defaultSchLayerState(session.schScene.layersPresent);
+		session.geometryDirty = true;
+		session.scheduleRender();
+		return;
+	}
+	catch (e) {
+		console.debug('[KiOnline] model-backed repaint failed, falling back to AST', e);
+	}
+	if (!session.schematicRoot) return;
 	session.schScene = session.schematicPainter.build(session.schematicRoot, session.schematicDocInfo);
 	session.schLayerState = defaultSchLayerState(session.schScene.layersPresent);
 	session.geometryDirty = true;
@@ -44,7 +66,7 @@ export function rebuildSchScene(session: any): void {
 }
 
 export function rebuildBoardSceneIfPending(session: any): void {
-	if (!session.boardRoot) {
+	if (!session.boardModel && !session.boardRoot) {
 		session.boardStructureDirty = false;
 		session.boardDirtyFootprints.clear();
 		return;
@@ -52,9 +74,23 @@ export function rebuildBoardSceneIfPending(session: any): void {
 	if (session.boardStructureDirty) {
 		session.boardStructureDirty = false;
 		session.boardDirtyFootprints.clear();
-		session.netNameCache = null;
 		const previousLayerState = session.layerState;
-		session.scene = session.painter.build(session.boardRoot);
+		// The canonical Board is the working state. AST parsing remains only
+		// a recovery path for a legacy load whose model construction failed.
+		try {
+			if (!session.boardModel) {
+				const text = typeof session.boardRoot?.rootElement?.write === 'function'
+					? session.boardRoot.rootElement.write() : null;
+				if (!text) throw new Error('no board text');
+				session.boardModel = parseBoard(text);
+			}
+			session.scene = session.painter.buildFromModel(session.boardModel);
+		}
+		catch (e) {
+			console.debug('[KiOnline] model-backed board repaint failed, falling back to AST', e);
+			if (!session.boardRoot) return;
+			session.scene = session.painter.build(session.boardRoot);
+		}
 		const graph = buildCopperGraph(session.scene);
 		session.copperGraphCache = { scene: session.scene, graph };
 		session.ratsnestLines = buildBoardRatsnest(session.scene, undefined, graph);
@@ -72,7 +108,7 @@ export function rebuildBoardSceneIfPending(session: any): void {
 	if (session.boardDirtyFootprints.size > 0 && session.scene) {
 		session.copperGraphCache = null;
 		for (const footprint of session.boardDirtyFootprints) {
-			session.painter.updateFootprintItems(session.scene, session.boardRoot, footprint);
+			session.painter.updateFootprintItems(session.scene, session.boardModel, footprint);
 		}
 		refreshRatsnestForFootprints(session, session.boardDirtyFootprints);
 		session.boardDirtyFootprints.clear();

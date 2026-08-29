@@ -22,10 +22,10 @@ import type { LayeredBoardScene } from '../paint/BoardPainter';
 import { RouterNode, RouterObstacle } from './RouterNode';
 import { PNS_LINE } from './PnsNode';
 import { buildInitialTrace, mergeCollinear } from './PnsDragger';
-import { shoveTrackPath } from './RouterGeometry';
 import { buildClearanceHull } from './PnsHull';
 import { walkaroundHull, pathLength } from './PnsWalkaround';
 import { simplifyWalkedPath } from './PnsOptimizer';
+import { shoveObstacleLineCascade, ShoveCascadeCollision, computeViaPushForce } from './PnsShove';
 
 /** Router behavior mode. */
 export type PnsRouterMode = 'highlight' | 'shove' | 'walkaround';
@@ -41,6 +41,13 @@ export interface PNS_ROUTER_SETTINGS {
 	removeRedundantTracks: boolean;
 	/** Allow committing a route that still violates clearance. */
 	allowDrcViolations: boolean;
+	/** Real KiCad's `Settings().ShoveVias()` — when false, shove mode
+	 *  treats a colliding via like an obstacle it can't move (matches
+	 *  `SHOVE::pushOrShoveVia`'s own `if (!ShoveVias()) return SH_TRY_WALK`
+	 *  early-out; this simplification just reports no shove available for
+	 *  that path rather than falling back to walkaround). Defaults to
+	 *  real KiCad's own default (on). */
+	shoveVias: boolean;
 }
 
 /** Result of a routing move: candidate path and collision state. */
@@ -63,11 +70,21 @@ export interface PNS_COMMITTED_SEGMENT {
 	netId: number | null;
 }
 
+/** One obstacle moved to make room for a route — either a track segment
+ *  reshaped by `PnsShove.ts`'s line-shove geometry, or a via pushed aside
+ *  by `computeViaPushForce()`'s port of `SHOVE::onCollidingVia()` (see
+ *  `KicadRenderSession.shoveVia()` for how a `'via'` entry gets applied —
+ *  it reuses the existing via-drag fanout/reflow machinery, not new
+ *  segment geometry computed here). */
+export type PNS_SHOVED_ITEM =
+	| { kind: 'track'; obstacle: RouterObstacle; segments: { x1: number; y1: number; x2: number; y2: number }[] }
+	| { kind: 'via'; viaId: string; pushForce: { x: number; y: number } };
+
 /** Result of fixing a route. */
 export interface PNS_ROUTE_COMMIT {
 	segments: PNS_COMMITTED_SEGMENT[];
-	/** Existing tracks that were shoved to make room. */
-	shoved: Array<{ obstacle: RouterObstacle; segments: { x1: number; y1: number; x2: number; y2: number }[] }>;
+	/** Existing tracks/vias that were shoved to make room. */
+	shoved: PNS_SHOVED_ITEM[];
 }
 
 /** Clearance resolver signature. */
@@ -97,6 +114,7 @@ export class PNS_ROUTER {
 			cornerMode: '45',
 			removeRedundantTracks: true,
 			allowDrcViolations: false,
+			shoveVias: true,
 			...settings,
 		};
 	}
@@ -237,7 +255,7 @@ export class PNS_ROUTER {
 				const b = points[i + 1]!;
 				const shove = this.planShoveForPath([a, b]);
 				if (shove) {
-					commit.shoved.push(shove);
+					commit.shoved.push(...shove);
 				}
 			}
 		}
@@ -363,13 +381,20 @@ export class PNS_ROUTER {
 	}
 
 	/**
-	 * Plans a shove for a single straight segment. Returns the obstacle and
-	 * its new segment chain if a shove is possible, null otherwise. This is a
-	 * single-obstacle, single-cascade-level simplification of real KiCad's
-	 * PNS_SHOVE.
+	 * Plans a shove for a single straight segment. Returns every obstacle
+	 * moved (in cascade order — see `PnsShove.ts`'s `shoveObstacleLineCascade()`)
+	 * and each one's new segment chain if a shove is possible, null otherwise.
+	 * Still a bounded, node-versioning/springback-free simplification of the
+	 * full `SHOVE` class — see `PnsShove.ts`'s own header for the full scope
+	 * of what real KiCad's `SHOVE::Run()` does that this doesn't. A via
+	 * obstacle is a single-item result on its own (never cascaded into a
+	 * further obstacle — see `computeViaPushForce()`'s own doc comment);
+	 * only a track-segment obstacle cascades.
 	 */
-	private planShoveForPath(path: Vec2[]): { obstacle: RouterObstacle; segments: { x1: number; y1: number; x2: number; y2: number }[] } | null {
+	private planShoveForPath(path: Vec2[]): PNS_SHOVED_ITEM[] | null {
 		if (!this.node || path.length < 2) return null;
+
+		const pusherCheckerPoint = path[0]!;
 
 		for (let i = 0; i < path.length - 1; i++) {
 			const a = path[i]!;
@@ -377,41 +402,79 @@ export class PNS_ROUTER {
 			const hit = this.node.firstSegmentCollision(
 				a.x, a.y, b.x, b.y, this.width, this.layer, this.netId, this.clearanceResolver
 			);
-			if (!hit || hit.kind !== 'track' || hit.shape.type !== 'segment') {
+			if (!hit) {
+				continue;
+			}
+
+			if (hit.kind === 'via' && hit.shape.type === 'circle') {
+				if (!this.settings.shoveVias) {
+					continue;
+				}
+				const required = this.clearanceResolver(this.netId, hit.netId);
+				const pushForce = computeViaPushForce(
+					[{ a, b, width: this.width }], { x: hit.shape.cx, y: hit.shape.cy }, hit.shape.r, required);
+				if (!pushForce) {
+					continue;
+				}
+				return [{ kind: 'via', viaId: hit.id, pushForce }];
+			}
+
+			if (hit.kind !== 'track' || hit.shape.type !== 'segment') {
 				continue;
 			}
 
 			const obstacle = hit.shape;
 			const required = this.clearanceResolver(this.netId, hit.netId);
-			const shovePath = shoveTrackPath(
-				obstacle.x1, obstacle.y1, obstacle.x2, obstacle.y2, obstacle.width / 2,
-				a.x, a.y, b.x, b.y, this.width / 2,
-				required
+
+			// Maps a cascade move's obstacle id back to the full RouterObstacle
+			// (needed for `.element` on commit) — populated as a side effect of
+			// `findCollision` below discovering each subsequent obstacle.
+			const obstaclesById = new Map<string, RouterObstacle>([[hit.id, hit]]);
+
+			// Adapter into RouterNode's spatial index for the cascade's own
+			// "what does this now-shoved obstacle collide with next" query.
+			// Only a plain track segment is something this simplification
+			// knows how to cascade into (matches the single-obstacle case's
+			// existing `kind !== 'track'` bail-out) — anything else (a pad,
+			// via, keepout) stops the cascade rather than trying to move it.
+			const findCollision = (
+				candidatePath: { x: number; y: number }[],
+				excludeIds: readonly string[],
+			): ShoveCascadeCollision | null => {
+				for (let j = 1; j < candidatePath.length; j++) {
+					const p1 = candidatePath[j - 1]!;
+					const p2 = candidatePath[j]!;
+					const found = this.node!.firstSegmentCollision(
+						p1.x, p1.y, p2.x, p2.y, obstacle.width, hit.layer, hit.netId, this.clearanceResolver, excludeIds
+					);
+					if (!found) continue;
+					if (found.kind !== 'track' || found.shape.type !== 'segment') return null;
+					obstaclesById.set(found.id, found);
+					return { id: found.id, path: [{ x: found.shape.x1, y: found.shape.y1 }, { x: found.shape.x2, y: found.shape.y2 }], width: found.shape.width };
+				}
+				return null;
+			};
+
+			const cascade = shoveObstacleLineCascade(
+				[{ a, b, width: this.width }],
+				pusherCheckerPoint,
+				{ id: hit.id, path: [{ x: obstacle.x1, y: obstacle.y1 }, { x: obstacle.x2, y: obstacle.y2 }], width: obstacle.width },
+				required,
+				findCollision,
 			);
-			if (!shovePath) {
+			if (!cascade) {
 				return null;
 			}
 
-			// Validate the shoved path does not collide with other obstacles.
-			let clear = true;
-			for (let j = 1; j < shovePath.length && clear; j++) {
-				const p1 = shovePath[j - 1]!;
-				const p2 = shovePath[j]!;
-				clear = !this.node.firstSegmentCollision(
-					p1.x, p1.y, p2.x, p2.y, obstacle.width, hit.layer, hit.netId, this.clearanceResolver, hit.id
-				);
-			}
-			if (!clear) {
-				return null;
-			}
-
-			const segments: { x1: number; y1: number; x2: number; y2: number }[] = [];
-			for (let j = 1; j < shovePath.length; j++) {
-				const p1 = shovePath[j - 1]!;
-				const p2 = shovePath[j]!;
-				segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
-			}
-			return { obstacle: hit, segments };
+			return cascade.map((move): PNS_SHOVED_ITEM => {
+				const segments: { x1: number; y1: number; x2: number; y2: number }[] = [];
+				for (let j = 1; j < move.shovedPath.length; j++) {
+					const p1 = move.shovedPath[j - 1]!;
+					const p2 = move.shovedPath[j]!;
+					segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+				}
+				return { kind: 'track', obstacle: obstaclesById.get(move.id)!, segments };
+			});
 		}
 		return null;
 	}

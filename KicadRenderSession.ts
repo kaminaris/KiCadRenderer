@@ -24,19 +24,13 @@ import {
 	KicadElementNoConnect
 }                                     from '@kicad-io/KicadElementNoConnect';
 import {
-	KicadElementRectangle, KicadElementGrLine, KicadElementGrRect, KicadElementFpLine, KicadElementFpRect
-}                                     from '@kicad-io/KicadElementStartEnd';
-import {
-	KicadElementCircle, KicadElementGrCircle, KicadElementFpCircle
-}                                     from '@kicad-io/KicadElementCircle';
-import {
-	KicadElementArc, KicadElementGrArc, KicadElementFpArc
+	KicadElementArc
 }                                     from '@kicad-io/KicadElementArc';
 import {
-	KicadElementPolyline, KicadElementBezier, KicadElementGrCurve
+	KicadElementPolyline, KicadElementBezier
 }                                     from '@kicad-io/KicadElementPolyline';
 import {
-	KicadElementGrPoly, KicadElementPolygon, type GrShapeFillMode
+	KicadElementPolygon, type GrShapeFillMode
 }                                     from '@kicad-io/KicadElementPolygon';
 import {
 	type KicadStrokeType
@@ -44,7 +38,7 @@ import {
 import {
 	KicadElementAt
 }                                     from '@kicad-io/KicadElementAt';
-import {
+import type {
 	KicadElement
 }                                     from '@kicad-io/KicadElement';
 import {
@@ -57,19 +51,7 @@ import {
 	KicadElementRuleArea
 }                                     from '@kicad-io/KicadElementRuleArea';
 import {
-	KicadElementGroup
-}                                     from '@kicad-io/KicadElementGroup';
-import {
-	KicadElementData
-}                                     from '@kicad-io/KicadElementData';
-import {
-	KicadElementImage
-}                                     from '@kicad-io/KicadElementImage';
-import {
-	KicadElementBarcode
-}                                     from '@kicad-io/KicadElementBarcode';
-import {
-	KicadElementText, KicadElementTextBox, KicadElementLabel, KicadElementGrText, KicadElementGrTextBox
+	KicadElementText, KicadElementTextBox, KicadElementLabel
 }                                     from '@kicad-io/KicadElementText';
 import {
 	KicadElementGlobalLabel, type KicadGlobalLabelShape
@@ -87,34 +69,10 @@ import {
 	KicadElementProperty
 }                                     from '@kicad-io/KicadElementProperty';
 import {
-	KicadElementFootprint
-}                                     from '@kicad-io/KicadElementFootprint';
-import {
-	KicadElementPad
-}                                     from '@kicad-io/KicadElementPad';
-import {
-	KicadElementNet
-}                                     from '@kicad-io/KicadElementNet';
-import {
-	KicadElementSegment
-}                                     from '@kicad-io/KicadElementStartEnd';
-import {
-	KicadElementVia
-}                                     from '@kicad-io/KicadElementVia';
-import {
 	KicadElementZone,
 	type ZoneHatchStyle, type ZonePadConnectionType, type ZoneSmoothingType, type ZoneIslandRemovalMode,
 	type RuleAreaKeepoutSettings
 }                                     from '@kicad-io/KicadElementZone';
-import {
-	KicadElementDimension
-}                                     from '@kicad-io/KicadElementDimension';
-import {
-	KicadElementSheet
-}                                     from '@kicad-io/KicadElementSheet';
-import {
-	KicadElementPin
-}                                     from '@kicad-io/KicadElementPin';
 import {
 	KicadElementLibSymbols
 }                                     from '@kicad-io/KicadElementLibSymbols';
@@ -165,9 +123,9 @@ import { buildCopperGraph, buildTrackChainGraph, type CopperGraph }         from
 import { buildKiCadRatsnest, flattenRatsnestEdges } from './connectivity/KicadRatsnest';
 import { buildBoardFacadeFromAst } from './connectivity/KicadBoardFacade';
 import { createBoard } from './connectivity/board';
-import { buildSchematicNetlistFromRoot } from './connectivity/SchematicExtractor';
-import { buildConnectionGraph, collectSheetInstances } from './connectivity/SchematicConnectionGraph';
-import { PNS_ROUTER } from './router/PnsRouter';
+import { buildSchematicNetlistFromModel } from './connectivity/ModelSchematicNetlist';
+import { PNS_ROUTER, PnsClearanceResolver } from './router/PnsRouter';
+import { RouterNode } from './router/RouterNode';
 import { ROUTE_TOOL } from './interaction/RouteTool';
 import { DRAG_TOOL } from './interaction/DragTool';
 import { SELECTION_TOOL } from './interaction/Selection';
@@ -176,7 +134,7 @@ import { SCHEMATIC_TOOL, type SchematicMutations } from './interaction/Schematic
 import { ZONE_TOOL, type ZoneSink } from './interaction/ZoneTool';
 import { UNDO_REDO } from './interaction/UndoRedo';
 import { CONNECTIVITY_DATA } from './connectivity/ConnectivityData';
-import { buildInitialTrace }                          from './router/PnsDragger';
+import { buildInitialTrace, dragViaChain }             from './router/PnsDragger';
 import {
 	buildBoardOutlineRegionNm, buildEdgeExclusionsByLayer, buildZoneFillJobs, KeepoutZoneInput, MmPath,
 	OtherZoneInput, resolveCopperLayers, ZoneFillJob
@@ -202,6 +160,47 @@ import {
 	quantizedAngle, pointLiesOnSegmentInterior, cubicBezierToPolyline
 } from './utils';
 import { parseText, parseBoardText } from './parser';
+import { parseSchematic, serializeSchematic } from '@kicad-model/src/schematic/sch_io';
+import { parseBoard, serializeBoard } from '@kicad-model/src/pcb/io';
+import type { Board } from '@kicad-model/src/pcb/Board';
+import { SchematicSymbol } from '@kicad-model/src/schematic/SchematicSymbol';
+import { LibSymbol } from '@kicad-model/src/schematic/LibSymbol';
+import { SchGroup } from '@kicad-model/src/schematic/SchGroup';
+import type { Schematic } from '@kicad-model/src/schematic/Schematic';
+import { SCH_COMMIT } from '@kicad-model/src/schematic/SchCommit';
+import { BOARD_COMMIT } from '@kicad-model/src/pcb/BoardCommit';
+import { BoardShape, BoardShapeType } from '@kicad-model/src/pcb/BoardShape';
+import { BoardText } from '@kicad-model/src/pcb/BoardText';
+import { BoardTextBox } from '@kicad-model/src/pcb/BoardTextBox';
+import { Track, TrackArc, Via } from '@kicad-model/src/pcb/Track';
+import { BoardDimension } from '@kicad-model/src/pcb/BoardDimension';
+import { BoardReferenceImage } from '@kicad-model/src/pcb/BoardReferenceImage';
+import { BoardBarcode } from '@kicad-model/src/pcb/BoardBarcode';
+import { Footprint } from '@kicad-model/src/pcb/Footprint';
+import { Zone } from '@kicad-model/src/pcb/Zone';
+import { SchWire } from '@kicad-model/src/schematic/SchWire';
+import { SchematicSheet } from '@kicad-model/src/schematic/SchematicSheet';
+import { SchematicSheetPin } from '@kicad-model/src/schematic/SchematicSheetPin';
+import { SchematicBuilder } from '@kicad-model/src/schematic/SchematicBuilder';
+import { SchShape, SchShapeType } from '@kicad-model/src/schematic/SchShape';
+import type { SchematicItem } from '@kicad-model/src/schematic/SchematicItem';
+import { SchText } from '@kicad-model/src/schematic/SchText';
+import { SchLabel, SchGlobalLabel, SchHierLabel, SchDirectiveLabel } from '@kicad-model/src/schematic/SchLabel';
+import { SchTextJustify, SchTextVJustify } from '@kicad-model/src/schematic/SchTextBase';
+import { SchTextBox } from '@kicad-model/src/schematic/SchTextBox';
+import { SchImage } from '@kicad-model/src/schematic/SchImage';
+import { SchRuleArea } from '@kicad-model/src/schematic/SchRuleArea';
+import { SchTable } from '@kicad-model/src/schematic/SchTable';
+import { SchTableCell } from '@kicad-model/src/schematic/SchTableCell';
+import { iuToMM, mmToIU, pcbIuScale, schIuScale } from '@kicad-model/src/core/IuScale';
+import { SchField } from '@kicad-model/src/schematic/SchField';
+import { SchBusEntry } from '@kicad-model/src/schematic/SchBusEntry';
+import { SchLayerId } from '@kicad-model/src/schematic/types';
+import { Vec2i } from '@kicad-model/src/core/Vec2i';
+import { FieldT } from '@kicad-model/src/schematic/types';
+import { SchJunction } from '@kicad-model/src/schematic/SchJunction';
+import { SchNoConnect } from '@kicad-model/src/schematic/SchNoConnect';
+import { KicadUuid } from '@kicad-model/src/core/KicadUuid';
 import { rebuildActiveScene, scheduleFootprintRebuild, rebuildAfterFootprintGeometryEdit, rebuildSchScene, rebuildBoardSceneIfPending } from './pipeline';
 import * as Layers from './layers';
 
@@ -369,16 +368,56 @@ export class KicadRenderSession {
 	 * sheet. Returns the count of symbols annotated.
 	 */
 	annotateSchematic(): number {
-		if (!this.schematicRoot?.rootElement) {
+		if (!this.schematicModel) {
 			return 0;
 		}
-		const symbols: KicadElementSymbol[] = this.schematicRoot.rootElement.findChildrenByClass(KicadElementSymbol);
+		const screen = this.schematicModel.allScreens()[0];
+		const symbols = (screen?.items ?? []).filter((item: any) => item instanceof SchematicSymbol) as SchematicSymbol[];
+		if (!symbols.some(s => s.getReference()?.endsWith('?'))) {
+			return 0;
+		}
+		this.pushUndoSnapshot('Annotate Schematic');
+		const commit = new SCH_COMMIT('Annotate Schematic');
+		const result = this.computeAndApplyAnnotations(symbols, symbol => commit.Modify(symbol));
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
+		this.commitAstMutation();
+		return result.count;
+	}
+
+	/**
+	 * Core bin-packing algorithm extracted from annotateSchematic() — see
+	 * that method's own doc comment for the full real-KiCad
+	 * REFDES_TRACKER::GetNextRefDesForUnits rationale. Duck-typed against
+	 * either an AST KicadElementSymbol[] or a model SchematicSymbol[]: both
+	 * already have getLibId()/getUnitId()/getReference()/setProperty() with
+	 * identical signatures; only reading the "Value" field differs between
+	 * them (AST: getAllProperties().Value; model: getProperties().find(...)
+	 * .getText(), since the model has no getAllProperties() equivalent),
+	 * handled by the one branch in valueOf() below. `onBeforeMutate`, called
+	 * right before each setProperty('Reference', ...), lets the shadow-verify
+	 * path stage a SCH_COMMIT.Modify() per touched symbol without the AST
+	 * path needing to know anything about commits. Returns both the count
+	 * (annotateSchematic()'s existing public contract) and a uuid->new-
+	 * reference map (for the shadow-verify's exact-match comparison —
+	 * annotateSchematic() itself doesn't need it).
+	 */
+	private computeAndApplyAnnotations(symbols: any[], onBeforeMutate?: (symbol: any) => void): { count: number; assignments: Map<string, string> } {
 		type Slot = { libId: string; value: string; units: Set<number> };
 		const usedByPrefix = new Map<string, Map<number, Slot>>();
-		const keyOf = (symbol: KicadElementSymbol) => ({
-			libId: symbol.getLibId() ?? '',
-			value: String(symbol.getAllProperties().Value ?? ''),
-			unit: symbol.getUnitId() || 1
+		const valueOf = (symbol: any): string => {
+			if (typeof symbol.getAllProperties === 'function') {
+				return String(symbol.getAllProperties().Value ?? '');
+			}
+			const prop = typeof symbol.getProperties === 'function'
+				? symbol.getProperties().find((f: any) => f.getName() === 'Value')
+				: null;
+			return prop && typeof prop.getText === 'function' ? prop.getText() : '';
+		};
+		const keyOf = (symbol: any) => ({
+			libId: symbol.getLibId?.() ?? '',
+			value: valueOf(symbol),
+			unit: symbol.getUnitId?.() || 1
 		});
 		const claim = (prefix: string, num: number, libId: string, value: string, unit: number) => {
 			let byNum = usedByPrefix.get(prefix);
@@ -406,11 +445,8 @@ export class KicadRenderSession {
 			claim(match[1]!, Number(match[2]), libId, value, unit);
 		}
 		let annotated = 0;
+		const assignments = new Map<string, string>();
 		const toAnnotate = symbols.filter(symbol => symbol.getReference()?.endsWith('?'));
-		if (!toAnnotate.length) {
-			return 0;
-		}
-		this.pushUndoSnapshot('Annotate Schematic');
 		for (const symbol of toAnnotate) {
 			const ref = symbol.getReference()!;
 			const prefix = ref.slice(0, -1);
@@ -425,11 +461,21 @@ export class KicadRenderSession {
 				num++;
 			}
 			claim(prefix, num, libId, value, unit);
-			symbol.setProperty('Reference', `${ prefix }${ num }`);
+			onBeforeMutate?.(symbol);
+			const newRef = `${ prefix }${ num }`;
+			symbol.setProperty('Reference', newRef);
 			annotated++;
+			const uuid = typeof symbol.getUuid === 'function' ? symbol.getUuid() : null;
+			if (uuid) {
+				assignments.set(uuid, newRef);
+			}
 		}
-		this.commitAstMutation();
-		return annotated;
+		return { count: annotated, assignments };
+	}
+
+	/** Kept as an alias for the one external call site. */
+	annotateSchematicVerified(): number {
+		return this.annotateSchematic();
 	}
 
 	protected readonly canvas2d: HTMLCanvasElement;
@@ -448,10 +494,20 @@ export class KicadRenderSession {
 	/** Retained across loadSchematicText so moveSymbolByRef can mutate + rebuild the scene without re-parsing text. */
 	protected schematicRoot: { rootElement: any } | null = null;
 	protected schematicDocInfo: SchematicDocInfo | undefined = undefined;
+	/** Phase 5 first cutover — KiOnline-only, not a KiCad port. Valid ONLY
+	 *  immediately after a gesture has both mutated it and proven that
+	 *  mutation correct (currently only moveSymbolByRefVerified); every
+	 *  other gesture's commitAstMutation() (state.ts) invalidates it back to
+	 *  null unconditionally. See getSchematicText()'s own doc comment. */
+	protected schematicModel: Schematic | null = null;
 	/** Board-side counterpart of schematicRoot — retained across loadBoardText
 	 *  so board mutation methods (moveFootprintByPaintId, ...) can mutate +
 	 *  rebuild the scene without re-parsing text. */
 	protected boardRoot: { rootElement: any } | null = null;
+	/** Wiring pass — board-side counterpart of schematicModel, kept
+	 *  resynced from the AST by rebuildBoardSceneIfPending() (pipeline.ts)
+	 *  on every structural repaint. */
+	protected boardModel: any = null;
 	/** Last canonical board text, retained so undo can snapshot the document
 	 * before a mutation without serializing a large board a second time. */
 	protected boardTextSnapshot = '';
@@ -583,7 +639,6 @@ export class KicadRenderSession {
 	 *  during a track/via drag's live collision preview (RouterNode's
 	 *  firstSegmentCollision) — a plain linear findChildrenByClass scan
 	 *  there was the single largest cost in a real dense-board drag trace. */
-	protected netNameCache: Map<number, string> | null = null;
 	protected copperGraphCache: { scene: LayeredBoardScene; graph: CopperGraph } | null = null;
 	/** Footprints currently being dragged, KiCad VIEW-preview style (see
 	 *  beginBoardDragPreview's doc comment): removed from the real scene (one
@@ -669,7 +724,7 @@ export class KicadRenderSession {
 	constructor(canvas2d: HTMLCanvasElement, canvasGl: HTMLCanvasElement | null) {
 		registerDefaultKicadClasses();
 		onBoardBarcodeEncoderReady(() => {
-			if (this.documentType === 'board' && this.boardRoot) {
+			if (this.documentType === 'board' && this.boardModel) {
 				this.boardStructureDirty = true;
 				this.scheduleRender();
 			}
@@ -719,11 +774,12 @@ export class KicadRenderSession {
 		return this.documentType === 'schematic' ? this.schScene : this.scene;
 	}
 
-	/** Polymorphic counterpart to activeScene — the retained AST for
-	 *  whichever document type is loaded, so mutation methods can be
-	 *  generalized off their current schematic-only documentType guard. */
-	get activeRoot(): { rootElement: any } | null {
-		return this.documentType === 'schematic' ? this.schematicRoot : this.boardRoot;
+	/** The canonical board model, when a board document is loaded — used by
+	 *  DRC (`RunDrc.ts`) to build a `DrcEngine` against the board's own
+	 *  design settings/net classes, alongside `activeScene` for the painted
+	 *  geometry the test providers actually collide-test. */
+	get activeBoardModel(): Board | null {
+		return this.documentType === 'board' ? this.boardModel : null;
 	}
 
 	get activeLayerState(): Map<string, LayerVisibilityState> | Map<string, SchLayerVisibilityState> {
@@ -808,7 +864,7 @@ export class KicadRenderSession {
 	 *  edit (see rebuildActiveScene's board branch). No-ops for schematics
 	 *  or before a board is loaded. */
 	private rebuildBoardPaintOptions(): void {
-		if (this.documentType !== 'board' || !this.boardRoot) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return;
 		}
 		this.boardStructureDirty = true;
@@ -1134,7 +1190,7 @@ export class KicadRenderSession {
 	 * scale, matching every other hit-test method in this file.
 	 */
 	hitTestRect(worldOrigin: Vec2, worldCursor: Vec2, mode: 'contained' | 'touching'): string[] {
-		if (this.documentType !== 'schematic' || !this.schScene || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schScene || !this.schematicModel) {
 			return [];
 		}
 		const minX = Math.min(worldOrigin.x, worldCursor.x);
@@ -1154,7 +1210,7 @@ export class KicadRenderSession {
 		// just the one clicked. Point-click selection is naturally immune
 		// (the symbol's own encompassing hitbox is built to win over its
 		// nested sub-items), so this only needed fixing here.
-		const rootChildren = new Set(this.schematicRoot.rootElement?.children ?? []);
+		const rootChildren = new Set(this.schematicModel.allScreens()[0]?.items ?? []);
 		const result: string[] = [];
 		for (const item of this.schScene.hitTestItems) {
 			if (!rootChildren.has(item.element)) {
@@ -1505,19 +1561,19 @@ export class KicadRenderSession {
 		return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 	}
 
-	/** Board-only: walks a hit element's parent chain up to the owning
-	 *  KicadElementFootprint — a pad's own (at x y)/layers are footprint-
+	/** Board-only: walks a hit model item's parent chain up to the owning
+	 *  Footprint — a pad's own position/layers are footprint-
 	 *  LOCAL (only converted to world space/absolute layer at paint time), so
 	 *  every footprint mutation entry point needs to resolve to the
 	 *  footprint itself before touching origin/layer, never mutate a hit pad
 	 *  directly. Also handles a hit that's already the footprint's own
-	 *  synthetic whole-body item (element is already a KicadElementFootprint,
+	 *  synthetic whole-body item (element is already a Footprint,
 	 *  loop body never runs) — see BoardPainter.buildFootprint's `kind:
 	 *  'footprint'` item. */
 	private footprintOwnerOfHit(paintId: string): any | null {
 		const item = this.scene?.hitTestItems.find(it => it.id === paintId);
 		let el: any = item?.element;
-		while (el && !(el instanceof KicadElementFootprint)) {
+		while (el && !(el instanceof Footprint)) {
 			el = el.parent;
 		}
 		if (el) {
@@ -1558,7 +1614,7 @@ export class KicadRenderSession {
 	 *  position — `paintId` may be a pad hit or the footprint's own
 	 *  synthetic whole-body hit item, see footprintOwnerOfHit. */
 	moveFootprintByPaintId(paintId: string, x: number, y: number): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return false;
 		}
 		const el = this.footprintOwnerOfHit(paintId);
@@ -1580,7 +1636,7 @@ export class KicadRenderSession {
 	 * therefore need the same delta as the footprint (KiCad's
 	 * FOOTPRINT::SetOrientation() / PCB_TEXT::OnFootprintTransformed()). */
 	rotateFootprintByPaintId(paintId: string, degrees: number): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return false;
 		}
 		const el = this.footprintOwnerOfHit(paintId);
@@ -1588,15 +1644,28 @@ export class KicadRenderSession {
 			return false;
 		}
 		this.pushUndoSnapshot('Rotate footprint');
+		const commit = new BOARD_COMMIT('Rotate footprint');
+		commit.Modify(el);
 		const origin = el.getOrigin();
 		const newRotation = ((origin.rotation + degrees) % 360 + 360) % 360;
 		el.setOrigin(origin.x, origin.y, newRotation);
-		for (const pad of el.findChildrenByClass(KicadElementPad)) {
+		for (const pad of el.getPads()) {
 			const padOrigin = pad.getOrigin();
 			const newPadRotation = ((padOrigin.rotation + degrees) % 360 + 360) % 360;
 			pad.setOrigin(padOrigin.x, padOrigin.y, newPadRotation);
 		}
+		commit.Push(this.boardModel);
 		this.rebuildAfterFootprintGeometryEdit(el);
+		// `el` came off the model-sourced scene (footprintOwnerOfHit) and was
+		// mutated in place — that mutation IS reflected in the live
+		// boardModel (paint items reference the model's own objects, not
+		// copies), so saving right now would already be correct. But the AST
+		// was never touched, so the NEXT unrelated structural board edit
+		// (add a track, delete something) would reparse boardModel fresh
+		// from the stale AST and silently revert this rotation. Not a
+		// per-frame call site (keyboard shortcut/context menu only), so a
+		// full resync here is cheap.
+		this.resyncBoardAstFromModel();
 		return true;
 	}
 
@@ -1609,22 +1678,21 @@ export class KicadRenderSession {
 	 *  wrong after this until that's added. Flagged as a known gap, not
 	 *  attempted here to keep this phase scoped to footprint placement. */
 	flipFootprintByPaintId(paintId: string): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return false;
 		}
 		const el = this.footprintOwnerOfHit(paintId);
-		if (!el || typeof el.setLayer !== 'function' || typeof el.getLayer !== 'function') {
+		if (!el) {
 			return false;
 		}
 		this.pushUndoSnapshot('Flip footprint');
-		const currentLayer: string = el.getLayer();
-		const flipped = currentLayer.startsWith('F.') ? `B.${ currentLayer.slice(2) }`
-			: currentLayer.startsWith('B.') ? `F.${ currentLayer.slice(2) }` : currentLayer;
-		el.setLayer(flipped);
-		const origin = el.getOrigin();
-		const newRotation = ((360 - origin.rotation) % 360 + 360) % 360;
-		el.setOrigin(origin.x, origin.y, newRotation);
+		const commit = new BOARD_COMMIT('Flip footprint');
+		commit.Modify(el);
+		el.flip(el.getPosition(), true);
+		commit.Push(this.boardModel);
 		this.rebuildAfterFootprintGeometryEdit(el);
+		// See rotateFootprintByPaintId's identical comment above.
+		this.resyncBoardAstFromModel();
 		return true;
 	}
 
@@ -1667,7 +1735,7 @@ export class KicadRenderSession {
 	 *  such as tracks, vias, graphics and zones move through the same generic
 	 *  geometry translation used by schematic items. */
 	translateBoardSelection(ids: string[], dx: number, dy: number): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene || (dx === 0 && dy === 0)) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene || (dx === 0 && dy === 0)) {
 			return false;
 		}
 		const footprints = new Set<any>();
@@ -1900,19 +1968,31 @@ export class KicadRenderSession {
 	 * scene data to match it.
 	 */
 	commitBoardDragFast(targets: { itemIds: string[]; origins: any[]; bboxOnlyItems: PaintedItem[] }): void {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return;
 		}
+		// translateBoardDragFast mutated targets.origins in place every
+		// frame — since the resync pivot went live those are model-sourced
+		// objects (footprintOwnerOfHit resolves off the model-sourced
+		// scene), so the drag's new position IS already correct in the live
+		// boardModel (paint items reference the model's own objects). But
+		// the AST was never touched, so the next unrelated structural board
+		// edit would reparse boardModel fresh from the stale AST and
+		// silently revert this whole drag. Not per-frame (called once at
+		// drag end), so a full resync here is cheap. Independent of the
+		// footprint-refresh loop below, which refreshes the touched model
+		// footprints' PaintedItem closures without replacing the GPU buffers.
+		this.resyncBoardAstFromModel();
 		const footprintsToRefresh = new Set<any>();
 		for (const el of targets.origins) {
-			if (el instanceof KicadElementFootprint) {
+			if (el instanceof Footprint) {
 				footprintsToRefresh.add(el);
 				continue;
 			}
 			// A field/property — refresh its OWNING footprint instead (which
 			// also covers the field itself, since it lives inside it).
 			let owner: any = el.parent;
-			while (owner && !(owner instanceof KicadElementFootprint)) {
+			while (owner && !(owner instanceof Footprint)) {
 				owner = owner.parent;
 			}
 			if (owner) {
@@ -1920,7 +2000,7 @@ export class KicadRenderSession {
 			}
 		}
 		for (const fp of footprintsToRefresh) {
-			this.painter.updateFootprintItems(this.scene, this.boardRoot, fp);
+			this.painter.updateFootprintItems(this.scene, this.boardModel, fp);
 		}
 		// Fix 3 — incremental drop: a fast-drag commit that leaves the moved
 		// footprint(s) at the SAME positions as the previous commit (e.g. a
@@ -2028,58 +2108,41 @@ export class KicadRenderSession {
 
 	/** Persists one of Pcbnew's setup-level origins and redraws its marker. */
 	setBoardOrigin(kind: 'grid' | 'drill-place', x: number, y: number): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !Number.isFinite(x) || !Number.isFinite(
+		if (this.documentType !== 'board' || !this.boardModel || !Number.isFinite(x) || !Number.isFinite(
 			y)) {
 			return false;
 		}
 		this.pushUndoSnapshot(kind === 'grid' ? 'Set Grid Origin' : 'Set Drill/Place File Origin');
-		const setup = this.boardRoot.rootElement.findFirstChildByName?.('setup') as any;
-		if (!setup) {
-			return false;
-		}
-		const name = kind === 'grid' ? 'grid_origin' : 'aux_axis_origin';
-		let origin = setup.findFirstChildByName?.(name) as any;
-		if (!origin) {
-			origin = new KicadElement();
-			origin.name = name;
-			setup.addChild(origin);
-		}
-		origin.attributes = [
-			{ value: x, format: 'literal' },
-			{ value: y, format: 'literal' }
-		];
+		const origin = new Vec2i(mmToIU(pcbIuScale, x), mmToIU(pcbIuScale, y));
 		if (kind === 'grid') {
+			this.boardModel.designSettings.gridOrigin = origin;
 			this.boardGridOrigin = new Vec2(x, y);
 		}
 		else {
+			this.boardModel.designSettings.auxOrigin = origin;
 			this.boardDrillPlaceOrigin = new Vec2(x, y);
 		}
-		this.scheduleRender();
+		this.resyncBoardAstFromModel();
+		this.commitAstMutation();
 		return true;
 	}
 
 	/** KiCad omits a zero origin from its board writer; do the same here. */
 	resetBoardOrigin(kind: 'grid' | 'drill-place'): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return false;
 		}
 		this.pushUndoSnapshot(kind === 'grid' ? 'Reset Grid Origin' : 'Reset Drill/Place File Origin');
-		const setup = this.boardRoot.rootElement.findFirstChildByName?.('setup') as any;
-		const name = kind === 'grid' ? 'grid_origin' : 'aux_axis_origin';
-		const origin = setup?.findFirstChildByName?.(name) as any;
-		if (origin) {
-			const index = setup.children.indexOf(origin);
-			if (index >= 0) {
-				setup.children.splice(index, 1);
-			}
-		}
 		if (kind === 'grid') {
+			this.boardModel.designSettings.gridOrigin = new Vec2i(0, 0);
 			this.boardGridOrigin = new Vec2(0, 0);
 		}
 		else {
+			this.boardModel.designSettings.auxOrigin = new Vec2i(0, 0);
 			this.boardDrillPlaceOrigin = new Vec2(0, 0);
 		}
-		this.scheduleRender();
+		this.resyncBoardAstFromModel();
+		this.commitAstMutation();
 		return true;
 	}
 
@@ -2213,24 +2276,27 @@ export class KicadRenderSession {
 		x1: number, y1: number, x2: number, y2: number,
 		width: number, layer: string, netId?: number | null, captureUndo = true
 	): string | null {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement
-			|| (x1 === x2 && y1 === y2)) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || (x1 === x2 && y1 === y2)) {
 			return null;
 		}
 		if (captureUndo) {
 			this.pushUndoSnapshot('Route track');
 		}
-		const segment = new KicadElementSegment();
-		segment.setStartEnd(x1, y1, x2, y2);
-		segment.setWidth(width);
-		segment.setLayer(layer);
+		const segment = new Track(this.boardModel);
+		segment.start = this.boardPoint(x1, y1);
+		segment.end = this.boardPoint(x2, y2);
+		segment.width = mmToIU(pcbIuScale, width);
+		segment.setLayer(layerId);
 		if (netId !== null && netId !== undefined) {
-			segment.setNet(netId);
+			segment.setNet(this.boardModel.netInfo.getNetByCode(netId));
 		}
-		segment.setUuid();
-		this.boardRoot.rootElement.addChild(segment);
+		const commit = new BOARD_COMMIT('Route track');
+		commit.Add(segment);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
-		return segment.getUuid() ?? null;
+		return segment.getUuid();
 	}
 
 	/** Replaces one existing track segment with a new chain of segments
@@ -2238,42 +2304,36 @@ export class KicadRenderSession {
 	 *  original start/end points preserved at the chain's own two ends) —
 	 *  the router's shove uses this to reroute a colliding existing track
 	 *  around the one just being placed, instead of only flagging a
-	 *  clearance violation. `element` must be the live KicadElementSegment
-	 *  instance being replaced (carried on a RouterObstacle, which is built
+	 *  clearance violation. `element` must be the live model Track instance
+	 *  being replaced (carried on a RouterObstacle, which is built
 	 *  straight from the current scene's paint items — always current, no
 	 *  separate lookup needed). Returns false if the element isn't a live
 	 *  child of the board (already removed, wrong document, etc). */
 	shoveTrackSegment(element: any, newSegments: { x1: number; y1: number; x2: number; y2: number }[]): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || newSegments.length === 0) {
+		if (this.documentType !== 'board' || !this.boardModel || !(element instanceof Track)
+			|| element instanceof Via || element instanceof TrackArc
+			|| !this.boardModel.tracks.includes(element) || newSegments.length === 0) {
 			return false;
 		}
-		const parent = this.boardRoot.rootElement;
-		const idx = parent.children.indexOf(element);
-		if (idx < 0) {
-			return false;
-		}
-		const width = typeof element.getWidth === 'function' ? element.getWidth() : 0.25;
-		const layer = typeof element.getLayer === 'function' ? element.getLayer() : 'F.Cu';
-		const netId = typeof element.getNetId === 'function' ? element.getNetId() : null;
-		const netName = typeof element.getNetName === 'function' ? element.getNetName() : undefined;
+		const width = element.getWidth();
+		const layerId = element.getLayerId();
 		this.pushUndoSnapshot('Shove track');
 		const replacements = newSegments
 			.filter(seg => seg.x1 !== seg.x2 || seg.y1 !== seg.y2)
 			.map(seg => {
-				const s = new KicadElementSegment();
-				s.setStartEnd(seg.x1, seg.y1, seg.x2, seg.y2);
-				s.setWidth(width);
-				s.setLayer(layer);
-				if (netId !== null && netId !== undefined) {
-					s.setNet(netId, netName ?? undefined);
-				}
-				s.setUuid();
+				const s = new Track(this.boardModel);
+				s.start = this.boardPoint(seg.x1, seg.y1); s.end = this.boardPoint(seg.x2, seg.y2);
+				s.setWidth(width); s.setLayer(layerId); s.setNet(element.getNet());
 				return s;
 			});
 		if (replacements.length === 0) {
 			return false;
 		}
-		parent.children.splice(idx, 1, ...replacements);
+		const commit = new BOARD_COMMIT('Shove track');
+		commit.Remove(element);
+		for (const replacement of replacements) commit.Add(replacement);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -2411,7 +2471,7 @@ export class KicadRenderSession {
 	 *  pushUndoSnapshot + commitAstMutation. Returns false if any id isn't a
 	 *  live child of the board or the new point chain is degenerate.
 	 *
-	 *  Resolves oldSegmentIds against the AST (parent.children) by uuid, NOT
+	 *  Resolves oldSegmentIds against the live board model by uuid, NOT
 	 *  against this.scene.hitTestItems: beginTrackDragPreview (see its doc
 	 *  comment) deliberately removes the assembled line's segments from that
 	 *  same hitTestItems list for the whole drag, so a scene-based lookup
@@ -2422,54 +2482,43 @@ export class KicadRenderSession {
 	 *  actual shipped bug, root-caused against a real user board. */
 	dragTrackLine(
 		oldSegmentIds: string[], newPoints: Vec2[], width: number, layer: string, netId: number | null): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || oldSegmentIds.length === 0
+		if (this.documentType !== 'board' || !this.boardModel || oldSegmentIds.length === 0
 			|| newPoints.length < 2) {
 			return false;
 		}
-		const parent = this.boardRoot.rootElement;
 		const wanted = new Set(oldSegmentIds);
-		const oldElements: any[] = parent.children.filter((child: any) => {
-			const uuid = child instanceof KicadElementSegment ? child.getUuid() : undefined;
-			return uuid !== undefined && wanted.has(uuid);
-		});
+		const oldElements = this.boardModel.tracks.filter((track: Track) =>
+			!(track instanceof TrackArc) && wanted.has(track.getUuid()));
 		if (oldElements.length !== oldSegmentIds.length) {
 			return false;
 		}
-		const indices = oldElements.map(element => parent.children.indexOf(element)).filter(index => index >= 0);
-		if (indices.length !== oldElements.length) {
-			return false;
-		}
-		const firstIndex = Math.min(...indices);
 		this.pushUndoSnapshot('Drag track');
-		for (const element of oldElements) {
-			const idx = parent.children.indexOf(element);
-			if (idx >= 0) {
-				parent.children.splice(idx, 1);
-			}
-		}
-		const replacements: any[] = [];
+		const replacements: Track[] = [];
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null) return false;
 		for (let i = 0; i < newPoints.length - 1; i++) {
 			const a = newPoints[i]!, b = newPoints[i + 1]!;
 			if (a.x === b.x && a.y === b.y) {
 				continue;
 			}
-			const segment = new KicadElementSegment();
-			segment.setStartEnd(a.x, a.y, b.x, b.y);
-			segment.setWidth(width);
-			segment.setLayer(layer);
+			const segment = new Track(this.boardModel);
+			segment.start = this.boardPoint(a.x, a.y); segment.end = this.boardPoint(b.x, b.y);
+			segment.setWidth(width); segment.setLayer(layerId);
 			if (netId !== null && netId !== undefined) {
-				segment.setNet(netId);
+				segment.setNet(this.boardModel.netInfo.getNetByCode(netId));
 			}
-			segment.setUuid();
 			replacements.push(segment);
 		}
 		if (replacements.length === 0) {
 			return false;
 		}
-		const insertAt = Math.min(firstIndex, parent.children.length);
-		parent.children.splice(insertAt, 0, ...replacements);
+		const commit = new BOARD_COMMIT('Drag track');
+		for (const oldElement of oldElements) commit.Remove(oldElement);
+		for (const replacement of replacements) commit.Add(replacement);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		if (this.scene) {
-			this.committedTrackOverlay.push(...this.painter.updateTrackItems(this.scene, this.boardRoot, wanted, replacements));
+			this.committedTrackOverlay.push(...this.painter.updateTrackItems(this.scene, this.boardModel, wanted, replacements));
 			this.hiddenTrackDragIds.clear();
 			this.copperGraphCache = null;
 			this.setSelectedIds(replacements.map(segment => segment.getUuid()).filter((id): id is string => !!id));
@@ -2495,30 +2544,24 @@ export class KicadRenderSession {
 	 *  per-frame drag helper — the O(segments) rescans per pass are fine at
 	 *  that call frequency. */
 	cleanupTracks(): { merged: number; removed: number } {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return { merged: 0, removed: 0 };
 		}
-		const root = this.boardRoot.rootElement;
-		const allSegments = root.findChildrenByClass(KicadElementSegment) as KicadElementSegment[];
-		const zeroLength = allSegments.filter(seg => {
-			const { start, end } = seg.getStartEnd();
-			return start.x === end.x && start.y === end.y;
-		});
-		let survivors = allSegments.filter(seg => !zeroLength.includes(seg));
+		const allSegments: Track[] = this.boardModel.tracks.filter((track: Track) => !(track instanceof TrackArc));
+		const working = allSegments.map(segment => segment.clone());
+		const zeroLength = working.filter(seg => seg.start.equals(seg.end));
+		let survivors = working.filter(seg => !zeroLength.includes(seg));
 		let mergedCount = 0;
-		const EPS = 1e-6;
-		const pointKey = (layer: string, netId: number | null, x: number, y: number) =>
-			`${ layer }|${ netId }|${ x.toFixed(5) }|${ y.toFixed(5) }`;
+		const EPS_CROSS_IU2 = 1e6;
+		const pointKey = (seg: Track, point: Vec2i) =>
+			`${ seg.getLayerId() }|${ seg.getNetCode() }|${ point.x }|${ point.y }`;
 		let changed = true;
 		while (changed) {
 			changed = false;
-			const touching = new Map<string, KicadElementSegment[]>();
+			const touching = new Map<string, Track[]>();
 			for (const seg of survivors) {
-				const { start, end } = seg.getStartEnd();
-				const layer = seg.getLayer();
-				const netId = seg.getNetId();
-				for (const p of [start, end]) {
-					const key = pointKey(layer, netId, p.x, p.y);
+				for (const p of [seg.start, seg.end]) {
+					const key = pointKey(seg, p);
 					const arr = touching.get(key);
 					if (arr) {
 						arr.push(seg);
@@ -2532,36 +2575,36 @@ export class KicadRenderSession {
 				if (pair.length !== 2 || pair[0] === pair[1]) {
 					continue;
 				}
-				const [a, b] = pair as [KicadElementSegment, KicadElementSegment];
-				if (a.getWidth() !== b.getWidth() || a.getLayer() !== b.getLayer() || a.getNetId() !== b.getNetId()) {
+				const [a, b] = pair as [Track, Track];
+				if (a.width !== b.width || a.getLayerId() !== b.getLayerId() || a.getNetCode() !== b.getNetCode()) {
 					continue;
 				}
-				const A = a.getStartEnd();
-				const B = b.getStartEnd();
+				const A = { start: a.start, end: a.end };
+				const B = { start: b.start, end: b.end };
 				// The shared point is whichever endpoint pairing coincides;
 				// the merge keeps the two FAR endpoints (one from each
 				// segment) as the new combined segment's ends.
 				let sharedA: { x: number; y: number }, farA: { x: number; y: number };
 				let sharedB: { x: number; y: number }, farB: { x: number; y: number };
-				if (Math.hypot(A.start.x - B.start.x, A.start.y - B.start.y) < EPS) {
+				if (A.start.equals(B.start)) {
 					sharedA = A.start;
 					farA = A.end;
 					sharedB = B.start;
 					farB = B.end;
 				}
-				else if (Math.hypot(A.start.x - B.end.x, A.start.y - B.end.y) < EPS) {
+				else if (A.start.equals(B.end)) {
 					sharedA = A.start;
 					farA = A.end;
 					sharedB = B.end;
 					farB = B.start;
 				}
-				else if (Math.hypot(A.end.x - B.start.x, A.end.y - B.start.y) < EPS) {
+				else if (A.end.equals(B.start)) {
 					sharedA = A.end;
 					farA = A.start;
 					sharedB = B.start;
 					farB = B.end;
 				}
-				else if (Math.hypot(A.end.x - B.end.x, A.end.y - B.end.y) < EPS) {
+				else if (A.end.equals(B.end)) {
 					sharedA = A.end;
 					farA = A.start;
 					sharedB = B.end;
@@ -2577,10 +2620,10 @@ export class KicadRenderSession {
 				const v1x = sharedA.x - farA.x, v1y = sharedA.y - farA.y;
 				const v2x = farB.x - sharedA.x, v2y = farB.y - sharedA.y;
 				const cross = v1x * v2y - v1y * v2x;
-				if (Math.abs(cross) > EPS) {
+				if (Math.abs(cross) > EPS_CROSS_IU2) {
 					continue;
 				}
-				a.setStartEnd(farA.x, farA.y, farB.x, farB.y);
+				a.start = new Vec2i(farA.x, farA.y); a.end = new Vec2i(farB.x, farB.y);
 				survivors = survivors.filter(s => s !== b);
 				mergedCount++;
 				changed = true;
@@ -2591,14 +2634,11 @@ export class KicadRenderSession {
 			return { merged: 0, removed: 0 };
 		}
 		this.pushUndoSnapshot('Cleanup tracks and vias');
-		for (const seg of allSegments) {
-			if (!survivors.includes(seg)) {
-				const idx = root.children.indexOf(seg);
-				if (idx >= 0) {
-					root.children.splice(idx, 1);
-				}
-			}
-		}
+		const commit = new BOARD_COMMIT('Cleanup tracks and vias');
+		for (const seg of allSegments) commit.Remove(seg);
+		for (const seg of survivors) commit.Add(seg);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return { merged: mergedCount, removed: zeroLength.length };
 	}
@@ -2638,12 +2678,12 @@ export class KicadRenderSession {
 	 *  Returns null for a paintId that isn't a live via on the current
 	 *  board. */
 	viaDragFanout(paintId: string): { fixes: ViaDragFix[]; viaSize: number } | null {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return null;
 		}
 		this.rebuildBoardSceneIfPending();
 		const viaItem = this.scene.hitTestItems.find(it => it.id === paintId);
-		if (!viaItem?.element || !(viaItem.element instanceof KicadElementVia) || viaItem.shape.type !== 'circle') {
+		if (!viaItem?.element || !(viaItem.element instanceof Via) || viaItem.shape.type !== 'circle') {
 			return null;
 		}
 		const viaSize = viaItem.shape.r * 2;
@@ -2696,8 +2736,81 @@ export class KicadRenderSession {
 		return { fixes, viaSize };
 	}
 
+	/**
+	 * Real KiCad's `SHOVE::pushOrShoveVia()` (pns_shove.cpp) — orchestration
+	 * only; the connectivity/reflow geometry itself is entirely reused from
+	 * the existing via-drag machinery above (`viaDragFanout`/`dragViaChain`/
+	 * `commitViaDrag`), built for the interactive via-drag gesture and
+	 * equally valid here: a via moved by a shove's computed push force is
+	 * geometrically identical to a via moved by a user dragging it to that
+	 * same target position.
+	 *
+	 * `routerNode` is the caller's current collision world (built from this
+	 * same scene), used only to validate that the via's new position and
+	 * every reflowed fanout line don't newly collide with anything ELSE —
+	 * no cascade into a further obstacle if they do (this session's
+	 * established shove scope: report failure, don't retry/springback).
+	 * `pushForce`/`cornerMode` come from `PnsRouter.ts`'s
+	 * `computeViaPushForce()`/the router's active corner-style setting.
+	 *
+	 * Scope cuts from real KiCad's `pushOrShoveVia`, each narrower than
+	 * this file's existing via-drag machinery already accepted: no
+	 * cascading the push into whatever a reflowed line newly collides
+	 * with; no joint-jitter-avoidance (nudging the target off an exactly-
+	 * overlapping existing joint); collision validation only checks layers
+	 * that appear among the via's own fanout (a via with zero connected
+	 * tracks — a bare stitching via — isn't pushed at all, since real
+	 * interactive routing essentially never needs to shove one). Returns
+	 * false (mutating nothing) if the via can't be found, has no fanout to
+	 * validate against, or the pushed result would newly collide.
+	 */
+	shoveVia(
+		routerNode: RouterNode, viaId: string, pushForce: { x: number; y: number }, cornerMode: '45' | '90',
+		clearanceResolver: PnsClearanceResolver = () => 0.2,
+	): boolean {
+		if (this.documentType !== 'board' || !this.scene) {
+			return false;
+		}
+		const viaItem = this.scene.hitTestItems.find(it => it.id === viaId);
+		if (!viaItem || viaItem.shape.type !== 'circle') {
+			return false;
+		}
+		const fanout = this.viaDragFanout(viaId);
+		if (!fanout || fanout.fixes.length === 0) {
+			return false;
+		}
+		const newViaPos = new Vec2(viaItem.shape.cx + pushForce.x, viaItem.shape.cy + pushForce.y);
+		const viaRadius = fanout.viaSize / 2;
+
+		const fixesWithChain = fanout.fixes.map(fix => ({
+			...fix,
+			chain: dragViaChain(fix.originPoints, newViaPos, cornerMode),
+		}));
+
+		const excludeIds = [viaId, ...fixesWithChain.flatMap(fix => fix.segmentIds)];
+		const viaNetId = viaItem.netId ?? null;
+		const fanoutLayers = new Set(fixesWithChain.map(fix => fix.layer));
+		for (const layer of fanoutLayers) {
+			if (routerNode.firstCircleCollision(
+				newViaPos.x, newViaPos.y, viaRadius, layer, viaNetId, clearanceResolver, excludeIds)) {
+				return false;
+			}
+		}
+		for (const fix of fixesWithChain) {
+			for (let i = 1; i < fix.chain.length; i++) {
+				const p1 = fix.chain[i - 1]!, p2 = fix.chain[i]!;
+				if (routerNode.firstSegmentCollision(
+					p1.x, p1.y, p2.x, p2.y, fix.width, fix.layer, fix.netId, clearanceResolver, excludeIds)) {
+					return false;
+				}
+			}
+		}
+
+		return this.commitViaDrag(viaId, fixesWithChain, newViaPos.x, newViaPos.y);
+	}
+
 	/** Commits a via drag once, at mouseup — replaces each fix's WHOLE
-	 *  segment chain (resolved by uuid straight from the AST, not
+	 *  segment chain (resolved by uuid straight from the model, not
 	 *  this.scene.hitTestItems: the gesture that leads here hid these exact
 	 *  segments out of the scene for the whole drag via
 	 *  beginTrackDragPreview, and endTrackDragPreview's restore is itself
@@ -2718,26 +2831,28 @@ export class KicadRenderSession {
 		fixes: { segmentIds: string[]; chain: Vec2[]; width: number; layer: string; netId: number | null }[],
 		x: number, y: number
 	): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return false;
 		}
-		const parent = this.boardRoot.rootElement;
-		const viaElement = parent.children.find((child: any) =>
-			child instanceof KicadElementVia && child.getUuid() === paintId);
-		if (!viaElement) {
+		const viaElement = this.boardModel.itemById.get(paintId);
+		if (!(viaElement instanceof Via)) {
 			return false;
 		}
 		this.pushUndoSnapshot('Move via');
+		const commit = new BOARD_COMMIT('Move via');
 		for (const fix of fixes) {
-			this.applyFixChain(parent, fix, fix.chain, fix.width, fix.layer, fix.netId);
+			this.applyFixChain(commit, fix, fix.chain, fix.width, fix.layer, fix.netId);
 		}
+		commit.Modify(viaElement);
 		viaElement.setOrigin(x, y);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
 
-	/** Shared N-old-segments-to-M-new-segments splice, resolved by uuid
-	 *  straight from the AST (not this.scene.hitTestItems: the gesture that
+	/** Shared N-old-segments-to-M-new-segments replacement, resolved by uuid
+	 *  straight from the model (not this.scene.hitTestItems: the gesture that
 	 *  leads here hid these exact segments out of the scene for the whole
 	 *  drag via beginTrackDragPreview, and endTrackDragPreview's restore is
 	 *  itself deferred to the next render(), so at commit time the scene
@@ -2749,46 +2864,36 @@ export class KicadRenderSession {
 	 *  untouched) if `fix.segmentIds` doesn't fully resolve to live
 	 *  elements. Caller owns pushUndoSnapshot/commitAstMutation. */
 	private applyFixChain(
-		parent: any,
+		commit: BOARD_COMMIT,
 		fix: { segmentIds: string[] },
 		chain: Vec2[], width: number, layer: string, netId: number | null
 	): void {
+		if (!this.boardModel) return;
 		{
 			const wanted = new Set(fix.segmentIds);
-			const oldElements: any[] = parent.children.filter((child: any) => {
-				const uuid = child instanceof KicadElementSegment ? child.getUuid() : undefined;
-				return uuid !== undefined && wanted.has(uuid);
-			});
+			const oldElements = this.boardModel.tracks.filter((track: Track) =>
+				!(track instanceof TrackArc) && wanted.has(track.getUuid()));
 			if (oldElements.length !== fix.segmentIds.length) {
 				return;
 			}
-			const firstIndex = Math.min(...oldElements.map(element => parent.children.indexOf(element)));
-			for (const element of oldElements) {
-				const idx = parent.children.indexOf(element);
-				if (idx >= 0) {
-					parent.children.splice(idx, 1);
-				}
-			}
-			const replacements: any[] = [];
+			for (const element of oldElements) commit.Remove(element);
+			const replacements: Track[] = [];
+			const layerId = this.boardLayerId(layer);
+			if (layerId === null) return;
 			for (let i = 0; i < chain.length - 1; i++) {
 				const a = chain[i]!, b = chain[i + 1]!;
 				if (a.x === b.x && a.y === b.y) {
 					continue;
 				}
-				const segment = new KicadElementSegment();
-				segment.setStartEnd(a.x, a.y, b.x, b.y);
-				segment.setWidth(width);
-				segment.setLayer(layer);
+				const segment = new Track(this.boardModel);
+				segment.start = this.boardPoint(a.x, a.y); segment.end = this.boardPoint(b.x, b.y);
+				segment.setWidth(width); segment.setLayer(layerId);
 				if (netId !== null && netId !== undefined) {
-					segment.setNet(netId);
+					segment.setNet(this.boardModel.netInfo.getNetByCode(netId));
 				}
-				segment.setUuid();
 				replacements.push(segment);
 			}
-			if (replacements.length > 0) {
-				const insertAt = Math.min(firstIndex, parent.children.length);
-				parent.children.splice(insertAt, 0, ...replacements);
-			}
+			for (const replacement of replacements) commit.Add(replacement);
 		}
 	}
 
@@ -2910,14 +3015,17 @@ export class KicadRenderSession {
 	commitTrackCornerDrag(
 		fixes: { segmentIds: string[]; chain: Vec2[]; width: number; layer: string; netId: number | null }[]
 	): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || fixes.length === 0) {
+		if (this.documentType !== 'board' || !this.boardModel || fixes.length === 0) {
 			return false;
 		}
-		const parent = this.boardRoot.rootElement;
 		this.pushUndoSnapshot('Drag track');
+		const commit = new BOARD_COMMIT('Drag track');
 		for (const fix of fixes) {
-			this.applyFixChain(parent, fix, fix.chain, fix.width, fix.layer, fix.netId);
+			this.applyFixChain(commit, fix, fix.chain, fix.width, fix.layer, fix.netId);
 		}
+		if (commit.Empty()) return false;
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -2927,26 +3035,32 @@ export class KicadRenderSession {
 		x: number, y: number, size: number, drill: number,
 		layers: readonly string[], netId?: number | null, captureUndo = true
 	): string | null {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || layers.length < 2) {
+		if (this.documentType !== 'board' || !this.boardModel || layers.length < 2) {
 			return null;
 		}
+		const topLayer = this.boardLayerId(layers[0]!);
+		const bottomLayer = this.boardLayerId(layers[layers.length - 1]!);
+		if (topLayer === null || bottomLayer === null) return null;
 		if (captureUndo) {
 			this.pushUndoSnapshot('Place via');
 		}
-		const via = new KicadElementVia();
-		via.setOrigin(x, y);
-		via.setSize(size);
-		via.setDrill(drill);
-		for (const layer of layers) {
-			via.addLayer(layer);
-		}
+		const via = new Via(this.boardModel);
+		via.start = this.boardPoint(x, y);
+		via.end = via.start.clone();
+		via.width = mmToIU(pcbIuScale, size);
+		via.drill = mmToIU(pcbIuScale, drill);
+		via.topLayer = topLayer;
+		via.bottomLayer = bottomLayer;
+		via.setLayer(topLayer);
 		if (netId !== null && netId !== undefined) {
-			via.setNet(netId);
+			via.setNet(this.boardModel.netInfo.getNetByCode(netId));
 		}
-		via.setUuid();
-		this.boardRoot.rootElement.addChild(via);
+		const commit = new BOARD_COMMIT('Place via');
+		commit.Add(via);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
-		return via.getUuid() ?? null;
+		return via.getUuid();
 	}
 
 	/** Pcbnew's default board-graphic width (board_design_settings.h's
@@ -2954,103 +3068,83 @@ export class KicadRenderSession {
 	 * the board-native `gr_*` records rather than reusing schematic graphics. */
 	addBoardGraphicLine(
 		x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || (x1 === x2 && y1 === y2)) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw line');
-		const line = new KicadElementGrLine();
-		line.setStartEnd(x1, y1, x2, y2);
-		line.setStroke(strokeWidth, 'default');
-		line.setLayer(layer);
-		line.setUuid();
-		this.boardRoot!.rootElement.addChild(line);
-		this.commitAstMutation();
-		return line.getUuid() ?? null;
+		const line = this.newBoardShape(BoardShapeType.SEGMENT, layerId, strokeWidth);
+		line.start = this.boardPoint(x1, y1);
+		line.end = this.boardPoint(x2, y2);
+		return this.commitBoardGraphicAdd(line, 'Draw line');
 	}
 
 	addBoardGraphicRect(
 		x1: number, y1: number, x2: number, y2: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || (x1 === x2 && y1 === y2)) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || (x1 === x2 && y1 === y2)) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw rectangle');
-		const rect = new KicadElementGrRect();
-		rect.setStartEnd(x1, y1, x2, y2);
-		rect.setStroke(strokeWidth, 'default');
-		rect.setLayer(layer);
-		rect.setUuid();
-		this.boardRoot!.rootElement.addChild(rect);
-		this.commitAstMutation();
-		return rect.getUuid() ?? null;
+		const rect = this.newBoardShape(BoardShapeType.RECTANGLE, layerId, strokeWidth);
+		rect.start = this.boardPoint(x1, y1);
+		rect.end = this.boardPoint(x2, y2);
+		return this.commitBoardGraphicAdd(rect, 'Draw rectangle');
 	}
 
 	addBoardGraphicCircle(cx: number, cy: number, radius: number, layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || radius <= 0) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || radius <= 0) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw circle');
-		const circle = new KicadElementGrCircle();
-		circle.setCenter(cx, cy);
-		circle.setEnd(cx + radius, cy);
-		circle.setStroke(strokeWidth, 'default');
-		circle.setLayer(layer);
-		circle.setUuid();
-		this.boardRoot!.rootElement.addChild(circle);
-		this.commitAstMutation();
-		return circle.getUuid() ?? null;
+		const circle = this.newBoardShape(BoardShapeType.CIRCLE, layerId, strokeWidth);
+		circle.start = this.boardPoint(cx, cy);
+		circle.end = this.boardPoint(cx + radius, cy);
+		return this.commitBoardGraphicAdd(circle, 'Draw circle');
 	}
 
 	addBoardGraphicArc(
 		sx: number, sy: number, mx: number, my: number, ex: number, ey: number, layer: string,
 		strokeWidth = 0.1
 	): string | null {
-		if (!this.canAddBoardGraphic() || (sx === ex && sy === ey)) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || (sx === ex && sy === ey)) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw arc');
-		const arc = new KicadElementGrArc();
-		arc.setStartMidEnd(sx, sy, mx, my, ex, ey);
-		arc.setStroke(strokeWidth, 'default');
-		arc.setLayer(layer);
-		arc.setUuid();
-		this.boardRoot!.rootElement.addChild(arc);
-		this.commitAstMutation();
-		return arc.getUuid() ?? null;
+		const arc = this.newBoardShape(BoardShapeType.ARC, layerId, strokeWidth);
+		arc.start = this.boardPoint(sx, sy);
+		arc.mid = this.boardPoint(mx, my);
+		arc.end = this.boardPoint(ex, ey);
+		return this.commitBoardGraphicAdd(arc, 'Draw arc');
 	}
 
 	addBoardGraphicBezier(
 		points: readonly { x: number; y: number }[], layer: string, strokeWidth = 0.1): string | null {
-		if (!this.canAddBoardGraphic() || points.length !== 4) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || points.length !== 4) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw Bezier');
-		const curve = new KicadElementGrCurve();
-		curve.setPoints(points.map(point => ({ x: point.x, y: point.y })));
-		curve.setStroke(strokeWidth, 'default');
-		curve.setLayer(layer);
-		curve.setUuid();
-		this.boardRoot!.rootElement.addChild(curve);
-		this.commitAstMutation();
-		return curve.getUuid() ?? null;
+		const curve = this.newBoardShape(BoardShapeType.BEZIER, layerId, strokeWidth);
+		curve.points = points.map(point => this.boardPoint(point.x, point.y));
+		return this.commitBoardGraphicAdd(curve, 'Draw Bezier');
 	}
 
 	/** Pcbnew's board defaults from board_design_settings.h: 1.0 mm text with
 	 * 0.15 mm text stroke.  It anchors newly placed text left/bottom and mirrors
 	 * it when placed on a back layer. */
 	addBoardGraphicText(x: number, y: number, value: string, layer: string): string | null {
-		if (!this.canAddBoardGraphic() || !value.trim()) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || !value.trim()) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw text');
-		const text = new KicadElementGrText(value);
-		text.setOrigin(x, y, 0);
-		text.setLayer(layer);
-		text.setFont(1, 1, false, false, 0.15);
-		text.setJustify('left', 'bottom', layer.startsWith('B.'));
-		text.setUuid();
-		this.boardRoot!.rootElement.addChild(text);
-		this.commitAstMutation();
-		return text.getUuid() ?? null;
+		const text = new BoardText(this.boardModel);
+		text.value = value;
+		text.pos = this.boardPoint(x, y);
+		text.fontSize = new Vec2i(mmToIU(pcbIuScale, 1), mmToIU(pcbIuScale, 1));
+		text.fontThickness = mmToIU(pcbIuScale, 0.15);
+		text.hJustify = -1;
+		text.vJustify = 1;
+		text.mirrored = layer.startsWith('B.');
+		text.setLayer(layerId);
+		return this.commitBoardGraphicAdd(text, 'Draw text');
 	}
 
 	/** Native Pcbnew `gr_text_box`: the default legacy margin is
@@ -3059,30 +3153,60 @@ export class KicadRenderSession {
 	 * graphic stroke while its text itself uses the 0.15 mm text stroke. */
 	addBoardGraphicTextBox(
 		x1: number, y1: number, x2: number, y2: number, value: string, layer: string): string | null {
-		if (!this.canAddBoardGraphic() || !value.trim() || x1 === x2 || y1 === y2) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || !value.trim() || x1 === x2 || y1 === y2) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw text box');
-		const textBox = new KicadElementGrTextBox(value);
-		textBox.setStartEnd(Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2));
-		textBox.setSimpleChild('margins', 0.825, 'numeric').setAttribute({ value: 0.825, format: 'numeric' }, 1);
-		const margins = textBox.findFirstChildByName('margins')!;
-		margins.setAttribute({ value: 0.825, format: 'numeric' }, 2);
-		margins.setAttribute({ value: 0.825, format: 'numeric' }, 3);
-		textBox.setLayer(layer);
-		textBox.setFont(1, 1, false, false, 0.15);
-		textBox.setJustify('left', 'middle', layer.startsWith('B.'));
-		textBox.setSimpleChild('border', true, 'boolean');
-		textBox.setSimpleChild('knockout', false, 'boolean');
-		textBox.setStroke(0.1, 'default');
-		textBox.setUuid();
-		this.boardRoot!.rootElement.addChild(textBox);
+		const textBox = new BoardTextBox(this.boardModel);
+		textBox.value = value;
+		textBox.start = this.boardPoint(Math.min(x1, x2), Math.min(y1, y2));
+		textBox.end = this.boardPoint(Math.max(x1, x2), Math.max(y1, y2));
+		const margin = mmToIU(pcbIuScale, 0.825);
+		textBox.margins = [margin, margin, margin, margin];
+		textBox.fontSize = new Vec2i(mmToIU(pcbIuScale, 1), mmToIU(pcbIuScale, 1));
+		textBox.fontThickness = mmToIU(pcbIuScale, 0.15);
+		textBox.hJustify = -1;
+		textBox.vJustify = 0;
+		textBox.mirrored = layer.startsWith('B.');
+		textBox.border = true;
+		textBox.knockout = false;
+		textBox.strokeWidth = mmToIU(pcbIuScale, 0.1);
+		textBox.strokeType = 'default';
+		textBox.setLayer(layerId);
+		return this.commitBoardGraphicAdd(textBox, 'Draw text box');
+	}
+
+	private boardLayerId(layer: string): number | null {
+		if (!this.canAddBoardGraphic() || !this.boardModel) return null;
+		return [...this.boardModel.designSettings.layers.values()]
+			.find((candidate: any) => candidate.name === layer)?.number ?? null;
+	}
+
+	private boardPoint(x: number, y: number): Vec2i {
+		return new Vec2i(mmToIU(pcbIuScale, x), mmToIU(pcbIuScale, y));
+	}
+
+	private newBoardShape(shapeKind: BoardShapeType, layerId: number, strokeWidth: number): BoardShape {
+		const shape = new BoardShape(this.boardModel);
+		shape.shapeKind = shapeKind;
+		shape.strokeWidth = mmToIU(pcbIuScale, strokeWidth);
+		shape.strokeType = 'default';
+		shape.setLayer(layerId);
+		return shape;
+	}
+
+	private commitBoardGraphicAdd(item: any, label: string): string {
+		this.pushUndoSnapshot(label);
+		const commit = new BOARD_COMMIT(label);
+		commit.Add(item);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
-		return textBox.getUuid() ?? null;
+		return item.getUuid();
 	}
 
 	private canAddBoardGraphic(): boolean {
-		return this.documentType === 'board' && !!this.boardRoot?.rootElement;
+		return this.documentType === 'board' && !!this.boardModel;
 	}
 
 	/** Embed a raster image as a board-level `image` record on the active
@@ -3090,21 +3214,16 @@ export class KicadRenderSession {
 	 * with the PCB layer providing its visibility and rendering color context. */
 	addBoardGraphicImage(
 		x: number, y: number, data: string, mimeType: string, layer: string, scale = 1): string | null {
-		if (!this.canAddBoardGraphic() || !data || !mimeType.startsWith('image/')) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || !data || !mimeType.startsWith('image/')) {
 			return null;
 		}
-		this.pushUndoSnapshot('Place image');
-		const image = new KicadElementImage();
-		image.setOrigin(x, y);
-		image.setLayer(layer);
-		image.setScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
-		image.setUuid();
-		const imageData = new KicadElementData();
-		imageData.data = data;
-		image.addChild(imageData);
-		this.boardRoot!.rootElement.addChild(image);
-		this.commitAstMutation();
-		return image.getUuid() ?? null;
+		const image = new BoardReferenceImage(this.boardModel);
+		image.pos = this.boardPoint(x, y);
+		image.setLayer(layerId);
+		image.setScale(scale);
+		image.data = data;
+		return this.commitBoardGraphicAdd(image, 'Place image');
 	}
 
 	/** Creates a native Pcbnew `(barcode ...)` semantic record. Its modules are
@@ -3129,10 +3248,11 @@ export class KicadRenderSession {
 		if (!this.canAddBoardGraphic() || !data.text.trim()) {
 			return null;
 		}
-		this.pushUndoSnapshot('Place barcode');
-		const barcode = new KicadElementBarcode();
+		const layerId = this.boardLayerId(data.layer);
+		if (layerId === null) return null;
+		const barcode = new BoardBarcode(this.boardModel);
 		barcode.setOrigin(x, y, data.orientation);
-		barcode.setLayer(data.layer);
+		barcode.setLayer(layerId);
 		barcode.setSize(Math.max(0.01, data.widthMm), Math.max(0.01, data.heightMm));
 		barcode.setBarcodeText(data.text);
 		barcode.setBarcodeType(data.type);
@@ -3146,10 +3266,7 @@ export class KicadRenderSession {
 			barcode.setMargins(Math.max(0, data.marginXmm), Math.max(0, data.marginYmm));
 		}
 		barcode.setLocked(data.locked);
-		barcode.setUuid();
-		this.boardRoot!.rootElement.addChild(barcode);
-		this.commitAstMutation();
-		return barcode.getUuid() ?? null;
+		return this.commitBoardGraphicAdd(barcode, 'Place barcode');
 	}
 
 	/** Creates the two regular linear dimension records Pcbnew uses. `height`
@@ -3159,7 +3276,8 @@ export class KicadRenderSession {
 		type: 'aligned' | 'orthogonal', first: { x: number; y: number }, second: { x: number; y: number },
 		placement: { x: number; y: number }, layer: string
 	): string | null {
-		if (!this.canAddBoardGraphic() || (first.x === second.x && first.y === second.y)) {
+		const layerId = this.boardLayerId(layer);
+		if (layerId === null || (first.x === second.x && first.y === second.y)) {
 			return null;
 		}
 		const dx = second.x - first.x;
@@ -3173,17 +3291,15 @@ export class KicadRenderSession {
 			return null;
 		}
 
-		this.pushUndoSnapshot(`Place ${ type } dimension`);
-		const dimension = new KicadElementDimension();
+		const dimension = new BoardDimension(this.boardModel);
 		dimension.setDimensionType(type);
-		dimension.setLayer(layer);
+		dimension.setLayer(layerId);
 		dimension.setPoints([first, second]);
 		dimension.setHeight(height);
 		if (type === 'orthogonal') {
 			dimension.setOrientation(orientation);
 		}
-		dimension.setUuid();
-		const uuid = dimension.getUuid()!;
+		const uuid = dimension.getUuid();
 
 		// Real KiCad defaults (pcb_dimension.h's constructor field
 		// initializers) — see KicadElementDimensionFormat/Style's own doc
@@ -3208,18 +3324,15 @@ export class KicadRenderSession {
 			? (orientation === 0 ? { x: second.x, y: second.y + height } : { x: second.x + height, y: second.y })
 			: { x: second.x - dy / distance * height, y: second.y + dx / distance * height };
 		const measured = type === 'orthogonal' ? (orientation === 0 ? Math.abs(dx) : Math.abs(dy)) : distance;
-		const text = new KicadElementGrText(this.formatDimensionValueText(dimension, measured));
 		const textAngle = type === 'aligned'
 			? ((-Math.atan2(dy, dx) * 180 / Math.PI + 90) % 180) - 90
 			: (orientation === 1 ? 90 : 0);
-		text.setOrigin((lineStart.x + lineEnd.x) / 2, (lineStart.y + lineEnd.y) / 2, textAngle);
-		text.setLayer(layer);
-		text.setFont(1, 1, false, false, 0.1);
-		text.setUuid();
-		dimension.addChild(text);
-
-		this.boardRoot!.rootElement.addChild(dimension);
-		this.commitAstMutation();
+		dimension.textValue = this.formatDimensionValueText(dimension, measured);
+		dimension.textPos = this.boardPoint((lineStart.x + lineEnd.x) / 2, (lineStart.y + lineEnd.y) / 2);
+		dimension.textRotationDeg = textAngle;
+		dimension.textFontSize = this.boardPoint(1, 1);
+		dimension.textFontThickness = mmToIU(pcbIuScale, 0.1);
+		this.commitBoardGraphicAdd(dimension, `Place ${ type } dimension`);
 		return uuid;
 	}
 
@@ -3231,7 +3344,7 @@ export class KicadRenderSession {
 	 *  when override is enabled. `measuredMm` is the caller's job to compute
 	 *  (aligned: point-to-point distance; orthogonal: the single-axis
 	 *  delta) since that math already differs by type at every call site. */
-	private formatDimensionValueText(dim: KicadElementDimension, measuredMm: number): string {
+	private formatDimensionValueText(dim: any, measuredMm: number): string {
 		if (dim.getOverrideTextEnabled()) {
 			return dim.getOverrideText();
 		}
@@ -3267,13 +3380,14 @@ export class KicadRenderSession {
 			return false;
 		}
 		const dim = this.findDimensionByPaintId(paintId);
-		const textEl = dim?.findFirstChildByClass(KicadElementGrText);
+		const textEl = dim?.getTextItem();
 		const measuredMm = dim ? this.measuredMmForDimension(dim) : null;
 		if (!dim || !textEl || measuredMm === null) {
 			return false;
 		}
-		textEl.value = this.formatDimensionValueText(dim, measuredMm);
-		this.commitAstMutation();
+		this.commitBoardModelMutation(dim, item => {
+			item.textValue = this.formatDimensionValueText(item, measuredMm);
+		}, 'Refresh dimension text');
 		return true;
 	}
 
@@ -3295,16 +3409,14 @@ export class KicadRenderSession {
 	 *  sub-item (whose `element` is the gr_text child itself, `.parent` the
 	 *  owning dimension — see BoardPainter.buildDimension's doc comment) to
 	 *  the owning KicadElementDimension. */
-	private findDimensionByPaintId(paintId: string): KicadElementDimension | undefined {
-		const item = this.scene?.hitTestItems.find(candidate => candidate.id === paintId)
-			?? [...(this.scene?.layerBuckets.values() ?? [])].flat().find(candidate => candidate.id === paintId);
-		return item?.element instanceof KicadElementDimension ? item.element
-			: item?.element instanceof KicadElementGrText && item.element.parent instanceof KicadElementDimension
-				? item.element.parent
-				: undefined;
+	private findDimensionByPaintId(paintId: string): BoardDimension | undefined {
+		if (this.documentType !== 'board' || !this.boardModel) return undefined;
+		const bareUuid = paintId.includes(':') ? paintId.slice(0, paintId.indexOf(':')) : paintId;
+		const item = this.boardModel.itemById.get(bareUuid);
+		return item instanceof BoardDimension ? item : undefined;
 	}
 
-	private measuredMmForDimension(dim: KicadElementDimension): number | null {
+	private measuredMmForDimension(dim: BoardDimension): number | null {
 		const points = dim.getPoints();
 		if (points.length < 2) {
 			return null;
@@ -3321,7 +3433,7 @@ export class KicadRenderSession {
 	 *  rather than shared across the render/session split (matches how
 	 *  addBoardDimension already computes this same math independently at
 	 *  placement time). Null points/degenerate line -> null. */
-	private computeDimensionCrossbar(dim: KicadElementDimension): { lineStart: Vec2; lineEnd: Vec2 } | null {
+	private computeDimensionCrossbar(dim: BoardDimension): { lineStart: Vec2; lineEnd: Vec2 } | null {
 		const points = dim.getPoints();
 		if (points.length < 2) {
 			return null;
@@ -3359,7 +3471,7 @@ export class KicadRenderSession {
 		const dim = this.findDimensionByPaintId(paintId);
 		const points = dim?.getPoints();
 		const crossbar = dim ? this.computeDimensionCrossbar(dim) : null;
-		const textEl = dim?.findFirstChildByClass(KicadElementGrText);
+		const textEl = dim?.getTextItem();
 		if (!dim || !points || points.length < 2 || !crossbar || !textEl) {
 			return null;
 		}
@@ -3384,9 +3496,11 @@ export class KicadRenderSession {
 			return false;
 		}
 		const next = points.map((p, i) => i === index ? { x, y } : { x: p.x, y: p.y });
-		dim.setPoints(next);
-		this.refreshDimensionText(paintId);
-		this.commitAstMutation();
+		this.commitBoardModelMutation(dim, item => {
+			item.setPoints(next);
+			const measured = this.measuredMmForDimension(item);
+			if (measured !== null) item.textValue = this.formatDimensionValueText(item, measured);
+		}, 'Move dimension point');
 		return true;
 	}
 
@@ -3416,12 +3530,11 @@ export class KicadRenderSession {
 			const dist = Math.hypot(dx, dy) || 1;
 			height = ((cursorX - p1.x) * -dy + (cursorY - p1.y) * dx) / dist;
 		}
-		dim.setHeight(height);
-		this.commitAstMutation();
+		this.commitBoardModelMutation(dim, item => item.setHeight(height), 'Set dimension height');
 		return true;
 	}
 
-	/** Reads a pad/track/via net directly from the painted item's AST node.
+	/** Reads a pad/track/via net directly from the painted model item.
 	 *  Clicking mid-track therefore inherits its net without splitting the
 	 *  original segment—KiCad connectivity treats touching same-net copper
 	 *  segments as connected without a separate junction object. */
@@ -3437,24 +3550,15 @@ export class KicadRenderSession {
 		return typeof element?.getNetId === 'function' ? element.getNetId() : null;
 	}
 
-	/** Looks up a net's name from the board's own root-level `(net id name)`
-	 *  table — the router needs net NAMES (not just ids) to resolve a
+	/** Looks up a net's name through the board model's `NetInfoList` — the
+	 *  router needs net NAMES (not just ids) to resolve a
 	 *  net-class via NetClassResolver, since `net_settings` in the
 	 *  `.kicad_pro` keys everything by name. */
 	netNameForId(netId: number | null): string | null {
-		if (netId === null || this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (netId === null || this.documentType !== 'board' || !this.boardModel) {
 			return null;
 		}
-		if (!this.netNameCache) {
-			this.netNameCache = new Map();
-			for (const net of this.boardRoot.rootElement.findChildrenByClass(KicadElementNet)) {
-				const name = (net as KicadElementNet).netName;
-				if (name !== undefined) {
-					this.netNameCache.set((net as KicadElementNet).id, name);
-				}
-			}
-		}
-		return this.netNameCache.get(netId) ?? null;
+		return this.boardModel.netInfo.getNetByCode(netId)?.netName ?? null;
 	}
 
 	/** Nearest ratsnest airwire ENDPOINT (an unrouted pad's exact world
@@ -3577,51 +3681,6 @@ export class KicadRenderSession {
 				best = { point: new Vec2(x, y), dist };
 			}
 		};
-		const considerLineLike = (el: any) => {
-			const { start, end } = el.getStartEnd();
-			const isRect = typeof el.name === 'string' && el.name.endsWith('_rect');
-			if (!isRect) {
-				consider(start.x, start.y);
-				consider(end.x, end.y);
-				consider((start.x + end.x) / 2, (start.y + end.y) / 2);
-				return;
-			}
-			const corners = [
-				{ x: start.x, y: start.y }, { x: end.x, y: start.y },
-				{ x: end.x, y: end.y }, { x: start.x, y: end.y }
-			];
-			consider((start.x + end.x) / 2, (start.y + end.y) / 2);
-			for (let i = 0; i < 4; i++) {
-				const a = corners[i]!, b = corners[(i + 1) % 4]!;
-				consider(a.x, a.y);
-				consider((a.x + b.x) / 2, (a.y + b.y) / 2);
-			}
-		};
-		const considerCircleLike = (el: any) => {
-			const { x: cx, y: cy } = el.getCenter();
-			const { x: ex, y: ey } = el.getEnd();
-			const r = Math.hypot(ex - cx, ey - cy);
-			consider(cx, cy);
-			consider(cx + r, cy);
-			consider(cx - r, cy);
-			consider(cx, cy + r);
-			consider(cx, cy - r);
-		};
-		const considerArcLike = (el: any) => {
-			const { start, mid, end } = el.getStartMidEnd();
-			consider(start.x, start.y);
-			consider(mid.x, mid.y);
-			consider(end.x, end.y);
-			try {
-				const { centerX, centerY } = el.getArcCenterRadiusAngles();
-				consider(centerX, centerY);
-			}
-			catch {
-				// Collinear start/mid/end (degenerate arc) — no well-defined
-				// center to offer as an anchor, same as real KiCad's own
-				// GetCenter() guard for a zero-curvature arc.
-			}
-		};
 		// Deliberately scans layerBuckets (every drawn item), not hitTestItems
 		// (only individually CLICKABLE items — plain board-level gr_line/gr_arc
 		// and every footprint-owned fp_line/fp_rect/fp_circle/fp_arc are
@@ -3660,18 +3719,27 @@ export class KicadRenderSession {
 					}
 				}
 				else if (item.kind === 'graphic') {
-					const el = item.element as any;
-					if (
-						el instanceof KicadElementGrLine || el instanceof KicadElementFpLine ||
-						el instanceof KicadElementGrRect || el instanceof KicadElementFpRect
-					) {
-						considerLineLike(el);
+					if (item.snapAnchors?.length) {
+						for (const anchor of item.snapAnchors) consider(anchor.x, anchor.y);
 					}
-					else if (el instanceof KicadElementGrCircle || el instanceof KicadElementFpCircle) {
-						considerCircleLike(el);
+					else if (item.shape.type === 'segment') {
+						consider(item.shape.x1, item.shape.y1);
+						consider(item.shape.x2, item.shape.y2);
+						consider((item.shape.x1 + item.shape.x2) / 2, (item.shape.y1 + item.shape.y2) / 2);
 					}
-					else if (el instanceof KicadElementGrArc || el instanceof KicadElementFpArc) {
-						considerArcLike(el);
+					else if (item.shape.type === 'polygon') {
+						const points = item.shape.points;
+						for (let i = 0; i < points.length; i++) {
+							const a = points[i]!, b = points[(i + 1) % points.length]!;
+							consider(a.x, a.y);
+							consider((a.x + b.x) / 2, (a.y + b.y) / 2);
+						}
+					}
+					else if (item.shape.type === 'circle') {
+						const { cx, cy, r } = item.shape;
+						consider(cx, cy);
+						consider(cx + r, cy); consider(cx - r, cy);
+						consider(cx, cy + r); consider(cx, cy - r);
 					}
 				}
 			}
@@ -3834,13 +3902,16 @@ export class KicadRenderSession {
 				names.add(candidate.labelName);
 				return;
 			}
-			if (candidate.kind === 'pin' && candidate.element instanceof KicadElementPin) {
+			if (candidate.kind === 'pin' && (typeof (candidate.element as any)?.getPin === 'function' || typeof (candidate.element as any)?.getNumber === 'function')) {
 				const ref = candidate.refDesignator;
 				if (!ref) {
 					return;
 				}
-				const { number } = typeof candidate.element.getPin === 'function' ? candidate.element.getPin() :
-					{ number: '' };
+				const el: any = candidate.element;
+				// Painted model pins expose getNumber(); imported clipboard
+				// boundary objects may expose the equivalent getPin().number.
+				const number = typeof el.getPin === 'function' ? el.getPin().number
+					: typeof el.getNumber === 'function' ? el.getNumber() : '';
 				if (!number) {
 					return;
 				}
@@ -3932,12 +4003,14 @@ export class KicadRenderSession {
 		if (item.kind === 'label' && item.labelKind !== 'symbol-field' && item.labelName) {
 			return item.labelName;
 		}
-		if (item.kind === 'pin' && item.element instanceof KicadElementPin) {
+		if (item.kind === 'pin' && (typeof (item.element as any)?.getPin === 'function' || typeof (item.element as any)?.getNumber === 'function')) {
 			const ref = item.refDesignator;
 			if (!ref) {
 				return null;
 			}
-			const { number } = typeof item.element.getPin === 'function' ? item.element.getPin() : { number: '' };
+			const pinEl: any = item.element;
+			const number = typeof pinEl.getPin === 'function' ? pinEl.getPin().number
+				: typeof pinEl.getNumber === 'function' ? pinEl.getNumber() : '';
 			if (!number) {
 				return null;
 			}
@@ -4044,7 +4117,7 @@ export class KicadRenderSession {
 
 		// 3. Pins from the Pins layer (includes hidden pins such as GND/VCC power symbols).
 		for (const pinItem of (this.schScene.layerBuckets.get('Pins') ?? [])) {
-			if (pinItem.kind !== 'pin' || !(pinItem.element instanceof KicadElementPin)) {
+			if (pinItem.kind !== 'pin' || !(typeof (pinItem.element as any)?.getPin === 'function' || typeof (pinItem.element as any)?.getNumber === 'function')) {
 				continue;
 			}
 			const pinNet = this.netNameForPaintItem(pinItem);
@@ -4096,23 +4169,22 @@ export class KicadRenderSession {
 		return ids;
 	}
 
-	/** Every KicadElementGroup currently in the document — cheap early-return
+	/** Every SchGroup currently in the document — cheap early-return
 	 *  when none exist (every schematic that doesn't use groups, i.e. every
 	 *  one today), so expandGroupSelection/selectionHasGroup cost nothing
 	 *  for documents that never touch this feature. */
-	private allGroups(): KicadElementGroup[] {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
+	private allGroups(): SchGroup[] {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return [];
 		}
-		return (this.schematicRoot.rootElement.children as any[]).filter(
-			(c): c is KicadElementGroup => c instanceof KicadElementGroup
-		);
+		return (this.schematicModel.allScreens()[0]?.items ?? []).filter(
+			(item): item is SchGroup => item instanceof SchGroup);
 	}
 
 	/**
 	 * Given a set of just-resolved paint ids (a click, a rect-select
 	 * commit), expands any id that's a member of an existing
-	 * KicadElementGroup into that WHOLE group's member set — so grouped
+	 * SchGroup into that WHOLE group's member set — so grouped
 	 * items behave as one unit at the selection layer. Resolves group
 	 * membership by the underlying ELEMENT's own uuid
 	 * (item.element.getUuid()), never the paint id — paint ids diverge
@@ -4143,10 +4215,10 @@ export class KicadRenderSession {
 				continue;
 			}
 			for (const group of groups) {
-				if (!group.getMemberUuids().includes(uuid)) {
+				if (!group.memberUuids.includes(uuid)) {
 					continue;
 				}
-				for (const memberUuid of group.getMemberUuids()) {
+				for (const memberUuid of group.memberUuids) {
 					const paintId = uuidToPaintId.get(memberUuid);
 					if (paintId) {
 						result.add(paintId);
@@ -4169,7 +4241,7 @@ export class KicadRenderSession {
 		const uuids = new Set(
 			ids.map(id => (hitItems.find(it => it.id === id)?.element as any)?.getUuid?.()).filter(Boolean)
 		);
-		return groups.some(group => group.getMemberUuids().some(u => uuids.has(u)));
+		return groups.some(group => group.memberUuids.some(u => uuids.has(u)));
 	}
 
 	/** Fits the camera to a set of items' combined bbox — same auto-fit-on-load
@@ -4344,14 +4416,24 @@ export class KicadRenderSession {
 		const boardRoot = { rootElement };
 		this.boardRoot = boardRoot;
 		this.boardTextSnapshot = text;
-		this.netNameCache = null;
-		const setup = rootElement.findFirstChildByName?.('setup') as any;
-		this.boardGridOrigin = readBoardOrigin(setup, 'grid_origin');
-		this.boardDrillPlaceOrigin = readBoardOrigin(setup, 'aux_axis_origin');
 
 		const t1 = performance.now();
 		const previousLayerState = this.layerState;
-		this.scene = this.painter.build(boardRoot);
+		try {
+			this.boardModel = parseBoard(rootElement.write());
+			this.scene = this.painter.buildFromModel(this.boardModel);
+			const { gridOrigin, auxOrigin } = this.boardModel.designSettings;
+			this.boardGridOrigin = new Vec2(iuToMM(pcbIuScale, gridOrigin.x), iuToMM(pcbIuScale, gridOrigin.y));
+			this.boardDrillPlaceOrigin = new Vec2(iuToMM(pcbIuScale, auxOrigin.x), iuToMM(pcbIuScale, auxOrigin.y));
+		}
+		catch (e) {
+			console.debug('[KiOnline] model-backed board load failed, falling back to AST', e);
+			this.boardModel = null;
+			this.scene = this.painter.build(boardRoot);
+			const setup = rootElement.findFirstChildByName?.('setup') as any;
+			this.boardGridOrigin = readBoardOrigin(setup, 'grid_origin');
+			this.boardDrillPlaceOrigin = readBoardOrigin(setup, 'aux_axis_origin');
+		}
 		const graph = buildCopperGraph(this.scene);
 		this.copperGraphCache = { scene: this.scene, graph };
 		// Use the new KiCad-based engine for behavioral equivalence with KiCad.
@@ -4515,7 +4597,6 @@ this.clearSelectionAll();
 		}
 		this.documentType = 'board';
 		this.boardRoot = fakeBoard;
-		this.netNameCache = null;
 		const previewScene: LayeredBoardScene = {
 			layersPresent: [...layerBuckets.keys()],
 			layerBuckets,
@@ -4538,10 +4619,38 @@ this.clearSelectionAll();
 	}
 
 	/**
-	 * Serialize the currently loaded schematic AST (including any pose
-	 * mutations from {@link moveSymbolByRef}). Empty string if none loaded.
+	 * Phase 5 first cutover: KiOnline-only adapter logic, not a KiCad port.
+	 * `this.schematicModel` is valid ONLY immediately after a gesture that
+	 * has both mutated it AND proven the mutation correct for that specific
+	 * edit (currently only `moveSymbolByRefVerified`) — `commitAstMutation()`
+	 * (`shared/kicad-render/state.ts`) invalidates it unconditionally on
+	 * every other gesture, so this is always safe to trust when non-null.
+	 * Falls back to the AST (`getAstSchematicText()`, always correct, the
+	 * AST is mutated in real time by every gesture regardless of this
+	 * cutover) on `null` or any serialize failure — same discipline as
+	 * `buildInitialSchScene`'s existing model-primary/AST-fallback pattern.
 	 */
 	getSchematicText(): string {
+		if (this.schematicModel) {
+			try {
+				return serializeSchematic(this.schematicModel);
+			}
+			catch (e) {
+				console.debug('[KiOnline] model-backed save failed, falling back to AST', e);
+			}
+		}
+		return this.getAstSchematicText();
+	}
+
+	/**
+	 * Serialize the currently loaded schematic AST (including any pose
+	 * mutations from {@link moveSymbolByRef}). Empty string if none loaded.
+	 * The one eternal ground truth for this document — every fresh model
+	 * derivation (shadow-verify, the Phase 5 cutover) reads from THIS, never
+	 * from `getSchematicText()`'s own (possibly model-sourced) output, so a
+	 * cutover gesture is always checked against the AST directly.
+	 */
+	private getAstSchematicText(): string {
 		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
 			return '';
 		}
@@ -4636,6 +4745,18 @@ this.clearSelectionAll();
 	 * {@link moveFootprintByPaintId}). Empty string if none loaded.
 	 */
 	getBoardText(): string {
+		// Wiring pass: model-first, unconditionally — same trick as
+		// getSchematicText(). rebuildBoardSceneIfPending() (pipeline.ts)
+		// keeps `this.boardModel` resynced from the AST on every structural
+		// repaint; serialize from it directly when present.
+		if (this.boardModel) {
+			try {
+				return serializeBoard(this.boardModel);
+			}
+			catch (e) {
+				console.debug('[KiOnline] model-backed board save failed, falling back to AST', e);
+			}
+		}
 		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
 			return '';
 		}
@@ -4737,7 +4858,7 @@ this.clearSelectionAll();
 		this.highlightedNetIds.clear();
 
 		const t1 = performance.now();
-		this.schScene = this.schematicPainter.build(schematicRoot, docInfo);
+		this.schScene = this.buildInitialSchScene(text, schematicRoot, docInfo);
 		const buildMs = performance.now() - t1;
 		this.schLayerState = defaultSchLayerState(this.schScene.layersPresent);
 		this.geometryDirty = true;
@@ -4749,6 +4870,64 @@ this.clearSelectionAll();
 		this.scheduleRender();
 
 		return { parseMs, buildMs, layersPresent: this.schScene.layersPresent };
+	}
+
+	/** The initial paint after a fresh open or sheet navigation comes from
+	 *  the typed kicad-model `Schematic` and retains that exact object as the
+	 *  canonical editing state. Falls back to
+	 *  the AST `build()` on ANY failure (a not-yet-ported item type, a real
+	 *  bug) so a model-side gap never breaks a real load. */
+	private buildInitialSchScene(
+		text: string, schematicRoot: { rootElement: KicadElement }, docInfo?: SchematicDocInfo,
+	): SchematicScene {
+		try {
+			const schematic = parseSchematic(text);
+			this.schematicModel = schematic;
+			const modelScene = this.schematicPainter.buildSchematicFromModel(schematic, docInfo);
+			this.logSchematicModelShadowDiff(schematicRoot, modelScene, docInfo);
+			return modelScene;
+		}
+		catch (err) {
+			console.debug('[KiOnline] model-backed initial schematic paint failed — falling back to the AST build()', err);
+			this.schematicModel = null;
+			return this.schematicPainter.build(schematicRoot, docInfo);
+		}
+	}
+
+	/** Diagnostic sanity check, kept from the old Phase 0 shadow-diff with
+	 *  the roles reversed: `modelScene` is now the real, already-painted
+	 *  scene (the caller's return value), so this re-derives the AST build
+	 *  as the "shadow" comparison instead. Read-only and best-effort —
+	 *  swallows every error so a diagnostic-only AST re-build can never
+	 *  itself break a real load that already succeeded via the model. */
+	private logSchematicModelShadowDiff(
+		schematicRoot: { rootElement: KicadElement }, modelScene: SchematicScene, docInfo?: SchematicDocInfo,
+	): void {
+		try {
+			const astScene = this.schematicPainter.build(schematicRoot, docInfo);
+			const astCounts = new Map<string, number>();
+			for (const [layer, items] of astScene.layerBuckets) astCounts.set(layer, items.length);
+			const modelCounts = new Map<string, number>();
+			for (const [layer, items] of modelScene.layerBuckets) modelCounts.set(layer, items.length);
+			const layers = new Set([...astCounts.keys(), ...modelCounts.keys()]);
+			const rows: Record<string, { ast: number; model: number }> = {};
+			let astTotal = 0, modelTotal = 0, layersDiffer = 0;
+			for (const layer of [...layers].sort()) {
+				const ast = astCounts.get(layer) ?? 0;
+				const model = modelCounts.get(layer) ?? 0;
+				astTotal += ast; modelTotal += model;
+				if (ast !== model) layersDiffer++;
+				rows[layer] = { ast, model };
+			}
+			console.debug(
+				`[KiOnline] schematic model shadow-render: ${ astTotal } ast vs ${ modelTotal } model items` +
+				` (${ layersDiffer } layer${ layersDiffer === 1 ? '' : 's' } differ)`,
+			);
+			if (layersDiffer > 0) console.table(rows);
+		}
+		catch (err) {
+			console.debug('[KiOnline] schematic model shadow-render failed (non-fatal)', err);
+		}
 	}
 
 	/** External callers (e.g. the Symbol Fields Table) that mutate the AST of
@@ -5015,31 +5194,10 @@ this.clearSelectionAll();
 	/** Builds a netlist from the (schematic) board root via the schematic
 	 *  extractor. Returns null for a board document with no schematic. */
 	getSchematicNetlist(): any {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return null;
 		}
-		return buildSchematicNetlistFromRoot(this.schematicRoot.rootElement);
-	}
-
-	/**
-	 * Builds the connection graph for the currently loaded schematic (a single
-	 * sheet instance wrapping the loaded root). For a multi-sheet project,
-	 * callers should walk the project and pass all instances to
-	 * collectSheetInstances + buildConnectionGraph directly.
-	 */
-	getConnectionGraph(): any {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
-			return null;
-		}
-		const singleInstance = {
-			id: '/',
-			path: '',
-			rootElement: this.schematicRoot.rootElement,
-			libSymbols: this.findLibSymbols(this.schematicRoot.rootElement),
-			parent: null,
-			children: [],
-		};
-		return buildConnectionGraph([singleInstance]);
+		return buildSchematicNetlistFromModel(this.schematicModel);
 	}
 
 	/**
@@ -5157,17 +5315,6 @@ this.clearSelectionAll();
 		return tool;
 	}
 
-	/** Finds the `(lib_symbols ...)` block in a schematic root, or null. */
-	private findLibSymbols(rootElement: any): any {
-		if (!rootElement?.children) return null;
-		for (const c of rootElement.children) {
-			if (c?.name === 'lib_symbols') {
-				return c;
-			}
-		}
-		return null;
-	}
-
 	/** Per-zone fill provenance — purely session/UI bookkeeping (e.g. a
 	 *  future "modified" indicator or gating "Clear Fill"); BoardPainter
 	 *  needs none of this, since a live-computed fill is written straight
@@ -5186,13 +5333,13 @@ this.clearSelectionAll();
 	 *  stripping everything from the first ':' recovers the real uuid either
 	 *  way. Without this, double-click-to-edit (which hands this method the
 	 *  raw HitResult.id) could never resolve a zone at all. */
-	protected findZoneByUuid(uuid: string): KicadElementZone | null {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+	protected findZoneByUuid(uuid: string): Zone | null {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return null;
 		}
 		const bareUuid = uuid.includes(':') ? uuid.slice(0, uuid.indexOf(':')) : uuid;
-		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
-		return zones.find(zone => zone.getUuid() === bareUuid) ?? null;
+		const zone = this.boardModel.itemById.get(bareUuid);
+		return zone instanceof Zone ? zone : null;
 	}
 
 	/** The point editor is deliberately shared by graphic polygons, copper
@@ -5207,21 +5354,19 @@ this.clearSelectionAll();
 			return {
 				id: zone.getUuid() ?? paintId,
 				points: zone.getPolygon(),
-				setPoints: points => zone.setPolygon(points)
+				setPoints: points => this.commitBoardModelMutation(zone, item => item.setPolygon(points), 'Edit zone points')
 			};
 		}
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
-			return null;
-		}
-		const polygon = (this.boardRoot.rootElement.findChildrenByClass(KicadElementGrPoly) as KicadElementGrPoly[])
-			.find(item => item.getUuid() === paintId);
+		const polygon = this.findGrPolyByUuid(paintId);
 		if (!polygon) {
 			return null;
 		}
 		return {
-			id: polygon.getUuid() ?? paintId,
+			id: polygon.getUuid(),
 			points: polygon.getPoints(),
-			setPoints: points => polygon.setPoints(points)
+			setPoints: points => this.commitBoardModelMutation(polygon, item => {
+				item.points = points.map(point => this.boardPoint(point.x, point.y));
+			}, 'Edit polygon points')
 		};
 	}
 
@@ -5229,13 +5374,13 @@ this.clearSelectionAll();
 	 *  id is already bare (no composite `:layer:part` suffix, unlike a
 	 *  zone's), but stripping defensively costs nothing and keeps this
 	 *  resolver consistent with every other paint-id lookup in this file. */
-	protected findGrPolyByUuid(uuid: string): KicadElementGrPoly | null {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+	protected findGrPolyByUuid(uuid: string): BoardShape | null {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return null;
 		}
 		const bareUuid = uuid.includes(':') ? uuid.slice(0, uuid.indexOf(':')) : uuid;
-		const polygons = this.boardRoot.rootElement.findChildrenByClass(KicadElementGrPoly) as KicadElementGrPoly[];
-		return polygons.find(polygon => polygon.getUuid() === bareUuid) ?? null;
+		const polygon = this.boardModel.itemById.get(bareUuid);
+		return polygon instanceof BoardShape && polygon.shapeKind === BoardShapeType.POLY ? polygon : null;
 	}
 
 	/** Reads an existing graphic polygon into the Polygon Properties dialog's
@@ -5249,19 +5394,23 @@ this.clearSelectionAll();
 		return {
 			layer: polygon.getLayer(),
 			lineWidthMm: stroke.width,
-			lineStyle: stroke.type,
+			lineStyle: stroke.type as KicadStrokeType,
 			fillMode: polygon.getFillMode(),
 			locked: polygon.isLocked(),
-			netName: polygon.getNetName() ?? ''
+			netName: polygon.getNetname()
 		};
 	}
 
-	private applyPolygonDraft(polygon: KicadElementGrPoly, draft: PolygonDraft): void {
-		polygon.setStroke(draft.lineWidthMm, draft.lineStyle);
-		polygon.setFillMode(draft.fillMode);
+	private applyPolygonDraft(polygon: BoardShape, draft: PolygonDraft): boolean {
+		const layerId = this.boardLayerId(draft.layer);
+		if (layerId === null) return false;
+		polygon.strokeWidth = mmToIU(pcbIuScale, draft.lineWidthMm);
+		polygon.strokeType = draft.lineStyle;
+		polygon.fillMode = draft.fillMode;
 		polygon.setLocked(draft.locked);
-		polygon.setLayer(draft.layer);
-		polygon.setNetName(draft.netName || null);
+		polygon.setLayer(layerId);
+		polygon.setNet(draft.netName ? this.boardModel.netInfo.getNetByName(draft.netName) : null);
+		return true;
 	}
 
 	/** Commits a freshly click-drawn outline as a new graphic polygon — the
@@ -5271,17 +5420,14 @@ this.clearSelectionAll();
 	 *  PolygonDraft's doc comment), so setPoints/setStroke/applyPolygonDraft
 	 *  run before setUuid deliberately. */
 	createPolygonFromOutline(points: readonly { x: number; y: number }[], draft: PolygonDraft): string | null {
-		if (!this.canAddBoardGraphic() || points.length < 3) {
+		if (!this.boardModel || points.length < 3) {
 			return null;
 		}
-		this.pushUndoSnapshot('Draw polygon');
-		const polygon = new KicadElementGrPoly();
-		polygon.setPoints(points.map(point => ({ x: point.x, y: point.y })));
-		this.applyPolygonDraft(polygon, draft);
-		polygon.setUuid();
-		this.boardRoot!.rootElement.addChild(polygon);
-		this.commitAstMutation();
-		return polygon.getUuid() ?? null;
+		const polygon = new BoardShape(this.boardModel);
+		polygon.shapeKind = BoardShapeType.POLY;
+		polygon.points = points.map(point => this.boardPoint(point.x, point.y));
+		if (!this.applyPolygonDraft(polygon, draft)) return null;
+		return this.commitBoardGraphicAdd(polygon, 'Draw polygon');
 	}
 
 	/** Re-applies every Polygon Properties field to an already-placed graphic
@@ -5291,12 +5437,11 @@ this.clearSelectionAll();
 		if (!polygon) {
 			return false;
 		}
+		if (this.boardLayerId(draft.layer) === null) return false;
 		this.pushUndoSnapshot('Edit polygon properties');
-		this.applyPolygonDraft(polygon, draft);
-		if (!polygon.getUuid()) {
-			polygon.setUuid();
-		}
-		this.commitAstMutation();
+		this.commitBoardModelMutation(polygon, item => {
+			this.applyPolygonDraft(item, draft);
+		}, 'Edit polygon properties');
 		return true;
 	}
 
@@ -5309,9 +5454,8 @@ this.clearSelectionAll();
 	 *  zones' pours (real KiCad: "the exclusion is by outline rather than
 	 *  filled area", zone_filler.cpp), so callers pass every zone on the
 	 *  board, not just the ones being filled this call. */
-	private keepoutZoneInputs(allZones?: readonly KicadElementZone[]): KeepoutZoneInput[] {
-		const zones = allZones ?? (this.boardRoot?.rootElement.findChildrenByClass(
-			KicadElementZone) as KicadElementZone[] ?? []);
+	private keepoutZoneInputs(allZones?: readonly Zone[]): KeepoutZoneInput[] {
+		const zones: readonly Zone[] = allZones ?? (this.boardModel?.zones as Zone[] | undefined) ?? [];
 		return zones
 			.filter(zone => zone.isRuleArea() && zone.getDoNotAllowZoneFills() && zone.getPolygon().length >= 3)
 			.map(zone => ({ outlinePoints: zone.getPolygon(), layers: zone.getLayers() }));
@@ -5330,9 +5474,9 @@ this.clearSelectionAll();
 	 *  zone; the same zone getting two DIFFERENT ids across two call sites
 	 *  (the actual risk with a naive per-call `_zonefill_${i}` scheme)
 	 *  would make it invisible to its own peer-list lookup. */
-	private static readonly zoneFallbackIds = new WeakMap<KicadElementZone, string>();
+	private static readonly zoneFallbackIds = new WeakMap<Zone, string>();
 	private static zoneFallbackIdCounter = 0;
-	private zoneJobId(zone: KicadElementZone): string {
+	private zoneJobId(zone: Zone): string {
 		const real = zone.getUuid();
 		if (real) {
 			return real;
@@ -5351,9 +5495,8 @@ this.clearSelectionAll();
 	 *  Mirrors keepoutZoneInputs' own pattern (board-wide by default, but a
 	 *  caller that already enumerated every zone this call — fillAllZones —
 	 *  can pass it in to avoid walking the AST twice). */
-	private zonePriorityInputs(allZones?: readonly KicadElementZone[]): OtherZoneInput[] {
-		const zones = allZones ?? (this.boardRoot?.rootElement.findChildrenByClass(
-			KicadElementZone) as KicadElementZone[] ?? []);
+	private zonePriorityInputs(allZones?: readonly Zone[]): OtherZoneInput[] {
+		const zones: readonly Zone[] = allZones ?? (this.boardModel?.zones as Zone[] | undefined) ?? [];
 		return zones
 			.filter(zone => !zone.isRuleArea() && zone.getPolygon().length >= 3)
 			.map(zone => ({
@@ -5370,7 +5513,7 @@ this.clearSelectionAll();
 	 *  only/None), plus the thermal-relief sizing BoardZoneFill's
 	 *  collectExclusionRingsMm needs to act on it — see that file's "Pad
 	 *  Connections" header comment for the real-KiCad source this mirrors. */
-	private zonePadConnectionSettings(zone: KicadElementZone) {
+	private zonePadConnectionSettings(zone: Zone) {
 		const thermal = zone.getThermalRelief();
 		return {
 			mode: zone.getPadConnectionType(),
@@ -5378,6 +5521,15 @@ this.clearSelectionAll();
 			thermalSpokeWidthMm: thermal.spokeWidthMm,
 			minThicknessMm: zone.getMinThickness()
 		};
+	}
+
+	/** A copper zone's Corner Smoothing field (None/Chamfer/Fillet + radius) —
+	 *  see BoardZoneFill's smoothZoneOutline for the real-KiCad source this
+	 *  mirrors. null (the 'none' case) is a complete no-op for the fill
+	 *  pipeline, matching a zone that's never touched this field at all. */
+	private zoneCornerSmoothingSettings(zone: Zone): { type: 'chamfer' | 'fillet'; radiusMm: number } | null {
+		const smoothing = zone.getCornerSmoothing();
+		return smoothing.type === 'none' ? null : { type: smoothing.type, radiusMm: smoothing.radiusMm };
 	}
 
 	/**
@@ -5403,7 +5555,7 @@ this.clearSelectionAll();
 		zoneUuid: string, runJobs: ZoneFillExecutor, onProgress?: (done: number, total: number) => void,
 		designSettings?: ZoneFillDesignSettings
 	): Promise<boolean> {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return false;
 		}
 		const zone = this.findZoneByUuid(zoneUuid);
@@ -5417,10 +5569,10 @@ this.clearSelectionAll();
 		if (outline.length < 3) {
 			return false;
 		}
-		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardRoot);
+		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardModel);
 		const copperLayers = resolveCopperLayers(this.scene);
 		const extraExclusionsByLayer = buildEdgeExclusionsByLayer(
-			this.boardRoot, copperLayers, this.keepoutZoneInputs(), designSettings?.copperEdgeClearanceMm
+			this.boardModel, copperLayers, this.keepoutZoneInputs(), designSettings?.copperEdgeClearanceMm
 		);
 		const jobs = buildZoneFillJobs(
 			[
@@ -5432,7 +5584,9 @@ this.clearSelectionAll();
 					clearanceMm: resolveZoneClearanceMm(zone, designSettings),
 					priority: zone.getPriority(),
 					padConnection: this.zonePadConnectionSettings(zone),
-					islandRemoval: zone.getIslandRemovalMode()
+					minWidthMm: zone.getMinThickness(),
+					islandRemoval: zone.getIslandRemovalMode(),
+					cornerSmoothing: this.zoneCornerSmoothingSettings(zone)
 				}
 			],
 			this.scene, boardOutlineNm, extraExclusionsByLayer, this.zonePriorityInputs()
@@ -5441,20 +5595,18 @@ this.clearSelectionAll();
 
 		// Re-validate after the await — the board could have been closed or
 		// swapped out for a different one while the worker was running.
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || this.findZoneByUuid(zoneUuid) !== zone) {
+		if (this.documentType !== 'board' || !this.boardModel || this.findZoneByUuid(zoneUuid) !== zone) {
 			return false;
 		}
 		const fill = results.filter(r => r.zoneUuid === zoneUuid).map(r => ({ layer: r.layer, points: r.points }));
 		this.pushUndoSnapshot('Fill zone');
-		zone.setFilledPolygons(fill);
-		zone.setFilled(fill.length > 0);
+		this.commitBoardModelMutation(zone, item => { item.setFilledPolygons(fill); item.setFilled(fill.length > 0); }, 'Fill zone');
 		this.zoneFillState.set(zoneUuid, 'live');
-		this.commitAstMutation();
 		return true;
 	}
 
 	clearZoneFill(zoneUuid: string): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return false;
 		}
 		const zone = this.findZoneByUuid(zoneUuid);
@@ -5462,10 +5614,8 @@ this.clearSelectionAll();
 			return false;
 		}
 		this.pushUndoSnapshot('Clear zone fill');
-		zone.setFilledPolygons([]);
-		zone.setFilled(false);
+		this.commitBoardModelMutation(zone, item => { item.setFilledPolygons([]); item.setFilled(false); }, 'Clear zone fill');
 		this.zoneFillState.set(zoneUuid, 'cleared');
-		this.commitAstMutation();
 		return true;
 	}
 
@@ -5476,12 +5626,12 @@ this.clearSelectionAll();
 	 *  is real KiCad's own "<no net>" floating-copper-pour representation,
 	 *  not a sentinel this app invented. */
 	getBoardNets(): { id: number; name: string }[] {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return [];
 		}
-		return (this.boardRoot.rootElement.findChildrenByClass(KicadElementNet) as KicadElementNet[])
-			.map(net => ({ id: net.id, name: net.netName ?? '' }))
-			.sort((a, b) => a.id - b.id);
+		return (this.boardModel.netInfo.all() as any[])
+			.map((net: any) => ({ id: net.netCode, name: net.netName ?? '' }))
+			.sort((a: { id: number }, b: { id: number }) => a.id - b.id);
 	}
 
 	/** Reads an existing zone's current values into the same ZoneDraft shape
@@ -5519,9 +5669,9 @@ this.clearSelectionAll();
 		};
 	}
 
-	private applyZoneDraft(zone: KicadElementZone, draft: ZoneDraft): void {
+	private applyZoneDraft(zone: Zone, draft: ZoneDraft): void {
 		zone.setLayers(draft.layers);
-		zone.setNet(draft.netId, draft.netName);
+		zone.setNet(this.boardModel.netInfo.getNetByCode(draft.netId));
 		zone.setZoneName(draft.name);
 		zone.setLocked(draft.locked);
 		zone.setClearance(draft.clearanceMm);
@@ -5542,20 +5692,21 @@ this.clearSelectionAll();
 	 *  every other zone-fill entry point (fillZone/fillAllZones) already
 	 *  does, since the fill is the slow, worker-hosted half. */
 	createZoneFromOutline(points: readonly { x: number; y: number }[], draft: ZoneDraft): string | null {
-		if (!this.canAddBoardGraphic() || points.length < 3 || draft.layers.length === 0) {
+		if (!this.boardModel || points.length < 3 || draft.layers.length === 0) {
 			return null;
 		}
 		this.pushUndoSnapshot('Draw zone');
-		const zone = new KicadElementZone();
+		const zone = new Zone(this.boardModel);
 		this.applyZoneDraft(zone, draft);
-		zone.setUuid();
 		// Polygon comes after the zone settings in KiCad's canonical writer
 		// order. More importantly, setPolygon guarantees the grammar-bearing
 		// `(polygon (pts ...))` wrapper rather than an anonymous group.
 		zone.setPolygon(points.map(point => ({ x: point.x, y: point.y })));
-		this.boardRoot!.rootElement.addChild(zone);
+		const commit = new BOARD_COMMIT('Draw zone');
+		commit.Add(zone); commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
-		return zone.getUuid() ?? null;
+		return zone.getUuid();
 	}
 
 	/** Re-applies every Copper Zone Properties field to an already-placed
@@ -5566,7 +5717,7 @@ this.clearSelectionAll();
 	 *  one so this zone has a stable, collision-free fillZone() key from
 	 *  here on. */
 	updateZoneProperties(paintId: string, draft: ZoneDraft): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return false;
 		}
 		const zone = this.findZoneByUuid(paintId);
@@ -5574,11 +5725,7 @@ this.clearSelectionAll();
 			return false;
 		}
 		this.pushUndoSnapshot('Edit zone properties');
-		this.applyZoneDraft(zone, draft);
-		if (!zone.getUuid()) {
-			zone.setUuid();
-		}
-		this.commitAstMutation();
+		this.commitBoardModelMutation(zone, item => this.applyZoneDraft(item, draft), 'Edit zone properties');
 		return true;
 	}
 
@@ -5598,7 +5745,7 @@ this.clearSelectionAll();
 		};
 	}
 
-	private applyRuleAreaDraft(zone: KicadElementZone, draft: RuleAreaDraft): void {
+	private applyRuleAreaDraft(zone: Zone, draft: RuleAreaDraft): void {
 		zone.setLayers(draft.layers);
 		zone.setZoneName(draft.name);
 		zone.setLocked(draft.locked);
@@ -5607,21 +5754,22 @@ this.clearSelectionAll();
 	}
 
 	createRuleAreaFromOutline(points: readonly { x: number; y: number }[], draft: RuleAreaDraft): string | null {
-		if (!this.canAddBoardGraphic() || points.length < 3 || draft.layers.length === 0) {
+		if (!this.boardModel || points.length < 3 || draft.layers.length === 0) {
 			return null;
 		}
 		this.pushUndoSnapshot('Draw rule area');
-		const zone = new KicadElementZone();
+		const zone = new Zone(this.boardModel);
 		this.applyRuleAreaDraft(zone, draft);
-		zone.setUuid();
 		zone.setPolygon(points.map(point => ({ x: point.x, y: point.y })));
-		this.boardRoot!.rootElement.addChild(zone);
+		const commit = new BOARD_COMMIT('Draw rule area');
+		commit.Add(zone); commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
-		return zone.getUuid() ?? null;
+		return zone.getUuid();
 	}
 
 	updateRuleAreaProperties(paintId: string, draft: RuleAreaDraft): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return false;
 		}
 		const zone = this.findZoneByUuid(paintId);
@@ -5629,11 +5777,7 @@ this.clearSelectionAll();
 			return false;
 		}
 		this.pushUndoSnapshot('Edit rule area properties');
-		this.applyRuleAreaDraft(zone, draft);
-		if (!zone.getUuid()) {
-			zone.setUuid();
-		}
-		this.commitAstMutation();
+		this.commitBoardModelMutation(zone, item => this.applyRuleAreaDraft(item, draft), 'Edit rule area properties');
 		return true;
 	}
 
@@ -5676,7 +5820,6 @@ this.clearSelectionAll();
 		}
 		polygon.setPoints(
 			polygon.points.map((point, pointIndex) => pointIndex === index ? { x, y } : { x: point.x, y: point.y }));
-		this.commitAstMutation();
 		return true;
 	}
 
@@ -5699,7 +5842,6 @@ this.clearSelectionAll();
 		const nextIndex = (edgeIndex + 1) % polygon.points.length;
 		polygon.setPoints(polygon.points.map((point, index) => (index === edgeIndex || index === nextIndex)
 			? { x: point.x + dx, y: point.y + dy } : { x: point.x, y: point.y }));
-		this.commitAstMutation();
 		return true;
 	}
 
@@ -5752,7 +5894,6 @@ this.clearSelectionAll();
 		const next = points.map(point => ({ x: point.x, y: point.y }));
 		next.splice(insertIndex, 0, { x, y });
 		polygon.setPoints(next);
-		this.commitAstMutation();
 		return insertIndex;
 	}
 
@@ -5764,20 +5905,20 @@ this.clearSelectionAll();
 		runJobs: ZoneFillExecutor, onProgress?: (done: number, total: number) => void,
 		designSettings?: ZoneFillDesignSettings
 	): Promise<number> {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return 0;
 		}
-		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
+		const zones: Zone[] = (this.boardModel?.zones as Zone[] | undefined) ?? [];
 		// Rule areas ("keepouts") are never filled themselves — see fillZone's
 		// comment — they only ever act as exclusions for OTHER zones' fills.
 		const fillable = zones.filter(zone => !zone.isRuleArea() && zone.getPolygon().length >= 3);
 		if (fillable.length === 0) {
 			return 0;
 		}
-		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardRoot);
+		const boardOutlineNm = buildBoardOutlineRegionNm(this.boardModel);
 		const copperLayers = resolveCopperLayers(this.scene);
 		const extraExclusionsByLayer = buildEdgeExclusionsByLayer(
-			this.boardRoot, copperLayers, this.keepoutZoneInputs(zones), designSettings?.copperEdgeClearanceMm
+			this.boardModel, copperLayers, this.keepoutZoneInputs(zones), designSettings?.copperEdgeClearanceMm
 		);
 		// Real KiCad zones aren't required to carry a (uuid ...) child — it's
 		// an optional field many exported boards omit — so `getUuid()` alone
@@ -5793,13 +5934,15 @@ this.clearSelectionAll();
 			layers: zone.getLayers(), clearanceMm: resolveZoneClearanceMm(zone, designSettings),
 			priority: zone.getPriority(),
 			padConnection: this.zonePadConnectionSettings(zone),
-			islandRemoval: zone.getIslandRemovalMode()
+			minWidthMm: zone.getMinThickness(),
+			islandRemoval: zone.getIslandRemovalMode(),
+			cornerSmoothing: this.zoneCornerSmoothingSettings(zone)
 		}));
 		const jobs = buildZoneFillJobs(
 			zoneInputs, this.scene, boardOutlineNm, extraExclusionsByLayer, this.zonePriorityInputs(zones));
 		const results = await runJobs(jobs, onProgress);
 
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return 0;
 		}
 		const resultsByZone = new Map<string, { layer: string; points: MmPath }[]>();
@@ -5811,10 +5954,12 @@ this.clearSelectionAll();
 		}
 
 		this.pushUndoSnapshot('Fill all zones');
+		const commit = new BOARD_COMMIT('Fill all zones');
 		let filledCount = 0;
 		for (let i = 0; i < fillable.length; i++) {
 			const zone = fillable[i];
 			const fill = resultsByZone.get(jobIds[i]) ?? [];
+			commit.Modify(zone);
 			zone.setFilledPolygons(fill);
 			zone.setFilled(fill.length > 0);
 			const uuid = zone.getUuid();
@@ -5823,6 +5968,8 @@ this.clearSelectionAll();
 			}
 			filledCount++;
 		}
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return filledCount;
 	}
@@ -5830,15 +5977,17 @@ this.clearSelectionAll();
 	/** Clears every zone's fill in one undo step (real KiCad's "Clear All
 	 *  Zone Fills" Edit-menu action). */
 	clearAllZoneFills(): number {
-		if (this.documentType !== 'board' || !this.boardRoot?.rootElement) {
+		if (this.documentType !== 'board' || !this.boardModel) {
 			return 0;
 		}
-		const zones = this.boardRoot.rootElement.findChildrenByClass(KicadElementZone) as KicadElementZone[];
+		const zones: Zone[] = (this.boardModel?.zones as Zone[] | undefined) ?? [];
 		if (zones.length === 0) {
 			return 0;
 		}
 		this.pushUndoSnapshot('Clear all zone fills');
+		const commit = new BOARD_COMMIT('Clear all zone fills');
 		for (const zone of zones) {
+			commit.Modify(zone);
 			zone.setFilledPolygons([]);
 			zone.setFilled(false);
 			const uuid = zone.getUuid();
@@ -5846,6 +5995,8 @@ this.clearSelectionAll();
 				this.zoneFillState.set(uuid, 'cleared');
 			}
 		}
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return zones.length;
 	}
@@ -5919,18 +6070,120 @@ this.clearSelectionAll();
 	 * scene rebuild and mutate it later, because that makes undo state and the
 	 * rendered scene drift apart.
 	 */
-	mutateSymbolByPaintId(paintId: string, mutate: (symbol: KicadElementSymbol) => void): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+	/** Reckless-mode fix: after the blanket AST->model resync
+	 *  (pipeline.ts's rebuildSchScene/rebuildBoardSceneIfPending) went live,
+	 *  `schScene`/`scene` hitTestItems point at MODEL objects, not AST ones
+	 *  (buildSchematicFromModel/buildFromModel assign the model item as
+	 *  `element`) — so a caller that resolved its target off the paint
+	 *  scene and mutated it directly (the old behavior below) was silently
+	 *  editing a copy the very next resync would discard, since resync only
+	 *  ever flows AST->model. This is the reverse leg: mutate the live
+	 *  model via *_COMMIT (the real KiCad commit pattern), re-derive the
+	 *  AST from the result so any AST-only gesture that runs next still
+	 *  sees it, then let commitAstMutation()'s existing pipeline repaint —
+	 *  which re-resyncs the model from the AST we just wrote, so it ends up
+	 *  pointing at the same edit either way. */
+	private resyncSchematicAstFromModel(): void {
+		if (!this.schematicModel) return;
+		try {
+			const text = serializeSchematic(this.schematicModel);
+			this.schematicRoot = { rootElement: parseText(text) };
+		}
+		catch (e) {
+			console.debug('[KiOnline] AST resync from model failed', e);
+		}
+	}
+
+	/** Clipboard/import boundary only: promotes the newly edited canonical
+	 *  S-expression tree into the live model before the model-first repaint
+	 *  pipeline runs. Normal gestures flow in the opposite direction. */
+	private resyncSchematicModelFromAst(): boolean {
+		const root = this.schematicRoot?.rootElement;
+		if (!root || typeof root.write !== 'function') return false;
+		try {
+			this.schematicModel = parseSchematic(root.write());
+			return true;
+		}
+		catch (e) {
+			console.debug('[KiOnline] schematic model import from AST failed', e);
 			return false;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
-		const symbol = item?.element;
-		if (!(symbol instanceof KicadElementSymbol) && symbol?.name !== 'symbol') {
+	}
+
+	private resyncBoardAstFromModel(): void {
+		if (!this.boardModel) return;
+		try {
+			const text = serializeBoard(this.boardModel);
+			this.boardRoot = { rootElement: parseBoardText(text) };
+		}
+		catch (e) {
+			console.debug('[KiOnline] board AST resync from model failed', e);
+		}
+	}
+
+	/** Real commit for a mutate-by-paintId caller whose target came off the
+	 *  model-sourced paint scene. */
+	private commitSchematicModelMutation(item: any, mutate: (item: any) => void, label: string): void {
+		if (!this.schematicModel) {
+			return;
+		}
+		const screen = this.schematicModel.allScreens()[0];
+		const commit = new SCH_COMMIT(label);
+		commit.Modify(item);
+		mutate(item);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
+		this.commitAstMutation();
+	}
+
+	private commitBoardModelMutation(item: any, mutate: (item: any) => void, label: string): void {
+		if (!this.boardModel) {
+			return;
+		}
+		const commit = new BOARD_COMMIT(label);
+		commit.Modify(item);
+		mutate(item);
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
+		this.commitAstMutation();
+	}
+
+	/** Rip-and-replace: constructs+attaches a `shared/kicad-model` item
+	 *  directly via `SCH_COMMIT.Add()` — the real KiCad commit pattern —
+	 *  instead of building a `KicadElement*` AST node. The new default for
+	 *  every schematic "add" gesture. Requires a live `schematicModel`
+	 *  (always true once a document is loaded); returns null otherwise.
+	 *  Returns the new item's uuid directly (not the item — not every
+	 *  model class has its own `getUuid()` convenience method, but every
+	 *  `EdaItem` has the raw `.uuid` field this reads instead). */
+	private commitSchematicModelAdd<T extends SchematicItem>(
+		buildItem: (screen: any) => T, label: string
+	): string | null {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
+			return null;
+		}
+		this.pushUndoSnapshot();
+		const screen = this.schematicModel.allScreens()[0];
+		const item = buildItem(screen);
+		const commit = new SCH_COMMIT(label);
+		commit.Add(item);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
+		this.commitAstMutation();
+		return item.uuid.asString();
+	}
+
+	mutateSymbolByPaintId(paintId: string, mutate: (symbol: SchematicSymbol) => void): boolean {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
+			return false;
+		}
+		const uuid = this.uuidFromPaintId(paintId);
+		const symbol = uuid ? this.schematicModel.allScreens()[0]?.getItemByUuid(uuid) : null;
+		if (!(symbol instanceof SchematicSymbol)) {
 			return false;
 		}
 		this.pushUndoSnapshot('Property edit');
-		mutate(symbol as KicadElementSymbol);
-		this.commitAstMutation();
+		this.commitSchematicModelMutation(symbol, mutate, 'Property edit');
 		return true;
 	}
 
@@ -5951,13 +6204,14 @@ this.clearSelectionAll();
 	 * same library symbol too — that's real KiCad's own behavior for this
 	 * field, not a limitation of this method.
 	 */
-	mutateLibSymbolForInstance(paintId: string, mutate: (libSymbol: KicadElementSymbol) => void): boolean {
+	mutateLibSymbolForInstance(paintId: string, mutate: (libSymbol: LibSymbol) => void): boolean {
 		const libDef = this.findLibSymbolForInstance(paintId);
 		if (!libDef) {
 			return false;
 		}
 		this.pushUndoSnapshot('Property edit');
 		mutate(libDef);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -5968,21 +6222,16 @@ this.clearSelectionAll();
 	 *  from, not the placed instance (see mutateLibSymbolForInstance's doc
 	 *  comment). Callers must not retain the returned reference past the
 	 *  current render, same rule as every other paint-id lookup here. */
-	findLibSymbolForInstance(paintId: string): KicadElementSymbol | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !this.schScene) {
+	findLibSymbolForInstance(paintId: string): LibSymbol | null {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return null;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
-		const instance = item?.element;
-		if (!(instance instanceof KicadElementSymbol)) {
+		const uuid = this.uuidFromPaintId(paintId);
+		const instance = uuid ? this.schematicModel.allScreens()[0]?.getItemByUuid(uuid) : null;
+		if (!(instance instanceof SchematicSymbol)) {
 			return null;
 		}
-		const libId = instance.getLibId?.();
-		const libSymbols = this.schematicRoot.rootElement.findFirstChildByClass(KicadElementLibSymbols);
-		// (lib_name "X") overrides the lib_symbols lookup key when present —
-		// see SchematicPainter.buildSymbolInstance's identical fix for why.
-		const libLookupName = instance.getLibName?.() ?? libId;
-		return (libLookupName && libSymbols ? libSymbols.findSymbolByName(libLookupName) : null) ?? null;
+		return this.schematicModel.getLibSymbol(instance.getLibId()) ?? null;
 	}
 
 	/**
@@ -5997,13 +6246,13 @@ this.clearSelectionAll();
 	 */
 	mutateElementByPaintId(paintId: string, mutate: (element: any) => void): boolean {
 		const isSchematic = this.documentType === 'schematic';
-		if (isSchematic && (!this.schematicRoot || !this.schScene)) {
+		if (isSchematic && (!this.schematicModel || !this.schScene)) {
 			return false;
 		}
 		if (!isSchematic && this.documentType !== 'board') {
 			return false;
 		}
-		if (!isSchematic && (!this.boardRoot || !this.scene)) {
+		if (!isSchematic && (!this.boardModel || !this.scene)) {
 			return false;
 		}
 		const hitTestItems = isSchematic ? this.schScene!.hitTestItems : this.scene!.hitTestItems;
@@ -6012,8 +6261,12 @@ this.clearSelectionAll();
 			return false;
 		}
 		this.pushUndoSnapshot('Property edit');
-		mutate(item.element);
-		this.commitAstMutation();
+		if (isSchematic) {
+			this.commitSchematicModelMutation(item.element, mutate, 'Property edit');
+		}
+		else {
+			this.commitBoardModelMutation(item.element, mutate, 'Property edit');
+		}
 		return true;
 	}
 
@@ -6024,7 +6277,7 @@ this.clearSelectionAll();
 	 *  their own mixin/copy but share no common lockable base; anything
 	 *  else (graphics, text, zones without geometry) simply isn't locked. */
 	isBoardElementLocked(paintId: string): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene) {
 			return false;
 		}
 		const element = this.scene.hitTestItems.find(it => it.id === paintId)?.element as {
@@ -6044,12 +6297,13 @@ this.clearSelectionAll();
 	 * rebuild the scene N times for one logical edit — this pushes once and
 	 * rebuilds once. Returns the count actually mutated (0 means the caller
 	 * should not treat this as a real edit — e.g. skip the undo-adjacent
-	 * UI refresh). Dual-mode via activeRoot/activeScene (schematic OR
-	 * board) — e.g. the board context menu's Lock/Unlock action on a
+	 * UI refresh). Dual-mode via the canonical model plus activeScene
+	 * (schematic OR board) — e.g. the board context menu's Lock/Unlock action on a
 	 * multi-selection.
 	 */
 	mutateElementsByPaintIds(ids: string[], mutate: (element: any) => void): number {
-		if (!this.activeRoot || !this.activeScene) {
+		const isSchematic = this.documentType === 'schematic';
+		if (!this.activeScene || (isSchematic ? !this.schematicModel : !this.boardModel)) {
 			return 0;
 		}
 		const elements: any[] = [];
@@ -6063,33 +6317,88 @@ this.clearSelectionAll();
 			return 0;
 		}
 		this.pushUndoSnapshot('Property edit');
-		for (const el of elements) {
-			mutate(el);
+		if (isSchematic && this.schematicModel) {
+			const screen = this.schematicModel.allScreens()[0];
+			const commit = new SCH_COMMIT('Property edit');
+			for (const el of elements) commit.Modify(el);
+			for (const el of elements) mutate(el);
+			commit.Push(screen);
+			this.resyncSchematicAstFromModel();
+		}
+		else if (!isSchematic && this.boardModel) {
+			const commit = new BOARD_COMMIT('Property edit');
+			for (const el of elements) commit.Modify(el);
+			for (const el of elements) mutate(el);
+			commit.Push(this.boardModel);
+			this.resyncBoardAstFromModel();
 		}
 		this.commitAstMutation();
 		return elements.length;
 	}
 
-	/** Finds a placed symbol instance by its own paint-item id — unlike a
-	 *  Reference designator, an id is always unique to one instance, even
-	 *  when several units of one multi-unit part share a Reference (e.g.
-	 *  five "U1" instances for a quad-gate-plus-power-unit part). Callers
-	 *  that already have the id (e.g. from a hit-test at mousedown) should
-	 *  prefer it over the Reference-keyed lookup below for exactly this
-	 *  reason — see moveSymbolByRef/getSymbolPose/autoplaceSymbolFields'
-	 *  optional `instanceId` parameter. */
-	private findSymbolInstanceById(id: string): any | null {
-		const item = this.schScene?.hitTestItems.find(it => it.kind === 'symbol' && it.id === id);
-		return item?.element ?? null;
+	/**
+	 * Phase 4 pass 3: shared shadow-verify tail for the property-edit
+	 * bucket's callback-based mutators. Unlike every prior shadow-verify in
+	 * this migration, the mutation logic isn't known here — it's supplied
+	 * by the caller (the property panel's own callback, e.g. `current =>
+	 * current.setDnp(value)`). Confirmed by reading real callback bodies in
+	 * PropertyRenderers.ts that every one is a plain, unconditional,
+	 * duck-typed setter call with no `instanceof` guard — already written
+	 * generically enough to run against a model item unchanged. So this
+	 * replays the SAME callback reference against a freshly-parsed model
+	 * item via SCH_COMMIT, rather than re-deriving what changed. Verifies
+	 * only that the callback didn't throw and that the item survives a
+	 * serialize->reparse round trip — not exact field comparison, since
+	 * the callback's own shape is unknown here (same lighter bar as the
+	 * generic translate branch in pass 2).
+	 */
+	/** Reckless-mode cleanup: these three used to be discrete "do the real
+	 *  AST edit, then separately replay it against a throwaway parsed model
+	 *  to shadow-verify" wrappers, back when the model wasn't trusted for
+	 *  anything real. Now that mutateSymbolByPaintId/mutateElementByPaintId/
+	 *  mutateElementsByPaintIds themselves commit through *_COMMIT against
+	 *  the LIVE model (see commitSchematicModelMutation/
+	 *  commitBoardModelMutation above) whenever the target is model-sourced,
+	 *  there's nothing left to verify — the base methods already are the
+	 *  verified path. Kept as aliases only so the many existing call sites
+	 *  (property panels, context menus) don't all need renaming. */
+	mutateSymbolByPaintIdVerified(paintId: string, mutate: (symbol: SchematicSymbol) => void): boolean {
+		return this.mutateSymbolByPaintId(paintId, mutate);
+	}
+
+	mutateElementByPaintIdVerified(paintId: string, mutate: (element: any) => void): boolean {
+		return this.mutateElementByPaintId(paintId, mutate);
+	}
+
+	mutateElementsByPaintIdsVerified(ids: string[], mutate: (element: any) => void): number {
+		return this.mutateElementsByPaintIds(ids, mutate);
+	}
+
+
+	/** Rip-and-replace: resolves a placed symbol instance directly off the
+	 *  live model's screen — replaces both `findSymbolInstanceById`'s
+	 *  schScene-hitTestItems lookup (which resolves an item that's already
+	 *  a model object post-resync, but mutating it and calling
+	 *  commitAstMutation() alone silently discarded the edit — the exact
+	 *  bug class this rewrite retires by construction) and
+	 *  `SchematicPainter.findSymbolInstanceByReference`'s AST tree walk. */
+	private findModelSymbolInstance(reference: string, instanceId?: string): SchematicSymbol | null {
+		if (!this.schematicModel) {
+			return null;
+		}
+		const screen = this.schematicModel.allScreens()[0];
+		const instance = instanceId
+			? screen?.getItemByUuid(instanceId)
+			: screen?.items.find((i: any) => i instanceof SchematicSymbol && i.getReference?.() === reference);
+		return instance instanceof SchematicSymbol ? instance : null;
 	}
 
 	/**
 	 * Move (and optionally rotate) a placed symbol instance by its Reference
-	 * designator, then rebuild just the paint scene from the already-parsed
-	 * document (no text re-parse) and re-render. This is what makes editor
-	 * drag/rotate cheap enough to call on every frame — no server round trip,
-	 * no re-parsing, just mutate the AST node and re-run the paint pass.
-	 * Returns false if no symbol with that reference is in the loaded doc.
+	 * designator (or `instanceId`, preferred when the caller has it — see
+	 * findModelSymbolInstance), committed through the live model via
+	 * `SCH_COMMIT` — real KiCad's own edit-tool pattern. Returns false if no
+	 * matching symbol is in the loaded doc.
 	 *
 	 * Instance property fields (Reference/Value/…) are stored in absolute
 	 * schematic coordinates in `.kicad_sch`, so they are translated (and
@@ -6097,15 +6406,29 @@ this.clearSelectionAll();
 	 * the body — matching KiCad's own move behavior.
 	 */
 	moveSymbolByRef(reference: string, x: number, y: number, rotation?: number, instanceId?: string): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return false;
 		}
-		const instance = instanceId
-			? this.findSymbolInstanceById(instanceId)
-			: this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
-		if (!instance || typeof instance.setOrigin !== 'function') {
+		const instance = this.findModelSymbolInstance(reference, instanceId);
+		if (!instance) {
 			return false;
 		}
+		const screen = this.schematicModel.allScreens()[0];
+		const commit = new SCH_COMMIT('Move/Rotate Symbol');
+		commit.Modify(instance);
+		this.applySymbolOriginDelta(instance, x, y, rotation);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
+		this.commitAstMutation();
+		return true;
+	}
+
+	/** Core move/rotate math shared by `moveSymbolByRef` (AST) and
+	 *  `shadowVerifySymbolMoveViaModel` (model) — duck-typed against
+	 *  `getOrigin()/setOrigin()/getProperties()`, which both the AST symbol
+	 *  wrapper and the model's `SchematicSymbol`/`SchField` implement
+	 *  identically, so this one implementation drives either. */
+	private applySymbolOriginDelta(instance: any, x: number, y: number, rotation?: number): void {
 		const current = typeof instance.getOrigin === 'function'
 			? instance.getOrigin()
 			: { x: 0, y: 0, rotation: 0 };
@@ -6148,15 +6471,39 @@ this.clearSelectionAll();
 		}
 
 		instance.setOrigin(x, y, newRot);
+	}
 
-		this.commitAstMutation();
-		return true;
+	/**
+	 * Phase 3 proof-of-concept, extended by Phase 5's first real cutover
+	 * (KiOnline-only behavior change, not a KiCad port — called out
+	 * explicitly since this is a genuine contract change from "purely
+	 * observational"): same edit as `moveSymbolByRef`, but ALSO replays the
+	 * identical mutation through a freshly-parsed `Schematic` model via
+	 * `SCH_COMMIT`, then round-trips it through `SchematicSerializer`. If
+	 * that verification succeeds, the verified model is now ALSO used as
+	 * what's actually painted and saved (`useVerifiedModelForLiveDocument`)
+	 * — the first gesture where a real user's screen/save depends on the
+	 * model. On any mismatch or exception, today's AST-painted result from
+	 * `moveSymbolByRef`'s own commit is left untouched — same fallback
+	 * discipline as `buildInitialSchScene`. Deliberately NOT used by
+	 * `moveSymbolByRef`'s per-frame drag callers (see that method's doc
+	 * comment): a fresh parse + SCH_COMMIT + serialize + repaint on every
+	 * drag frame would be a real perf regression.
+	 */
+	/** Reckless-mode cleanup: moveSymbolByRef() mutates the AST directly and
+	 *  commitAstMutation() already resyncs schematicModel from it correctly
+	 *  — by the time this wrapper used to run its shadow-verify, the model
+	 *  was ALREADY the verified result, making the whole
+	 *  verify-then-substitute dance provably redundant. Kept as an alias;
+	 *  per-frame drag callers still use the plain moveSymbolByRef directly. */
+	moveSymbolByRefVerified(reference: string, x: number, y: number, rotation?: number, instanceId?: string): boolean {
+		return this.moveSymbolByRef(reference, x, y, rotation, instanceId);
 	}
 
 	/**
 	 * Move a hierarchical sheet box by absolute position (mirrors
 	 * moveSymbolByRef's shape, minus the rotation handling real KiCad has no
-	 * equivalent of for sheets — see KicadElementSheet's doc comment).
+	 * equivalent of for sheets).
 	 * Sheet properties (Sheetname/Sheetfile/custom) AND sheet pins are both
 	 * stored at ABSOLUTE coordinates in the file (confirmed via
 	 * SchematicPainter.buildSheet's own read path, which uses each one's own
@@ -6166,36 +6513,42 @@ this.clearSelectionAll();
 	 * behind at their old position while just the box outline moved.
 	 */
 	moveSheetById(paintId: string, x: number, y: number): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return false;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
-		const sheet = item?.element;
-		if (!(sheet instanceof KicadElementSheet)) {
+		const uuid = this.uuidFromPaintId(paintId);
+		const screen = this.schematicModel.allScreens()[0];
+		const sheet = uuid ? screen?.getItemByUuid(uuid) : null;
+		if (!(sheet instanceof SchematicSheet)) {
 			return false;
 		}
-		const { x: oldX, y: oldY } = sheet.getPosition();
-		const dx = x - oldX, dy = y - oldY;
+		this.commitSchematicModelMutation(sheet, (el) => this.applySheetMove(el, x, y), 'Move sheet');
+		return true;
+	}
+
+	/** Core model sheet-move math extracted from moveSheetById(). Shifts
+	 *  the sheet box, its fields, and its pins by the same delta — all
+	 *  stored at ABSOLUTE coordinates in the file. */
+	private applySheetMove(sheet: SchematicSheet, x: number, y: number): boolean {
+		const oldPos = sheet.getOrigin();
+		const dx = x - oldPos.x, dy = y - oldPos.y;
 		if (dx !== 0 || dy !== 0) {
-			sheet.setPosition(x, y);
-			const props: any[] = typeof sheet.getProperties === 'function' ? sheet.getProperties() : [];
-			for (const prop of props) {
-				if (!prop || typeof prop.getOrigin !== 'function' || typeof prop.setOrigin !== 'function') {
-					continue;
-				}
+			sheet.setOrigin(x, y);
+			for (const prop of sheet.getProperties()) {
 				const po = prop.getOrigin();
 				prop.setOrigin(Number(po.x ?? 0) + dx, Number(po.y ?? 0) + dy, po.rotation ?? 0);
 			}
-			for (const pin of sheet.findChildrenByClass(KicadElementPin)) {
-				if (typeof pin.getOrigin !== 'function' || typeof pin.setOrigin !== 'function') {
-					continue;
-				}
+			for (const pin of sheet.pins) {
 				const po = pin.getOrigin();
 				pin.setOrigin(Number(po.x ?? 0) + dx, Number(po.y ?? 0) + dy, po.rotation ?? 0);
 			}
 		}
-		this.commitAstMutation();
 		return true;
+	}
+
+	/** Compatibility alias: moveSheetById() already commits the live model. */
+	private moveSheetByIdVerified(paintId: string, x: number, y: number): boolean {
+		return this.moveSheetById(paintId, x, y);
 	}
 
 	/**
@@ -6259,17 +6612,30 @@ this.clearSelectionAll();
 	 * paragraph exists to prevent a repeat of.
 	 */
 	moveSheetPinById(paintId: string, x: number, y: number): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return false;
 		}
-		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
-		const pin = item?.element;
-		if (!(pin instanceof KicadElementPin) || !(pin.parent instanceof KicadElementSheet) || typeof pin.setOrigin
-			!== 'function') {
+		const uuid = this.uuidFromPaintId(paintId);
+		const screen = this.schematicModel.allScreens()[0];
+		const sheet = screen?.items.find(item =>
+			item instanceof SchematicSheet && item.pins.some(pin => pin.getUuid() === uuid));
+		const pin = sheet instanceof SchematicSheet
+			? sheet.pins.find(candidate => candidate.getUuid() === uuid)
+			: null;
+		if (!pin || !(sheet instanceof SchematicSheet)) {
 			return false;
 		}
-		const sheet = pin.parent;
-		const { x: sx, y: sy } = sheet.getPosition();
+		this.commitSchematicModelMutation(pin, (el) => this.applySheetPinEdgeConstrain(el, sheet, x, y), 'Move sheet pin');
+		return true;
+	}
+
+	private uuidFromPaintId(paintId: string): string | null {
+		return paintId.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? null;
+	}
+
+	/** Model implementation of SCH_SHEET_PIN::ConstrainOnEdge. */
+	private applySheetPinEdgeConstrain(pin: SchematicSheetPin, sheet: SchematicSheet, x: number, y: number): boolean {
+		const { x: sx, y: sy } = sheet.getOrigin();
 		const { width: sw, height: sh } = sheet.getSize();
 		const left = sx, right = sx + sw, top = sy, bottom = sy + sh;
 
@@ -6295,8 +6661,17 @@ this.clearSelectionAll();
 
 		pin.setOrigin(px, py, edgeRotation[nearest.side]);
 		pin.setJustify(edgeJustify[nearest.side], 'middle');
-		this.commitAstMutation();
 		return true;
+	}
+
+	/**
+	 * Phase 4 pass 2: discrete-gesture-only shadow-verify sibling of
+	 * moveSheetPinById (also called every drag frame — untouched, same
+	 * reasoning as moveSheetByIdVerified above; only alignSelection's
+	 * verified dispatch calls this).
+	 */
+	private moveSheetPinByIdVerified(paintId: string, x: number, y: number): boolean {
+		return this.moveSheetPinById(paintId, x, y);
 	}
 
 	/**
@@ -6312,28 +6687,27 @@ this.clearSelectionAll();
 		fieldRot: number;
 		justify: 'left' | 'middle';
 	}, instanceId?: string): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return false;
 		}
-		const instance: any = instanceId
-			? this.findSymbolInstanceById(instanceId)
-			: this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
-		if (!instance || typeof instance.getPropertyByName !== 'function') {
+		const instance = this.findModelSymbolInstance(reference, instanceId);
+		if (!instance) {
 			return false;
 		}
+		const screen = this.schematicModel.allScreens()[0];
+		const commit = new SCH_COMMIT('Autoplace Fields');
+		commit.Modify(instance);
 		const place = (name: string, fx: number, fy: number): void => {
-			const prop = instance.getPropertyByName(name);
-			if (!prop || typeof prop.setOrigin !== 'function') {
+			const prop = instance.getProperties().find(f => f.getName() === name);
+			if (!prop) {
 				return;
 			}
 			prop.setOrigin(fx, fy, layout.fieldRot);
-			if (typeof prop.setJustify === 'function') {
-				prop.setJustify(layout.justify);
-			}
 		};
 		place('Reference', layout.refX, layout.refY);
 		place('Value', layout.valX, layout.valY);
-
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -6344,49 +6718,38 @@ this.clearSelectionAll();
 	 * unchanged — only the attach point/field anchor moves.
 	 */
 	moveLabelById(paintId: string, x: number, y: number, rotation?: number): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return false;
 		}
-		const items = this.schScene?.hitTestItems ?? [];
-		const item = items.find(it => it.id === paintId || it.id.startsWith(`${ paintId }:`));
-		const fieldName = item?.fieldName ?? paintId.match(/:prop:(.+)$/)?.[1] ?? null;
+		const screen = this.schematicModel.allScreens()[0];
+		const uuid = this.uuidFromPaintId(paintId);
+		const owner = uuid ? screen?.getItemByUuid(uuid) : null;
+		const fieldName = paintId.match(/:prop:(.+)$/)?.[1] ?? null;
 		if (fieldName) {
-			const instance = item?.element;
-			if (instance && typeof instance.getPropertyByName === 'function') {
-				const prop = instance.getPropertyByName(fieldName);
+			if (owner instanceof SchematicSymbol) {
+				const prop = owner.getProperties().find(field => field.getName() === fieldName);
 				if (prop && typeof prop.getOrigin === 'function' && typeof prop.setOrigin === 'function') {
 					const cur = prop.getOrigin?.() ?? { rotation: 0 };
-					prop.setOrigin(x, y, rotation ?? cur.rotation ?? 0);
-					this.commitAstMutation();
+					this.commitSchematicModelMutation(prop, p => p.setOrigin(x, y, rotation ?? cur.rotation ?? 0), 'Move label');
 					return true;
 				}
 			}
 		}
-		const el = item?.element;
-		if (!el || typeof el.setOrigin !== 'function') {
-			// Fall back: search root children by uuid prefix in paint id.
-			const uuid = paintId.replace(/:(flag|text)$/, '');
-			const root = this.schematicRoot.rootElement;
-			const kids: any[] = root?.children ?? [];
-			for (const kid of kids) {
-				if (
-					(kid?.name === 'global_label' || kid?.name === 'hierarchical_label' || kid?.name === 'label')
-					&& typeof kid.getUuid === 'function'
-					&& String(kid.getUuid()) === uuid
-					&& typeof kid.setOrigin === 'function'
-				) {
-					const cur = kid.getOrigin?.() ?? { rotation: 0 };
-					kid.setOrigin(x, y, rotation ?? cur.rotation ?? 0);
-					this.commitAstMutation();
-					return true;
-				}
-			}
+		if (!owner || typeof (owner as any).setOrigin !== 'function') {
 			return false;
 		}
-		const cur = typeof el.getOrigin === 'function' ? el.getOrigin() : { rotation: 0 };
-		el.setOrigin(x, y, rotation ?? cur.rotation ?? 0);
-		this.commitAstMutation();
+		const cur = typeof (owner as any).getOrigin === 'function' ? (owner as any).getOrigin() : { rotation: 0 };
+		this.commitSchematicModelMutation(owner, (item: any) =>
+			item.setOrigin(x, y, rotation ?? cur.rotation ?? 0), 'Move label');
 		return true;
+	}
+
+	/** Compatibility alias: moveLabelById() already commits the live model.
+	 *  instanceId/fieldName are kept as
+	 *  unused params so the one call site (alignSelection) doesn't need
+	 *  touching. */
+	private moveLabelByIdVerified(paintId: string, x: number, y: number, rotation: number | undefined, _instanceId: string | null, _fieldName: string | null): boolean {
+		return this.moveLabelById(paintId, x, y, rotation);
 	}
 
 	/**
@@ -6394,21 +6757,13 @@ this.clearSelectionAll();
 	 * (not library definitions). Used by circuit edit without a recipe seed.
 	 */
 	listSymbolPoses(): SymbolPoseInfo[] {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return [];
 		}
 		const out: SymbolPoseInfo[] = [];
-		const root = this.schematicRoot.rootElement;
-		const kids: any[] = root?.children ?? [];
-		for (const instance of kids) {
-			if (
-				!instance
-				|| instance.name !== 'symbol'
-				|| typeof instance.getReference !== 'function'
-				|| typeof instance.getOrigin !== 'function'
-			) {
-				continue;
-			}
+		const screen = this.schematicModel.allScreens()[0];
+		const instances: SchematicSymbol[] = (screen?.items ?? []).filter((i: any) => i instanceof SchematicSymbol);
+		for (const instance of instances) {
 			const ref = String(instance.getReference() ?? '').trim();
 			if (!ref) {
 				continue;
@@ -6429,13 +6784,11 @@ this.clearSelectionAll();
 	}
 
 	getSymbolPose(reference: string, instanceId?: string): SymbolPoseInfo | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
 			return null;
 		}
-		const instance = instanceId
-			? this.findSymbolInstanceById(instanceId)
-			: this.schematicPainter.findSymbolInstanceByReference(this.schematicRoot, reference);
-		if (!instance || typeof instance.getOrigin !== 'function') {
+		const instance = this.findModelSymbolInstance(reference, instanceId);
+		if (!instance) {
 			return null;
 		}
 		const origin = instance.getOrigin();
@@ -6465,18 +6818,6 @@ this.clearSelectionAll();
 	// (e.g. Router.ts's emitWireSexpr) — 0 means "KiCad's default rendered
 	// width", not invisible.
 
-	/** setUuid + addChild only — no undo push, no commit. Shared by
-	 *  attachToSchematicRoot (one element, one undo step) and addWireLike
-	 *  (wire + 0-2 auto-junctions, still one undo step). Just assigns
-	 *  identity and delegates the actual splice to insertRootChild — split
-	 *  out so a clone with no setUuid() of its own (a rule-area, whose uuid
-	 *  lives on its nested polyline instead) can assign identity its own
-	 *  way and still reuse the insertion step unchanged. */
-	private attachElement(el: { setUuid(u?: string): void }): void {
-		el.setUuid();
-		this.insertRootChild(el);
-	}
-
 	/** Inserts just before the first trailing `sheet_instances`/
 	 *  `embedded_files` element instead of unconditionally appending —
 	 *  real KiCad always writes those last, and a naive append (this
@@ -6501,70 +6842,45 @@ this.clearSelectionAll();
 		}
 	}
 
-	private attachToSchematicRoot(el: { setUuid(u?: string): void }): string | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
-			return null;
-		}
-		this.pushUndoSnapshot();
-		this.attachElement(el);
-		this.commitAstMutation();
-		return (el as unknown as { getUuid(): string | undefined }).getUuid() ?? null;
-	}
-
 	/** One wire segment (2 points only — see buildWireLike, which reads just
 	 *  points[0]/[1]). A multi-segment hand-drawn wire is one call per click. */
 	addWire(x1: number, y1: number, x2: number, y2: number, strokeWidth = 0): string | null {
-		return this.addWireLike(() => new KicadElementWire(), x1, y1, x2, y2, strokeWidth, 'wire');
+		return this.addWireLikeModel(x1, y1, x2, y2, strokeWidth, 'wire');
 	}
 
-	/** Same shape as addWire — KicadElementBus/its rendering already existed
-	 *  (this codebase already reads real bus wires), only creation was missing. */
+	/** Same shape as addWire. */
 	addBus(x1: number, y1: number, x2: number, y2: number, strokeWidth = 0): string | null {
-		return this.addWireLike(() => new KicadElementBus(), x1, y1, x2, y2, strokeWidth, 'bus');
+		return this.addWireLikeModel(x1, y1, x2, y2, strokeWidth, 'bus');
 	}
 
-	/** Shared addWire/addBus tail: commit the new segment, then check BOTH of
-	 *  its own endpoints for a real KiCad-style auto-junction (see
-	 *  junctionNeededAt's doc comment) and add one where needed — all under
-	 *  the SAME undo snapshot as the wire itself, so one Ctrl+Z removes the
-	 *  wire and any junction it triggered together, not as two separate
-	 *  steps. Needs a commit BEFORE the junction check (not just the raw AST
-	 *  child-add) because junctionNeededAt reads already-resolved pin
-	 *  positions off schScene, which only exist post-build. */
-	private addWireLike(
-		makeEl: () => {
-			setPoints(pts: { x: number; y: number }[]): void;
-			setStroke(w: number, t: 'default'): void;
-			setUuid(u?: string): void;
-			getUuid(): string | undefined
-		},
+	/** Rip-and-replace: builds a `SchWire` directly and commits it via
+	 *  `SCH_COMMIT.Add()`, then checks both endpoints for a real KiCad-style
+	 *  auto-junction (see junctionNeededAt's doc comment) and adds one
+	 *  where needed as a separate commit — matches the old AST version's
+	 *  "one undo snapshot per add call" shape. */
+	private addWireLikeModel(
 		x1: number, y1: number, x2: number, y2: number, strokeWidth: number, kind: 'wire' | 'bus'
 	): string | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement) {
+		const wire = this.commitSchematicModelAdd(screen => {
+			const w = new SchWire(screen, new KicadUuid(), kind);
+			w.setStartEnd(x1, y1, x2, y2);
+			w.setStroke(strokeWidth, 'default');
+			return w;
+		}, kind === 'bus' ? 'Add Bus' : 'Add Wire');
+		if (!wire) {
 			return null;
 		}
-		this.pushUndoSnapshot();
-		const el = makeEl();
-		el.setPoints([{ x: x1, y: y1 }, { x: x2, y: y2 }]);
-		el.setStroke(strokeWidth, 'default');
-		this.attachElement(el);
-		this.commitAstMutation();
-
-		let addedJunction = false;
 		for (const [px, py] of [[x1, y1], [x2, y2]] as [number, number][]) {
 			if (this.junctionNeededAt(px, py, kind)) {
-				const junction = new KicadElementJunction();
-				junction.setOrigin(px, py);
-				junction.setDiameter(0);
-				junction.setColor(0, 0, 0, 0);
-				this.attachElement(junction);
-				addedJunction = true;
+				this.commitSchematicModelAdd(screen => {
+					const j = new SchJunction(screen, new KicadUuid());
+					j.setOrigin(px, py);
+					j.setDiameter(0);
+					return j;
+				}, 'Add Junction');
 			}
 		}
-		if (addedJunction) {
-			this.commitAstMutation();
-		}
-		return el.getUuid() ?? null;
+		return wire;
 	}
 
 	/**
@@ -6639,149 +6955,172 @@ this.clearSelectionAll();
 	/** One-click placement like junction/no-connect. Fixed default 45° stub
 	 *  direction (up-right) — v1 simplification, no direction-picker UI. */
 	addBusEntry(x: number, y: number, dx = 2.54, dy = -2.54, strokeWidth = 0): string | null {
-		const entry = new KicadElementBusEntry();
-		entry.setOrigin(x, y);
-		entry.setSize(dx, dy);
-		entry.setStroke(strokeWidth, 'default');
-		return this.attachToSchematicRoot(entry);
+		const item = this.commitSchematicModelAdd(screen => {
+			const entry = new SchBusEntry(screen, new KicadUuid());
+			entry.setStartEnd(x, y, x + dx, y + dy);
+			entry.setStroke(strokeWidth, 'default');
+			return entry;
+		}, 'Add Bus Entry');
+		return item;
 	}
 
 	addJunction(x: number, y: number): string | null {
-		const junction = new KicadElementJunction();
-		junction.setOrigin(x, y);
-		junction.setDiameter(0);
-		junction.setColor(0, 0, 0, 0);
-		return this.attachToSchematicRoot(junction);
+		const item = this.commitSchematicModelAdd(screen => {
+			const junction = new SchJunction(screen, new KicadUuid());
+			junction.setOrigin(x, y);
+			junction.setDiameter(0);
+			return junction;
+		}, 'Add Junction');
+		return item;
 	}
 
 	addNoConnect(x: number, y: number): string | null {
-		const nc = new KicadElementNoConnect();
-		nc.setOrigin(x, y);
-		return this.attachToSchematicRoot(nc);
+		const item = this.commitSchematicModelAdd(screen => {
+			const nc = new SchNoConnect(screen, new KicadUuid());
+			nc.setOrigin(x, y);
+			return nc;
+		}, 'Add No Connect');
+		return item;
 	}
 
-	/** No standalone "line" tag in the schematic grammar — a 2-point polyline. */
+	/** No standalone "line" tag in the schematic grammar — a 2-point polyline
+	 *  (SchShape with shapeKind SEGMENT). */
 	addGraphicLine(x1: number, y1: number, x2: number, y2: number, strokeWidth = 0): string | null {
-		const line = new KicadElementPolyline();
-		line.setPoints([{ x: x1, y: y1 }, { x: x2, y: y2 }]);
-		line.setStroke(strokeWidth, 'default');
-		return this.attachToSchematicRoot(line);
+		const item = this.commitSchematicModelAdd(screen => {
+			const s = new SchShape(screen, new KicadUuid());
+			s.shapeKind = SchShapeType.SEGMENT;
+			s.layer = SchLayerId.LAYER_NOTES;
+			s.setStartEnd(x1, y1, x2, y2);
+			s.setStroke(strokeWidth, 'default');
+			return s;
+		}, 'Add Line');
+		return item;
 	}
 
 	addGraphicRect(x1: number, y1: number, x2: number, y2: number, strokeWidth = 0): string | null {
-		const rect = new KicadElementRectangle(x1, y1, x2, y2);
-		rect.setStroke(strokeWidth, 'default');
-		return this.attachToSchematicRoot(rect);
+		const item = this.commitSchematicModelAdd(screen => {
+			const s = new SchShape(screen, new KicadUuid());
+			s.shapeKind = SchShapeType.RECTANGLE;
+			s.layer = SchLayerId.LAYER_NOTES;
+			s.setStartEnd(x1, y1, x2, y2);
+			s.setStroke(strokeWidth, 'default');
+			return s;
+		}, 'Add Rectangle');
+		return item;
 	}
 
 	addGraphicCircle(cx: number, cy: number, radius: number, strokeWidth = 0): string | null {
-		const circle = new KicadElementCircle(cx, cy, radius);
-		circle.setStroke(strokeWidth, 'default');
-		return this.attachToSchematicRoot(circle);
+		const item = this.commitSchematicModelAdd(screen => {
+			const s = new SchShape(screen, new KicadUuid());
+			s.shapeKind = SchShapeType.CIRCLE;
+			s.layer = SchLayerId.LAYER_NOTES;
+			s.setCenter(cx, cy);
+			s.setRadius(radius);
+			s.setStroke(strokeWidth, 'default');
+			return s;
+		}, 'Add Circle');
+		return item;
 	}
 
 	addGraphicArc(
 		sx: number, sy: number, mx: number, my: number, ex: number, ey: number, strokeWidth = 0
 	): string | null {
-		const arc = new KicadElementArc();
-		arc.setStartMidEnd(sx, sy, mx, my, ex, ey);
-		arc.setStroke(strokeWidth, 'default');
-		return this.attachToSchematicRoot(arc);
+		const item = this.commitSchematicModelAdd(screen => {
+			const s = new SchShape(screen, new KicadUuid());
+			s.shapeKind = SchShapeType.ARC;
+			s.layer = SchLayerId.LAYER_NOTES;
+			s.setStartMidEnd(sx, sy, mx, my, ex, ey);
+			s.setStroke(strokeWidth, 'default');
+			return s;
+		}, 'Add Arc');
+		return item;
 	}
 
 	addGraphicBezier(points: { x: number; y: number }[], strokeWidth = 0): string | null {
 		if (points.length !== 4) {
 			return null;
 		}
-		const bezier = new KicadElementBezier();
-		bezier.setPoints(points.map(point => ({ x: point.x, y: point.y })));
-		bezier.setStroke(strokeWidth, 'default');
-		return this.attachToSchematicRoot(bezier);
+		const item = this.commitSchematicModelAdd(screen => {
+			const s = new SchShape(screen, new KicadUuid());
+			s.shapeKind = SchShapeType.BEZIER;
+			s.layer = SchLayerId.LAYER_NOTES;
+			// setPoints() only replaces `points` for an EXISTING poly/bezier
+			// (it checks `this.points.length` first, else treats the call as
+			// a 2-point line) — a fresh shape's `points` array starts empty,
+			// so seed one dummy point first to take the right branch.
+			s.points = [new Vec2i(0, 0)];
+			s.setPoints(points.map(p => ({ x: p.x, y: p.y })));
+			s.setStroke(strokeWidth, 'default');
+			return s;
+		}, 'Add Bezier');
+		return item;
 	}
 
 	addGraphicTable(x: number, y: number, rows: number, columns: number, values: string[][]): string | null {
 		if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1) {
 			return null;
 		}
-		const table = new KicadElementTable();
-		const cells = new (class extends KicadElementTableCell {
-			override name = 'cells';
-		})();
-		// The `cells` container is a named wrapper, not a table_cell itself.
-		(table as any).children.pop();
-		cells.name = 'cells';
-		table.addChild(cells);
-		table.setSimpleChild('column_count', columns, 'numeric');
-		const cellWidth = 25.4;
-		const cellHeight = 12.7;
-		for (let row = 0; row < rows; row++) {
-			for (let column = 0; column < columns; column++) {
-				const cell = new KicadElementTableCell();
-				const value = values[row]?.[column] ?? '';
-				cell.setAttribute({ value, format: 'quoted' }, 0);
-				cell.value = value;
-				cell.addChild(new KicadElementAt(x + column * cellWidth, y + row * cellHeight));
-				cell.addChild(new KicadElementSize(cellWidth, cellHeight));
-				cell.setSimpleChild('margins', 0.9525, 'numeric');
-				const margins = cell.findFirstChildByName('margins')!;
-				margins.setAttribute({ value: 0.9525, format: 'numeric' }, 1);
-				margins.setAttribute({ value: 0.9525, format: 'numeric' }, 2);
-				margins.setAttribute({ value: 0.9525, format: 'numeric' }, 3);
-				cell.setSimpleChild('span', 1, 'numeric');
-				cell.findFirstChildByName('span')!.setAttribute({ value: 1, format: 'numeric' }, 1);
-				cells.addChild(cell);
+		return this.commitSchematicModelAdd(screen => {
+			const table = new SchTable(screen);
+			table.columnCount = columns;
+			table.borderExternal = true;
+			table.borderHeader = false;
+			table.borderStrokeWidth = mmToIU(schIuScale, 0.15);
+			table.borderStrokeType = 'solid';
+			table.separatorRows = true;
+			table.separatorCols = true;
+			table.separatorStrokeWidth = mmToIU(schIuScale, 0.15);
+			table.separatorStrokeType = 'solid';
+			const cellWidth = 25.4;
+			const cellHeight = 12.7;
+			const marginIu = mmToIU(schIuScale, 0.9525);
+			for (let row = 0; row < rows; row++) {
+				for (let column = 0; column < columns; column++) {
+					const cell = new SchTableCell(table);
+					cell.setText(values[row]?.[column] ?? '');
+					cell.setOrigin(x + column * cellWidth, y + row * cellHeight, 0);
+					cell.size = new Vec2i(mmToIU(schIuScale, cellWidth), mmToIU(schIuScale, cellHeight));
+					cell.margins = [marginIu, marginIu, marginIu, marginIu];
+					cell.colSpan = 1;
+					cell.rowSpan = 1;
+					table.cells.push(cell);
+				}
 			}
-		}
-		const stroke = table.findOrCreateChildByName('border');
-		stroke.setSimpleChild('external', true, 'boolean');
-		stroke.setSimpleChild('header', false, 'boolean');
-		const strokeChild = stroke.findOrCreateChildByName('stroke');
-		strokeChild.setSimpleChild('width', 0.15, 'numeric');
-		strokeChild.setSimpleChild('type', 'solid', 'literal');
-		const separators = table.findOrCreateChildByName('separators');
-		separators.setSimpleChild('rows', true, 'boolean');
-		separators.setSimpleChild('cols', true, 'boolean');
-		const separatorStroke = separators.findOrCreateChildByName('stroke');
-		separatorStroke.setSimpleChild('width', 0.15, 'numeric');
-		separatorStroke.setSimpleChild('type', 'solid', 'literal');
-		return this.attachToSchematicRoot(table);
+			return table;
+		}, 'Add Table');
 	}
 
 	addRuleArea(points: { x: number; y: number }[]): string | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || points.length < 3) {
+		if (points.length < 3) {
 			return null;
 		}
-		this.pushUndoSnapshot();
-		// Typed setters (not setSimpleChild's generic-KicadElement path) —
-		// using the untyped path here left a rule area's 4 boolean flags as
-		// plain KicadElement instances instead of KicadElementExcludeFromSim/
-		// InBom/OnBoard/Dnp, so a later findOrCreateChildByClass() lookup
-		// (e.g. the property panel's DNP checkbox) couldn't find the
-		// existing one — it created a SECOND, differently-typed child with
-		// the same tag name instead of updating this one, and both got
-		// serialized (a real duplicate-(dnp ...)-tag bug, caught via the
-		// property panel actually trying to toggle one).
-		const area = new KicadElementRuleArea();
-		area.setExcludedFromSim(false);
-		area.setInBom(true);
-		area.setOnBoard(true);
-		area.setDnp(false);
-		const polyline = new KicadElementPolyline();
-		polyline.setPoints(points.map(point => ({ x: point.x, y: point.y })));
-		polyline.setStroke(0, 'dash');
-		polyline.setFill('none');
-		polyline.setUuid();
-		area.addChild(polyline);
-		this.schematicRoot!.rootElement.addChild(area);
-		this.commitAstMutation();
-		return polyline.getUuid() ?? null;
+		const item = this.commitSchematicModelAdd(screen => {
+			const area = new SchRuleArea(screen);
+			area.setExcludedFromSim(false);
+			area.setInBom(true);
+			area.setOnBoard(true);
+			area.setDnp(false);
+			const polyline = area.polyline;
+			polyline.shapeKind = SchShapeType.POLY;
+			polyline.points = [new Vec2i(0, 0)];
+			polyline.setPoints(points.map(p => ({ x: p.x, y: p.y })));
+			polyline.setStroke(0, 'dash');
+			polyline.setFill('none');
+			return area;
+		}, 'Add Rule Area');
+		return item;
 	}
 
 	addGraphicText(x: number, y: number, value: string, rotation = 0): string | null {
-		const text = new KicadElementText(value);
-		text.setOrigin(x, y, rotation);
-		text.setFont(1.27, 1.27);
-		return this.attachToSchematicRoot(text);
+		const item = this.commitSchematicModelAdd(screen => {
+			const text = new SchText(screen);
+			text.layer = SchLayerId.LAYER_NOTES;
+			text.setText(value);
+			text.setOrigin(x, y, rotation);
+			text.setFont(1.27, 1.27);
+			return text;
+		}, 'Add Text');
+		return item;
 	}
 
 	/**
@@ -6796,17 +7135,14 @@ this.clearSelectionAll();
 		if (!data || !mimeType.startsWith('image/')) {
 			return null;
 		}
-		const image = new KicadElementImage();
-		image.setOrigin(x, y, 0);
-		image.setScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
-		// Keep the canonical KiCad child order: at, scale, uuid, data.
-		// attachToSchematicRoot() calls setUuid() again, which reuses this
-		// existing UUID child rather than adding a duplicate.
-		image.setUuid();
-		const imageData = new KicadElementData();
-		imageData.data = data;
-		image.addChild(imageData);
-		return this.attachToSchematicRoot(image);
+		const item = this.commitSchematicModelAdd(screen => {
+			const image = new SchImage(screen);
+			image.setOrigin(x, y, 0);
+			image.setScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
+			image.data = data;
+			return image;
+		}, 'Add Image');
+		return item;
 	}
 
 	getSelectionResizeBox(): SelectionResizeBox | null {
@@ -6915,14 +7251,19 @@ this.clearSelectionAll();
 		if (!(width > 0) || !(height > 0)) {
 			return null;
 		}
-		const textBox = new KicadElementTextBox(value);
-		textBox.setOrigin(Math.min(x1, x2), Math.min(y1, y2), 0);
-		textBox.setSize(width, height);
-		textBox.setFont(1.27, 1.27);
-		textBox.setJustify('left', 'top');
-		textBox.setStroke(0, 'solid');
-		textBox.setFill('none');
-		return this.attachToSchematicRoot(textBox);
+		const item = this.commitSchematicModelAdd(screen => {
+			const textBox = new SchTextBox(screen);
+			textBox.setText(value);
+			textBox.setOrigin(Math.min(x1, x2), Math.min(y1, y2), 0);
+			textBox.setSize(width, height);
+			textBox.setFont(1.27, 1.27);
+			textBox.text.hJustify = SchTextJustify.GR_TEXT_HJUSTIFY_LEFT;
+			textBox.text.vJustify = SchTextVJustify.GR_TEXT_VJUSTIFY_TOP;
+			textBox.setStroke(0, 'solid');
+			textBox.setFill('none');
+			return textBox;
+		}, 'Add Text Box');
+		return item;
 	}
 
 	/** Mirrors shared/kicad-layout/Place.ts's labelJustify(): 0 -> left, 180 ->
@@ -6933,32 +7274,51 @@ this.clearSelectionAll();
 		return r === 180 ? 'right' : 'left';
 	}
 
+	/** Sets hJustify directly — the model's label/text classes have no
+	 *  `setJustify()` convenience method yet (a known, small gap; see
+	 *  moveSheetPinById's identical duck-typed skip for the same reason on
+	 *  sheet pins), so this fills the same field setOrigin's AST sibling
+	 *  used to write via its own setJustify(). */
+	private static applyLabelJustify(item: { text: { hJustify: SchTextJustify } }, justify: 'left' | 'right'): void {
+		item.text.hJustify = justify === 'left' ? SchTextJustify.GR_TEXT_HJUSTIFY_LEFT : SchTextJustify.GR_TEXT_HJUSTIFY_RIGHT;
+	}
+
 	addLabel(x: number, y: number, value: string, rotation = 0): string | null {
-		const label = new KicadElementLabel(value);
-		label.setOrigin(x, y, rotation);
-		label.setFont(1.27, 1.27);
-		label.setJustify(KicadRenderSession.labelJustifyFor(rotation));
-		return this.attachToSchematicRoot(label);
+		const item = this.commitSchematicModelAdd(screen => {
+			const label = new SchLabel(screen);
+			label.setText(value);
+			label.setOrigin(x, y, rotation);
+			label.setFont(1.27, 1.27);
+			KicadRenderSession.applyLabelJustify(label, KicadRenderSession.labelJustifyFor(rotation));
+			return label;
+		}, 'Add Label');
+		return item;
 	}
 
 	addGlobalLabel(x: number, y: number, value: string, shape: KicadGlobalLabelShape, rotation = 0): string | null {
-		const label = new KicadElementGlobalLabel();
-		label.setName(value);
-		label.setShape(shape);
-		label.setOrigin(x, y, rotation);
-		label.setFont(1.27, 1.27);
-		label.setJustify(KicadRenderSession.labelJustifyFor(rotation));
-		return this.attachToSchematicRoot(label);
+		const item = this.commitSchematicModelAdd(screen => {
+			const label = new SchGlobalLabel(screen);
+			label.setName(value);
+			label.setShape(shape);
+			label.setOrigin(x, y, rotation);
+			label.setFont(1.27, 1.27);
+			KicadRenderSession.applyLabelJustify(label, KicadRenderSession.labelJustifyFor(rotation));
+			return label;
+		}, 'Add Global Label');
+		return item;
 	}
 
 	addHierLabel(x: number, y: number, value: string, shape: KicadHierarchicalLabelShape, rotation = 0): string | null {
-		const label = new KicadElementHierarchicalLabel();
-		label.setName(value);
-		label.setShape(shape);
-		label.setOrigin(x, y, rotation);
-		label.setFont(1.27, 1.27);
-		label.setJustify(KicadRenderSession.labelJustifyFor(rotation));
-		return this.attachToSchematicRoot(label);
+		const item = this.commitSchematicModelAdd(screen => {
+			const label = new SchHierLabel(screen);
+			label.setName(value);
+			label.setShape(shape);
+			label.setOrigin(x, y, rotation);
+			label.setFont(1.27, 1.27);
+			KicadRenderSession.applyLabelJustify(label, KicadRenderSession.labelJustifyFor(rotation));
+			return label;
+		}, 'Add Hierarchical Label');
+		return item;
 	}
 
 	/** Directive Label ("netclass_flag" — see KicadElementNetclassFlag's doc
@@ -6974,15 +7334,21 @@ this.clearSelectionAll();
 		x: number, y: number, netclassName: string, shape: KicadDirectiveLabelShape = 'round',
 		rotation = 0
 	): string | null {
-		const flag = new KicadElementNetclassFlag();
-		flag.setOrigin(x, y, rotation);
-		flag.setShape(shape);
-		flag.setPinLength(2.54);
-		flag.setFont(1.27, 1.27);
-		flag.setJustify(KicadRenderSession.labelJustifyFor(rotation));
-		flag.addChild(
-			KicadElementSymbol.buildLibraryProperty('Netclass', netclassName, { x: x + 2.54, y: y - 1.27, rot: 0 }));
-		return this.attachToSchematicRoot(flag);
+		const item = this.commitSchematicModelAdd(screen => {
+			const flag = new SchDirectiveLabel(screen);
+			flag.setOrigin(x, y, rotation);
+			flag.setShape(shape);
+			flag.setPinLength(2.54);
+			flag.setFont(1.27, 1.27);
+			KicadRenderSession.applyLabelJustify(flag, KicadRenderSession.labelJustifyFor(rotation));
+			const prop = new SchField(flag, FieldT.USER);
+			prop.name = 'Netclass';
+			prop.text.text = netclassName;
+			prop.setOrigin(x + 2.54, y - 1.27, 0);
+			flag.properties.push(prop);
+			return flag;
+		}, 'Add Directive Label');
+		return item;
 	}
 
 	/**
@@ -7101,13 +7467,100 @@ this.clearSelectionAll();
 	 * multi-unit placement calls this once per unit, reusing unit 1's
 	 * returned reference for units 2..N so every unit of one physical part
 	 * shares the same designator, matching real KiCad's own model. */
+	/** Rip-and-replace: builds a real `SchematicSymbol` directly on the live
+	 *  model instead of a `KicadElementSymbol` AST node — lifted from what
+	 *  was this method's own shadow-verify sibling
+	 *  (`addLibrarySymbolFromTextVerified`/`shadowVerifyAddLibrarySymbolViaModel`,
+	 *  now deleted as redundant ceremony once this became the real path).
+	 *  `sourceText` parsing stays AST-side (`resolveDetachedLibSymbol`) since
+	 *  it's an unavoidable text/file-format boundary — a standalone
+	 *  .kicad_sym snippet, not part of the live document — but the result is
+	 *  bridged into the model via `SchematicBuilder().buildLibSymbol()`. */
 	addLibrarySymbolFromText(
 		sourceText: string, symbolName: string, x: number, y: number, libIdOverride?: string, unit = 1,
 		reuseReference?: string
 	): string | null {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !sourceText.trim()) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !sourceText.trim()) {
 			return null;
 		}
+		const resolved = this.resolveDetachedLibSymbol(sourceText, symbolName, libIdOverride);
+		if (!resolved) {
+			return null;
+		}
+		const { detached, libId, source } = resolved;
+		const libSym = new SchematicBuilder().buildLibSymbol(detached);
+		if (!libSym) {
+			return null;
+		}
+
+		this.pushUndoSnapshot('Place symbol');
+		const screen = this.schematicModel.allScreens()[0];
+		this.schematicModel.addLibSymbol(libSym);
+
+		const referenceBase = String(source.getAllProperties().Reference ?? 'U').replace(/^~|\?.*$/g, '').trim() || 'U';
+		// Real KiCad's "Annotate Automatically" toolbar toggle
+		// (`EESCHEMA_SETTINGS::m_AnnotatePanel.automatic`): off means a fresh
+		// placement gets the real un-annotated placeholder shape ("<prefix>?")
+		// instead of an immediately-assigned number, left for a later
+		// annotateSchematic() pass — see that method's own doc comment.
+		const modelSymbols = screen.items.filter((i: any) => i instanceof SchematicSymbol);
+		const reference = reuseReference
+			?? (this.annotateAutomatically ? this.computeNextSymbolRef(modelSymbols, referenceBase) : `${ referenceBase }?`);
+
+		const symbol = new SchematicSymbol(screen, new KicadUuid());
+		symbol.libId = libId;
+		symbol.libSymbol = libSym;
+		symbol.setOrigin(x, y, 0);
+		symbol.activeUnit = unit;
+		symbol.instances = [{
+			path: '/', reference, unit, projectName: 'Default', dnp: false,
+			excludedFromBom: false, excludedFromSim: false, excludedFromBoard: false, excludedFromPosFiles: false
+		}];
+
+		const value = String(source.getAllProperties().Value ?? libId);
+		const addField = (name: string, fieldId: FieldT, text: string, fallbackY: number) => {
+			const origin = this.propertyOriginFor(source, name, x, y, fallbackY);
+			const f = new SchField(symbol, fieldId);
+			f.name = name;
+			f.setText(text);
+			f.setOrigin(origin.x, origin.y, origin.rot);
+			f.text.isVisible = !origin.hide;
+			symbol.fields.push(f);
+		};
+		addField('Reference', FieldT.REFERENCE, reference, -2.54);
+		addField('Value', FieldT.VALUE, value, 2.54);
+		addField('Footprint', FieldT.FOOTPRINT, '', 0);
+		addField('Datasheet', FieldT.DATASHEET, '', 0);
+		symbol.updatePins();
+
+		const commit = new SCH_COMMIT('Place symbol');
+		commit.Add(symbol);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
+		this.commitAstMutation();
+		return reference;
+	}
+
+	/** Reckless-mode cleanup: addLibrarySymbolFromText() itself is now the
+	 *  real model-committing implementation — kept as an alias so existing
+	 *  call sites don't need renaming. */
+	addLibrarySymbolFromTextVerified(
+		sourceText: string, symbolName: string, x: number, y: number, libIdOverride?: string, unit = 1,
+		reuseReference?: string
+	): string | null {
+		return this.addLibrarySymbolFromText(sourceText, symbolName, x, y, libIdOverride, unit, reuseReference);
+	}
+
+	/** Extracted from addLibrarySymbolFromText's first half (parse the
+	 *  incoming .kicad_sym-format text, find the matching symbol, clone +
+	 *  rename to the target libId, flatten if derived) — see that method's
+	 *  own doc comment above `source.isDerived()` for the full
+	 *  extends-flattening rationale. Pure AST-object manipulation, reused
+	 *  unchanged by the shadow-verify path to independently re-derive the
+	 *  same detached symbol from the same inputs. */
+	private resolveDetachedLibSymbol(
+		sourceText: string, symbolName: string, libIdOverride?: string
+	): { detached: KicadElementSymbol; libId: string; source: KicadElementSymbol } | null {
 		const parsed = parseText(sourceText);
 		const candidates = parsed.name === 'symbol'
 			? [parsed as KicadElementSymbol]
@@ -7123,26 +7576,6 @@ this.clearSelectionAll();
 		sourceForClone.symbolName = libId;
 		let detached = parseText(sourceForClone.write()) as KicadElementSymbol;
 
-		// A derived symbol (`(extends "Base")`) has no graphics/pins of its
-		// own in the SOURCE library file, where that's fine — a real .kicad_sym
-		// library file's parser (SCH_IO_KICAD_SEXPR_PARSER::ParseLib) keeps a
-		// live map of every symbol parsed so far and resolves `extends`
-		// against it. A SCHEMATIC file's OWN embedded `lib_symbols` cache is
-		// different: its parser (T_lib_symbols case) explicitly uses a
-		// throwaway, ALWAYS-EMPTY map — the parser's own comment says "No
-		// derived symbols are allowed in the library cache" — so an `extends`
-		// reference written there can never resolve in real KiCad, no matter
-		// how the base is named or where it sits. Confirmed against a real
-		// exported file: this app's own renderer resolved the extends chain
-		// fine (SchematicPainter.relevantSubUnits still does, for backward
-		// compatibility with already-saved files), but real KiCad rendered
-		// the placed symbol with no body/pins at all. Real KiCad's own
-		// placement path (SCH_SYMBOL's constructor / SetLibSymbol) always
-		// calls LIB_SYMBOL::Flatten() before caching a symbol on a schematic
-		// — clone the base's full body (fields + graphics + sub-units), then
-		// overlay the derived symbol's own field properties on top, exactly
-		// mirroring that function — so this app now writes the same
-		// self-contained, extends-free entry real KiCad itself would.
 		if (source.isDerived()) {
 			const baseName = source.getExtends()!;
 			const base = candidates.find(symbol => symbol.symbolName === baseName);
@@ -7150,55 +7583,49 @@ this.clearSelectionAll();
 				detached = this.flattenDerivedLibSymbol(base, source, libId);
 			}
 		}
+		return { detached, libId, source };
+	}
 
-		this.pushUndoSnapshot('Place symbol');
-		this.ensureLibSymbol(libId, () => detached);
-
-		const referenceBase = String(source.getAllProperties().Reference ?? 'U').replace(/^~|\?.*$/g, '').trim() || 'U';
-		// Real KiCad's "Annotate Automatically" toolbar toggle
-		// (`EESCHEMA_SETTINGS::m_AnnotatePanel.automatic`): off means a fresh
-		// placement gets the real un-annotated placeholder shape ("<prefix>?")
-		// instead of an immediately-assigned number, left for a later
-		// annotateSchematic() pass — see that method's own doc comment.
-		const reference = reuseReference
-			?? (this.annotateAutomatically ? this.nextSymbolRef(referenceBase) : `${ referenceBase }?`);
-		const value = String(source.getAllProperties().Value ?? libId);
-		const instance = new KicadElementSymbol();
-		instance.addChild(new KicadElementLibId(libId));
-		instance.setOrigin(x, y, 0);
-		instance.setUuid();
-		instance.findOrCreateChildByClass(KicadElementUnit).value = unit;
-		instance.setExcludeFromSim(false).setInBom(true).setOnBoard(true);
-		instance.findOrCreateChildByClass(KicadElementDnp).value = false;
-
-		const propertyAt = (name: string, fallbackY: number) => {
-			const property = source.getPropertyByName(name);
-			const origin = property?.getOrigin?.();
-			return {
-				x: x + Number(origin?.x ?? 0),
-				y: y + Number(origin?.y ?? fallbackY),
-				rot: Number(origin?.rotation ?? 0),
-				hide: property?.isHidden?.() ?? (name !== 'Reference' && name !== 'Value')
-			};
+	/** Extracted from addLibrarySymbolFromText's per-field placement-offset
+	 *  closure — reads a field's position/rotation/hidden state off the
+	 *  SOURCE library symbol's own matching property (offset by the new
+	 *  instance's placement x/y), falling back to a default vertical offset
+	 *  when the source has no such property. Reused unchanged by the
+	 *  shadow-verify path — it only ever reads the AST `source`, so there's
+	 *  no model-side equivalent to branch on. */
+	private propertyOriginFor(source: KicadElementSymbol, name: string, x: number, y: number, fallbackY: number):
+		{ x: number; y: number; rot: number; hide: boolean } {
+		const property = source.getPropertyByName(name);
+		const origin = property?.getOrigin?.();
+		return {
+			x: x + Number(origin?.x ?? 0),
+			y: y + Number(origin?.y ?? fallbackY),
+			rot: Number(origin?.rotation ?? 0),
+			hide: property?.isHidden?.() ?? (name !== 'Reference' && name !== 'Value')
 		};
-		instance.addChild(
-			KicadElementSymbol.buildLibraryProperty('Reference', reference, propertyAt('Reference', -2.54)));
-		instance.addChild(KicadElementSymbol.buildLibraryProperty('Value', value, propertyAt('Value', 2.54)));
-		instance.addChild(KicadElementSymbol.buildLibraryProperty('Footprint', '', propertyAt('Footprint', 0)));
-		instance.addChild(KicadElementSymbol.buildLibraryProperty('Datasheet', '', propertyAt('Datasheet', 0)));
-		this.attachElement(instance);
-		this.commitAstMutation();
-		return reference;
 	}
 
 	private nextSymbolRef(base: string): string {
+		const symbols = (this.schematicModel?.allScreens()[0]?.items ?? [])
+			.filter((item: any) => item instanceof SchematicSymbol);
+		return this.computeNextSymbolRef(symbols, base);
+	}
+
+	/** Core scan extracted from nextSymbolRef() — duck-typed on
+	 *  getReference() alone, so it works identically against AST
+	 *  KicadElementSymbol[] or model SchematicSymbol[]. Much simpler than
+	 *  annotateSchematic's computeAndApplyAnnotations bin-packing (no
+	 *  libId/value/unit slot-matching — just "scan existing references
+	 *  matching this prefix, return max+1"), so it's its own small helper
+	 *  rather than a reuse of that one. */
+	private computeNextSymbolRef(symbols: any[], base: string): string {
 		const prefix = base.replace(/[0-9?]+$/g, '') || 'U';
 		let max = 0;
-		for (const kid of this.schematicRoot?.rootElement?.children ?? []) {
-			if (kid?.name !== 'symbol' || typeof (kid as any).getReference !== 'function') {
+		for (const symbol of symbols) {
+			if (typeof symbol?.getReference !== 'function') {
 				continue;
 			}
-			const value = String((kid as any).getReference() ?? '');
+			const value = String(symbol.getReference() ?? '');
 			const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 			const match = new RegExp(`^${ escapedPrefix }(\\d+)$`).exec(value);
 			if (match) {
@@ -7217,13 +7644,11 @@ this.clearSelectionAll();
 	 */
 	private nextPowerRef(prefix: '#PWR' | '#FLG'): string {
 		let max = 0;
-		const kids: any[] = this.schematicRoot?.rootElement?.children ?? [];
 		const re = new RegExp(`^${ prefix }(\\d+)$`);
-		for (const kid of kids) {
-			if (!kid || kid.name !== 'symbol' || typeof kid.getReference !== 'function') {
-				continue;
-			}
-			const m = re.exec(String(kid.getReference() ?? '').trim());
+		const symbols = (this.schematicModel?.allScreens()[0]?.items ?? [])
+			.filter((item: any) => item instanceof SchematicSymbol) as SchematicSymbol[];
+		for (const symbol of symbols) {
+			const m = re.exec(String(symbol.getReference() ?? '').trim());
 			if (m) {
 				max = Math.max(max, parseInt(m[1], 10));
 			}
@@ -7231,34 +7656,81 @@ this.clearSelectionAll();
 		return prefix + String(max + 1).padStart(2, '0');
 	}
 
+	/** Rip-and-replace: builds a real `SchematicSymbol` instance directly on
+	 *  the live model — the model-side sibling of
+	 *  `@kicad-io/Builder/PowerSymbolInstance`'s `buildPowerSymbolInstance()`
+	 *  (same field layout, same defaults). The library DEFINITION still
+	 *  comes from the existing AST builder (`buildPowerGnd`/`buildPowerFlag`/
+	 *  `buildPowerRail` — plain graphics-definition builders, no live
+	 *  document involved) and is bridged into the model via the same
+	 *  `SchematicBuilder().buildLibSymbol()` path `addLibrarySymbolFromText`
+	 *  uses; `Schematic.addLibSymbol()`'s uuid-Map naturally dedupes repeat
+	 *  placements, no existence check needed. */
+	private commitPowerSymbolPlacement(opts: {
+		libId: string; libDef: KicadElementSymbol; x: number; y: number; rotation: number;
+		ref: string; value: string; refOffsetY: number; valueOffsetY: number; refHidden: boolean; valueHidden: boolean;
+	}): string | null {
+		if (this.documentType !== 'schematic' || !this.schematicModel) {
+			return null;
+		}
+		const libSym = new SchematicBuilder().buildLibSymbol(opts.libDef);
+		if (!libSym) {
+			return null;
+		}
+		this.pushUndoSnapshot('Place power symbol');
+		const screen = this.schematicModel.allScreens()[0];
+		this.schematicModel.addLibSymbol(libSym);
+
+		const symbol = new SchematicSymbol(screen, new KicadUuid());
+		symbol.libId = opts.libId;
+		symbol.libSymbol = libSym;
+		symbol.setOrigin(opts.x, opts.y, opts.rotation);
+		symbol.activeUnit = 1;
+		symbol.instances = [{
+			path: '/', reference: opts.ref, unit: 1, projectName: 'Default', dnp: false,
+			excludedFromBom: false, excludedFromSim: false, excludedFromBoard: false, excludedFromPosFiles: false
+		}];
+		const addField = (name: string, fieldId: FieldT, text: string, y: number, hide: boolean) => {
+			const f = new SchField(symbol, fieldId);
+			f.name = name;
+			f.setText(text);
+			f.setOrigin(opts.x, y, 0);
+			f.text.isVisible = !hide;
+			symbol.fields.push(f);
+		};
+		addField('Reference', FieldT.REFERENCE, opts.ref, opts.y + opts.refOffsetY, opts.refHidden);
+		addField('Value', FieldT.VALUE, opts.value, opts.y + opts.valueOffsetY, opts.valueHidden);
+		addField('Footprint', FieldT.FOOTPRINT, '', opts.y, true);
+		addField('Datasheet', FieldT.DATASHEET, '', opts.y, true);
+		symbol.updatePins();
+
+		const commit = new SCH_COMMIT('Place power symbol');
+		commit.Add(symbol);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
+		this.commitAstMutation();
+		return opts.ref;
+	}
+
 	addPowerGnd(x: number, y: number, rotation = 0): string | null {
-		this.ensureLibSymbol('power:GND', () => buildPowerGnd());
-		const ref = this.nextPowerRef('#PWR');
-		const instance = buildPowerSymbolInstance({
-			libId: 'power:GND', x, y, rotation, ref, value: 'GND',
+		return this.commitPowerSymbolPlacement({
+			libId: 'power:GND', libDef: buildPowerGnd(), x, y, rotation, ref: this.nextPowerRef('#PWR'), value: 'GND',
 			refOffsetY: -6.35, valueOffsetY: -3.81, refHidden: true, valueHidden: true
 		});
-		return this.attachToSchematicRoot(instance);
 	}
 
 	addPowerFlag(x: number, y: number, rotation = 0): string | null {
-		this.ensureLibSymbol('power:PWR_FLAG', () => buildPowerFlag());
-		const ref = this.nextPowerRef('#FLG');
-		const instance = buildPowerSymbolInstance({
-			libId: 'power:PWR_FLAG', x, y, rotation, ref, value: 'PWR_FLAG',
+		return this.commitPowerSymbolPlacement({
+			libId: 'power:PWR_FLAG', libDef: buildPowerFlag(), x, y, rotation, ref: this.nextPowerRef('#FLG'), value: 'PWR_FLAG',
 			refOffsetY: 1.905, valueOffsetY: 3.81, refHidden: true, valueHidden: false
 		});
-		return this.attachToSchematicRoot(instance);
 	}
 
 	addPowerRail(x: number, y: number, name: string, rotation = 0): string | null {
-		this.ensureLibSymbol(`power:${ name }`, () => buildPowerRail(name));
-		const ref = this.nextPowerRef('#PWR');
-		const instance = buildPowerSymbolInstance({
-			libId: `power:${ name }`, x, y, rotation, ref, value: name,
+		return this.commitPowerSymbolPlacement({
+			libId: `power:${ name }`, libDef: buildPowerRail(name), x, y, rotation, ref: this.nextPowerRef('#PWR'), value: name,
 			refOffsetY: -3.81, valueOffsetY: 3.556, refHidden: true, valueHidden: false
 		});
-		return this.attachToSchematicRoot(instance);
 	}
 
 	/**
@@ -7270,17 +7742,40 @@ this.clearSelectionAll();
 	 * only the returned text is safe to hold onto.
 	 */
 	copySelectionText(ids: string[]): { id: string; sourceText: string }[] {
-		if (this.documentType !== 'schematic' || !this.schScene) {
+		if (this.documentType !== 'schematic' || !this.schScene || !this.schematicRoot?.rootElement) {
 			return [];
 		}
 		const result: { id: string; sourceText: string }[] = [];
 		for (const id of ids) {
-			const el: any = this.schScene.hitTestItems.find(it => it.id === id)?.element;
-			if (el && typeof el.write === 'function') {
+			const el = this.astRootElementForPaintId(id);
+			if (el) {
 				result.push({ id, sourceText: el.write() });
 			}
 		}
 		return result;
+	}
+
+	/** Clipboard/file-format boundary only: maps a model paint UUID back to
+	 *  its canonical top-level AST node so kicad-io can emit the exact KiCad
+	 *  element S-expression expected by the OS clipboard. */
+	private astRootElementForPaintId(paintId: string): any | null {
+		const uuid = this.uuidFromPaintId(paintId);
+		if (!uuid || !this.schematicRoot?.rootElement) return null;
+		return this.schematicRoot.rootElement.children?.find((child: any) => child.getUuid?.() === uuid) ?? null;
+	}
+
+	private placedAstUuid(el: any): string | null {
+		return el?.getUuid?.() ?? el?.getPolyline?.()?.getUuid?.() ?? null;
+	}
+
+	private paintIdsForUuids(uuids: Iterable<string>): string[] {
+		const wanted = new Set(uuids);
+		return this.schScene?.hitTestItems
+			.filter(item => {
+				const uuid = this.uuidFromPaintId(item.id);
+				return uuid !== null && wanted.has(uuid);
+			})
+			.map(item => item.id) ?? [];
 	}
 
 	/**
@@ -7422,8 +7917,8 @@ this.clearSelectionAll();
 		}
 		const elements: any[] = [];
 		for (const id of ids) {
-			const el = this.schScene.hitTestItems.find(it => it.id === id)?.element;
-			if (el && typeof el.write === 'function') {
+			const el = this.astRootElementForPaintId(id);
+			if (el) {
 				elements.push(el);
 			}
 		}
@@ -7530,15 +8025,15 @@ this.clearSelectionAll();
 
 		this.pushUndoSnapshot('Paste');
 		this.beginBatch();
-		const placed: any[] = [];
+		const placedUuids: string[] = [];
 		for (const el of items) {
-			placed.push(this.placeClonedElement(el, dx, dy));
+			const placed = this.placeClonedElement(el, dx, dy);
+			const uuid = this.placedAstUuid(placed);
+			if (uuid) placedUuids.push(uuid);
 		}
+		this.resyncSchematicModelFromAst();
 		this.endBatch();
-		if (!this.schScene) {
-			return [];
-		}
-		return this.schScene.hitTestItems.filter(it => placed.includes(it.element)).map(it => it.id);
+		return this.paintIdsForUuids(placedUuids);
 	}
 
 	/**
@@ -7547,48 +8042,38 @@ this.clearSelectionAll();
 	 * copies don't land exactly on top of the originals. One undo push, one
 	 * scene rebuild for however many items are duplicated — same
 	 * beginBatch/endBatch shape translateSelection uses. Returns the NEW
-	 * items' paint ids, resolved post-rebuild by object identity (no paint
-	 * id exists for a clone until the rebuild produces one) — valid because
-	 * after endBatch()'s rebuild the painter reads the live AST (now
-	 * including the clones) and its output items' `.element` is reference-
-	 * equal to the exact clone objects already held here.
+	 * items' paint ids, resolved post-rebuild by their fresh UUIDs (no paint
+	 * id exists for a clone until model resync and repaint complete).
 	 */
 	duplicateSelection(ids: string[], dx = 2.54, dy = 2.54): string[] {
 		if (this.documentType !== 'schematic' || !this.schScene || ids.length === 0) {
 			return [];
 		}
-		const sources: string[] = [];
-		for (const id of ids) {
-			const el: any = this.schScene.hitTestItems.find(it => it.id === id)?.element;
-			if (el && typeof el.write === 'function') {
-				sources.push(el.write());
-			}
-		}
+		const sources = this.copySelectionText(ids).map(item => item.sourceText);
 		if (sources.length === 0) {
 			return [];
 		}
 		this.pushUndoSnapshot('Duplicate');
 		this.beginBatch();
-		const clones: any[] = [];
+		const cloneUuids: string[] = [];
 		for (const sourceText of sources) {
 			const clone = this.cloneAndPlace(sourceText, dx, dy);
 			if (clone) {
-				clones.push(clone);
+				const uuid = this.placedAstUuid(clone);
+				if (uuid) cloneUuids.push(uuid);
 			}
 		}
+		this.resyncSchematicModelFromAst();
 		this.endBatch();
-		if (clones.length === 0) {
-			return [];
-		}
-		return this.schScene!.hitTestItems.filter(it => clones.includes(it.element)).map(it => it.id);
+		return this.paintIdsForUuids(cloneUuids);
 	}
 
 	/**
 	 * Batch counterpart for Paste — each entry carries its own (dx, dy) so
 	 * the caller (main.ts's in-memory clipboard) can position every pasted
 	 * item relative to the current cursor while preserving the copied set's
-	 * original relative layout. Same one-undo/one-batch/resolve-by-object-
-	 * identity shape as duplicateSelection.
+	 * original relative layout. Fresh UUIDs bridge the AST clipboard import
+	 * boundary to the rebuilt model scene.
 	 */
 	pasteElements(items: { sourceText: string; dx: number; dy: number }[]): string[] {
 		if (this.documentType !== 'schematic' || !this.schScene || items.length === 0) {
@@ -7596,22 +8081,21 @@ this.clearSelectionAll();
 		}
 		this.pushUndoSnapshot('Paste');
 		this.beginBatch();
-		const clones: any[] = [];
+		const cloneUuids: string[] = [];
 		for (const { sourceText, dx, dy } of items) {
 			const clone = this.cloneAndPlace(sourceText, dx, dy);
 			if (clone) {
-				clones.push(clone);
+				const uuid = this.placedAstUuid(clone);
+				if (uuid) cloneUuids.push(uuid);
 			}
 		}
+		this.resyncSchematicModelFromAst();
 		this.endBatch();
-		if (clones.length === 0) {
-			return [];
-		}
-		return this.schScene!.hitTestItems.filter(it => clones.includes(it.element)).map(it => it.id);
+		return this.paintIdsForUuids(cloneUuids);
 	}
 
 	/**
-	 * Wraps the given selection into a new KicadElementGroup — no kind
+	 * Wraps the given selection into a new SchGroup — no kind
 	 * restriction (moveItemBy already knows how to move every kind, so
 	 * there's no technical reason to exclude symbols/sheets/wires from
 	 * being grouped together). Stores each member by its own ELEMENT uuid,
@@ -7620,7 +8104,7 @@ this.clearSelectionAll();
 	 * real elements.
 	 */
 	groupSelection(ids: string[]): string | null {
-		if (this.documentType !== 'schematic' || !this.schScene) {
+		if (this.documentType !== 'schematic' || !this.schScene || !this.schematicModel) {
 			return null;
 		}
 		const uuids: string[] = [];
@@ -7634,20 +8118,24 @@ this.clearSelectionAll();
 			return null;
 		}
 		this.pushUndoSnapshot('Group');
-		const group = new KicadElementGroup();
-		this.attachElement(group);
-		group.setMemberUuids(uuids);
+		const screen = this.schematicModel.allScreens()[0];
+		const group = new SchGroup(screen);
+		group.memberUuids = uuids;
+		const commit = new SCH_COMMIT('Group');
+		commit.Add(group);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
-		return group.getUuid() ?? null;
+		return group.getUuid();
 	}
 
 	/**
-	 * Removes every KicadElementGroup whose member set intersects the given
+	 * Removes every SchGroup whose member set intersects the given
 	 * selection — members themselves are untouched, only the wrapper
 	 * element disappears. Returns how many group elements were removed.
 	 */
 	ungroupSelection(ids: string[]): number {
-		if (this.documentType !== 'schematic' || !this.schematicRoot?.rootElement || !this.schScene) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !this.schScene) {
 			return 0;
 		}
 		const uuids = new Set(
@@ -7657,18 +8145,16 @@ this.clearSelectionAll();
 		if (uuids.size === 0) {
 			return 0;
 		}
-		const groups = this.allGroups().filter(g => g.getMemberUuids().some(u => uuids.has(u)));
+		const groups = this.allGroups().filter(g => g.memberUuids.some(u => uuids.has(u)));
 		if (groups.length === 0) {
 			return 0;
 		}
 		this.pushUndoSnapshot('Ungroup');
-		const children: any[] = this.schematicRoot.rootElement.children;
-		for (const group of groups) {
-			const idx = children.indexOf(group);
-			if (idx >= 0) {
-				children.splice(idx, 1);
-			}
-		}
+		const screen = this.schematicModel.allScreens()[0];
+		const commit = new SCH_COMMIT('Ungroup');
+		for (const group of groups) commit.Remove(group);
+		commit.Push(screen);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
 		return groups.length;
 	}
@@ -7680,13 +8166,12 @@ this.clearSelectionAll();
 	 * elsewhere. Returns how many were actually found and removed.
 	 */
 	deleteElements(ids: string[]): number {
-		if (!this.activeRoot?.rootElement) {
+		if ((this.documentType === 'schematic' && !this.schematicModel)
+			|| (this.documentType === 'board' && !this.boardModel)) {
 			return 0;
 		}
-		this.pushUndoSnapshot();
 		const idSet = new Set(ids);
-		const children: any[] = this.activeRoot.rootElement.children;
-		let removed = 0;
+		const targets = new Map<string, any>();
 		for (const id of idSet) {
 			const item = this.activeScene?.hitTestItems.find(it => it.id === id);
 			let el = item?.element;
@@ -7694,25 +8179,36 @@ this.clearSelectionAll();
 			// aren't root children themselves (footprint-local, nested), so
 			// without this the indexOf below would just silently no-op.
 			if (this.documentType === 'board' && item?.kind === 'pad') {
-				while (el && !(el instanceof KicadElementFootprint)) {
+				while (el && !(el instanceof Footprint)) {
 					el = el.parent;
 				}
 			}
 			if (!el) {
 				continue;
 			}
-			const idx = children.indexOf(el);
-			if (idx < 0) {
-				continue;
-			}
-			children.splice(idx, 1);
-			removed++;
-			this.removeFromSelection(id);
+			const uuid = typeof el.getUuid === 'function' ? el.getUuid() : null;
+			if (uuid) targets.set(uuid, el);
 		}
-		if (removed > 0) {
-			this.commitAstMutation();
+		if (targets.size === 0) {
+			return 0;
 		}
-		return removed;
+		this.pushUndoSnapshot('Delete');
+		if (this.documentType === 'schematic') {
+			const screen = this.schematicModel!.allScreens()[0];
+			const commit = new SCH_COMMIT('Delete');
+			for (const target of targets.values()) commit.Remove(target);
+			commit.Push(screen);
+			this.resyncSchematicAstFromModel();
+		}
+		else {
+			const commit = new BOARD_COMMIT('Delete');
+			for (const target of targets.values()) commit.Remove(target);
+			commit.Push(this.boardModel);
+			this.resyncBoardAstFromModel();
+		}
+		for (const id of idSet) this.removeFromSelection(id);
+		this.commitAstMutation();
+		return targets.size;
 	}
 
 	/**
@@ -7725,14 +8221,25 @@ this.clearSelectionAll();
 	 * convention, absolute position rather than a delta).
 	 */
 	translateElementById(id: string, dx: number, dy: number): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || (dx === 0 && dy === 0)) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || (dx === 0 && dy === 0)) {
 			return false;
 		}
 		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
-		if (!el || !this.translateElementGeometry(el, dx, dy)) {
+		if (!el) {
 			return false;
 		}
-		this.commitAstMutation();
+		const canTranslate = typeof el.getPolyline === 'function'
+			|| (typeof el.getPoints === 'function' && typeof el.setPoints === 'function')
+			|| (typeof el.getStartMidEnd === 'function' && typeof el.setStartMidEnd === 'function')
+			|| (typeof el.getStartEnd === 'function' && typeof el.setStartEnd === 'function')
+			|| (typeof el.getCenter === 'function' && typeof el.setCenter === 'function')
+			|| (typeof el.getOrigin === 'function' && typeof el.setOrigin === 'function');
+		if (!canTranslate) {
+			return false;
+		}
+		this.commitSchematicModelMutation(el, item => {
+			this.translateElementGeometry(item, dx, dy);
+		}, 'Move Item');
 		return true;
 	}
 
@@ -7761,21 +8268,21 @@ this.clearSelectionAll();
 	 *  kind:'symbol' hit (the placed preview instance itself must not be
 	 *  deleted this way) and anything with no parent to splice out of. */
 	deleteSymbolBodyItem(paintId: string): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !this.schScene) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !this.schScene) {
 			return false;
 		}
 		const item = this.schScene.hitTestItems.find(it => it.id === paintId);
 		const el: any = item?.element;
-		if (!item || item.kind === 'symbol' || !el?.parent?.children) {
+		if (!item || item.kind === 'symbol') {
 			return false;
 		}
-		const siblings: any[] = el.parent.children;
-		const idx = siblings.indexOf(el);
-		if (idx < 0) {
+		const resolved = this.resolveSymbolBodyModelItem(el);
+		if (!resolved) {
 			return false;
 		}
 		this.pushUndoSnapshot('Delete');
-		siblings.splice(idx, 1);
+		resolved.list.splice(resolved.list.indexOf(resolved.item), 1);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -7807,20 +8314,24 @@ this.clearSelectionAll();
 	 *  center coordinates (see `buildSymArc`), so `paintId` can go stale the
 	 *  instant this returns, the same class of bug this app already hit and
 	 *  fixed once for position-derived pin ids during drag (see
-	 *  `SymbolEditorScreen`'s doc comment on `onWindowMouseMove`). Resolved
-	 *  by re-finding the scene item that wraps the SAME (in-place-mutated)
-	 *  AST element object — `commitAstMutation()` repaints from the existing
-	 *  AST without reparsing, so object identity survives the rebuild. */
+	 *  `SymbolEditorScreen`'s doc comment on `onWindowMouseMove`). The model
+	 *  item is structurally re-resolved after serialization by its
+	 *  kind/unit/body-style/index key, then mapped to its new paint id. */
 	rotateSymbolBodyItemById(paintId: string, direction: 1 | -1): string | null {
 		if (this.documentType !== 'schematic' || !this.schScene) {
 			return null;
 		}
 		const el: any = this.schScene.hitTestItems.find(it => it.id === paintId)?.element;
-		if (!el || !this.rotateElementGeometry(el, direction)) {
+		const resolved = this.resolveSymbolBodyModelItem(el);
+		if (!resolved) {
 			return null;
 		}
+		this.pushUndoSnapshot('Rotate symbol item');
+		if (!this.rotateElementGeometry(resolved.item, direction)) return null;
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
-		return this.schScene?.hitTestItems.find(it => it.element === el)?.id ?? null;
+		const next = this.findSymbolBodyItemInModel(this.soleEmbeddedLibSymbol(this.schematicModel), resolved.key);
+		return this.schScene?.hitTestItems.find(it => it.element === next)?.id ?? null;
 	}
 
 	/** Mirror counterpart to {@link rotateSymbolBodyItemById} — see that
@@ -7841,11 +8352,108 @@ this.clearSelectionAll();
 			return null;
 		}
 		const el: any = this.schScene.hitTestItems.find(it => it.id === paintId)?.element;
-		if (!el || !this.mirrorElementGeometry(el, axis)) {
+		const resolved = this.resolveSymbolBodyModelItem(el);
+		if (!resolved) {
 			return null;
 		}
+		this.pushUndoSnapshot('Mirror symbol item');
+		if (!this.mirrorElementGeometry(resolved.item, axis)) return null;
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
-		return this.schScene?.hitTestItems.find(it => it.element === el)?.id ?? null;
+		const next = this.findSymbolBodyItemInModel(this.soleEmbeddedLibSymbol(this.schematicModel), resolved.key);
+		return this.schScene?.hitTestItems.find(it => it.element === next)?.id ?? null;
+	}
+
+	private resolveSymbolBodyModelItem(el: any): {
+		item: any; list: any[]; key: { kind: string; unit: number; bodyStyle: number; index: number };
+	} | null {
+		if (!el || !this.schematicModel) return null;
+		const symbols = new Set<any>(this.schematicModel.symbolLibs.values());
+		const shapeTags = new Map<SchShapeType, string>([
+			[SchShapeType.SEGMENT, 'line'], [SchShapeType.RECTANGLE, 'rectangle'], [SchShapeType.CIRCLE, 'circle'],
+			[SchShapeType.ARC, 'arc'], [SchShapeType.POLY, 'polyline'], [SchShapeType.BEZIER, 'bezier'],
+		]);
+		for (const libSym of symbols) {
+			const pinIndex = libSym.pins?.indexOf(el) ?? -1;
+			if (pinIndex >= 0) {
+				const unit = el.unit || 0;
+				return { item: el, list: libSym.pins, key: { kind: 'pin', unit, bodyStyle: 0, index: libSym.pins.filter((p: any) => (p.unit || 0) === unit).indexOf(el) } };
+			}
+			const collections: { list: any[]; bodyStyle: number; text: boolean }[] = [
+				{ list: libSym.drawings ?? [], bodyStyle: 0, text: false },
+				{ list: libSym.bodyText ?? [], bodyStyle: 0, text: true },
+			];
+			for (const [bodyStyle, list] of libSym.bodyStyleDrawings ?? []) collections.push({ list, bodyStyle, text: false });
+			for (const [bodyStyle, list] of libSym.bodyStyleText ?? []) collections.push({ list, bodyStyle, text: true });
+			for (const collection of collections) {
+				if (!collection.list.includes(el)) continue;
+				const unit = el.unit || 0;
+				const kind = collection.text ? 'text' : shapeTags.get(el.shapeKind);
+				if (!kind) return null;
+				const candidates = collection.list.filter(candidate => (candidate.unit || 0) === unit
+					&& (collection.text || candidate.shapeKind === el.shapeKind));
+				return { item: el, list: collection.list, key: { kind, unit, bodyStyle: collection.bodyStyle, index: candidates.indexOf(el) } };
+			}
+		}
+		return null;
+	}
+
+	/** Mirrors
+	 *  SchematicBuilder.buildLibSymbol's own array layout exactly (pins
+	 *  flat in libSym.pins; shapes in .drawings/.bodyStyleDrawings keyed by
+	 *  bodyStyle, each further filtered by its own .unit/.shapeKind; text
+	 *  in .bodyText/.bodyStyleText the same way), so the same `index` value
+	 *  picks out the same item on both sides. */
+	private findSymbolBodyItemInModel(libSym: any, key: { kind: string; unit: number; bodyStyle: number; index: number }): any | null {
+		const SHAPE_KIND_BY_TAG: Record<string, SchShapeType> = {
+			line: SchShapeType.SEGMENT, rectangle: SchShapeType.RECTANGLE, circle: SchShapeType.CIRCLE,
+			arc: SchShapeType.ARC, polyline: SchShapeType.POLY, bezier: SchShapeType.BEZIER
+		};
+		let candidates: any[];
+		if (key.kind === 'pin') {
+			candidates = (libSym.pins ?? []).filter((p: any) => (p.unit || 0) === key.unit);
+		}
+		else if (key.kind === 'text') {
+			const list = key.bodyStyle === 0 ? libSym.bodyText : libSym.bodyStyleText?.get(key.bodyStyle);
+			candidates = (list ?? []).filter((t: any) => (t.unit || 0) === key.unit);
+		}
+		else {
+			const shapeKind = SHAPE_KIND_BY_TAG[key.kind];
+			if (shapeKind === undefined) {
+				return null;
+			}
+			const list = key.bodyStyle === 0 ? libSym.drawings : libSym.bodyStyleDrawings?.get(key.bodyStyle);
+			candidates = (list ?? []).filter((s: any) => (s.unit || 0) === key.unit && s.shapeKind === shapeKind);
+		}
+		return candidates[key.index] ?? null;
+	}
+
+	/** Resolves the one LibSymbol the symbol editor's throwaway preview
+	 *  document embeds — used by the shadow-verify siblings below, which
+	 *  fresh-parse the pre-edit text via parseSchematic (already populating
+	 *  model.symbolLibs from the same embedded lib_symbols block that
+	 *  parse does for any schematic, not just real project files — no
+	 *  separate buildLibSymbol call needed here, unlike pass 5 which built
+	 *  a symbol not yet in the document). */
+	private soleEmbeddedLibSymbol(model: any): any | null {
+		return model.symbolLibs?.values().next().value ?? null;
+	}
+
+	/** Reckless-mode cleanup: rotateSymbolBodyItemById/mirrorSymbolBodyItemById/
+	 *  deleteSymbolBodyItem now resolve the target through
+	 *  resolveSymbolBodyModelItem() and commit against the live model
+	 *  directly — nothing left for a separate shadow-verify pass to prove.
+	 *  Kept as aliases so existing call sites don't need renaming. */
+	rotateSymbolBodyItemByIdVerified(paintId: string, direction: 1 | -1): string | null {
+		return this.rotateSymbolBodyItemById(paintId, direction);
+	}
+
+	mirrorSymbolBodyItemByIdVerified(paintId: string, axis: 'horizontal' | 'vertical'): string | null {
+		return this.mirrorSymbolBodyItemById(paintId, axis);
+	}
+
+	deleteSymbolBodyItemVerified(paintId: string): boolean {
+		return this.deleteSymbolBodyItem(paintId);
 	}
 
 	/** Per-shape geometry dispatch rotateSymbolBodyItemById() resolves an id
@@ -7959,7 +8567,7 @@ this.clearSelectionAll();
 	 * explicit start/end corners. */
 	resizeBoardElementBoundsById(
 		id: string, x: number, y: number, width: number, height: number, handle?: ResizeHandle): boolean {
-		if (this.documentType !== 'board' || !this.boardRoot || !this.scene || !(width > 0) || !(height > 0)) {
+		if (this.documentType !== 'board' || !this.boardModel || !this.scene || !(width > 0) || !(height > 0)) {
 			return false;
 		}
 		const item = this.scene.hitTestItems.find(candidate => candidate.id === id);
@@ -7967,6 +8575,8 @@ this.clearSelectionAll();
 		if (!item || !el) {
 			return false;
 		}
+		const commit = new BOARD_COMMIT('Resize item');
+		commit.Modify(el);
 		if ((el.name === 'gr_rect' || el.name === 'gr_text_box') && typeof el.setStartEnd === 'function') {
 			if (el.name === 'gr_text_box' && Number(el.findFirstChildByName?.('angle')?.attributes?.[0]?.value ?? 0)
 				!== 0) {
@@ -8002,6 +8612,8 @@ this.clearSelectionAll();
 		else {
 			return false;
 		}
+		commit.Push(this.boardModel);
+		this.resyncBoardAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -8027,19 +8639,15 @@ this.clearSelectionAll();
 		}
 		// A dimension's own measured points move like any other WithPts
 		// element (the generic branch just below handles that), but its
-		// text label lives on a SEPARATE child (KicadElementGrText) with its
-		// own origin — dragging the dimension's line/crossbar (this branch)
+		// text label has its own stored position — dragging the dimension's
+		// line/crossbar (this branch)
 		// should carry the label along with it, same as real KiCad's default
 		// "keep text aligned" behavior. Dragging the label ON ITS OWN goes
 		// through a different paint item pointed directly at the text child
 		// (see BoardPainter.buildDimension's doc comment), which reaches the
 		// getOrigin/setOrigin branch below instead — never this one.
-		if (el instanceof KicadElementDimension) {
-			const textEl = el.findFirstChildByClass(KicadElementGrText);
-			if (textEl && typeof textEl.getOrigin === 'function' && typeof textEl.setOrigin === 'function') {
-				const origin = textEl.getOrigin();
-				textEl.setOrigin(origin.x + dx, origin.y + dy, origin.rotation);
-			}
+		if (el instanceof BoardDimension) {
+			el.textPos = el.textPos.add(this.boardPoint(dx, dy));
 		}
 		if (typeof el.getPoints === 'function' && typeof el.setPoints === 'function') {
 			el.setPoints(el.getPoints().map((p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy })));
@@ -8149,6 +8757,15 @@ this.clearSelectionAll();
 		return this.translateElementById(item.id, dx, dy);
 	}
 
+	/** Reckless-mode cleanup: every branch moveItemBy() dispatches to now
+	 *  commits through the live model directly (moveSymbolByRef/
+	 *  moveSheetById/moveSheetPinById/moveLabelById/translateElementById) —
+	 *  nothing left for a separate shadow-verify pass to prove. Kept as an
+	 *  alias so alignSelection's call site doesn't need renaming. */
+	private moveItemByVerified(item: SchPaintedItem, dx: number, dy: number): boolean {
+		return this.moveItemBy(item, dx, dy);
+	}
+
 	/**
 	 * Aligns every item in a multi-selection along one shared edge/center —
 	 * unlike translateSelection (one shared delta for the whole selection),
@@ -8232,7 +8849,7 @@ this.clearSelectionAll();
 		this.beginBatch();
 		let mutated = false;
 		for (const { item, dx, dy } of moves) {
-			if (this.moveItemBy(item, dx, dy)) {
+			if (this.moveItemByVerified(item, dx, dy)) {
 				mutated = true;
 			}
 		}
@@ -8245,13 +8862,15 @@ this.clearSelectionAll();
 	 * push a single undo snapshot before the gesture, not for every mousemove. */
 	resizeElementBoundsById(
 		id: string, x: number, y: number, width: number, height: number, handle?: ResizeHandle): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot || !(width > 0) || !(height > 0)) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !this.schScene || !(width > 0) || !(height > 0)) {
 			return false;
 		}
 		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
 		if (!el) {
 			return false;
 		}
+		const commit = new SCH_COMMIT('Resize item');
+		commit.Modify(el);
 		if (el.name === 'rectangle' && typeof el.setStartEnd === 'function') {
 			el.setStartEnd(x, y, x + width, y + height);
 		}
@@ -8289,6 +8908,8 @@ this.clearSelectionAll();
 		else {
 			return false;
 		}
+		commit.Push(this.schematicModel.allScreens()[0]);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -8298,13 +8919,15 @@ this.clearSelectionAll();
 	 * point translates the complete arc, matching KiCad's common arc-edit
 	 * mode. */
 	moveCurveAnchorById(id: string, anchor: CurveAnchor, x: number, y: number): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !this.schScene) {
 			return false;
 		}
 		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
 		if (!el) {
 			return false;
 		}
+		const commit = new SCH_COMMIT('Edit curve');
+		commit.Modify(el);
 		if ((anchor === 'circle-center' || anchor === 'circle-radius') && el.name === 'circle') {
 			const center = el.getCenter?.();
 			if (!center) {
@@ -8413,6 +9036,8 @@ this.clearSelectionAll();
 		else {
 			return false;
 		}
+		commit.Push(this.schematicModel.allScreens()[0]);
+		this.resyncSchematicAstFromModel();
 		this.commitAstMutation();
 		return true;
 	}
@@ -8426,7 +9051,7 @@ this.clearSelectionAll();
 	 * (wrong id, wrong element type) never wastes an undo entry.
 	 */
 	renameLabel(id: string, newText: string): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !this.schScene) {
 			return false;
 		}
 		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
@@ -8434,14 +9059,33 @@ this.clearSelectionAll();
 			return false;
 		}
 		this.pushUndoSnapshot();
+		this.commitSchematicModelMutation(el, item => this.applyLabelRename(item, newText), 'Rename label');
+		return true;
+	}
+
+	/** Core rename logic extracted from renameLabel() — already fully
+	 *  duck-typed (`typeof el.setName === 'function'`), no AST-specific
+	 *  gate. Callers must validate `el` themselves BEFORE pushing an undo
+	 *  snapshot (see renameLabel — undo must snapshot the PRE-edit state,
+	 *  so the mutation can't happen before pushUndoSnapshot()); this helper
+	 *  re-checks harmlessly for the shadow-verify path, which has no
+	 *  separate snapshot step to order against. */
+	private applyLabelRename(el: any, newText: string): boolean {
+		if (!el || (typeof el.setName !== 'function' && !('value' in el))) {
+			return false;
+		}
 		if (typeof el.setName === 'function') {
 			el.setName(newText);
 		}
 		else {
 			el.value = newText;
 		}
-		this.commitAstMutation();
 		return true;
+	}
+
+	/** Compatibility alias retained for existing command call sites. */
+	renameLabelVerified(id: string, newText: string): boolean {
+		return this.renameLabel(id, newText);
 	}
 
 	/** Change an existing global/hier label's shape after placement — the
@@ -8453,7 +9097,7 @@ this.clearSelectionAll();
 	 *  union just needs to cover directive labels' different shape words
 	 *  (dot/round/diamond/rectangle vs input/output/bidirectional/…) too. */
 	setLabelShape(id: string, shape: KicadGlobalLabelShape | KicadDirectiveLabelShape): boolean {
-		if (this.documentType !== 'schematic' || !this.schematicRoot) {
+		if (this.documentType !== 'schematic' || !this.schematicModel || !this.schScene) {
 			return false;
 		}
 		const el: any = this.schScene?.hitTestItems.find(it => it.id === id)?.element;
@@ -8461,9 +9105,25 @@ this.clearSelectionAll();
 			return false;
 		}
 		this.pushUndoSnapshot();
-		el.setShape(shape);
-		this.commitAstMutation();
+		this.commitSchematicModelMutation(el, item => this.applyLabelShape(item, shape), 'Set label shape');
 		return true;
+	}
+
+	/** Core shape-set logic extracted from setLabelShape() — already fully
+	 *  duck-typed (`typeof el.setShape === 'function'`), no AST-specific
+	 *  gate. Callers must validate `el` themselves BEFORE pushing an undo
+	 *  snapshot, same ordering note as applyLabelRename above. */
+	private applyLabelShape(el: any, shape: string): boolean {
+		if (!el || typeof el.setShape !== 'function') {
+			return false;
+		}
+		el.setShape(shape);
+		return true;
+	}
+
+	/** Compatibility alias retained for existing command call sites. */
+	setLabelShapeVerified(id: string, shape: KicadGlobalLabelShape | KicadDirectiveLabelShape): boolean {
+		return this.setLabelShape(id, shape);
 	}
 
 	// ---- Rendering ----
@@ -9218,9 +9878,9 @@ this.clearSelectionAll();
 	 *  handles at each existing zone outline vertex, round handles at each
 	 *  edge midpoint (dragging one inserts a new corner there; see
 	 *  getBoardPolygonAnchors/moveBoardPolygonPoint/insertBoardPolygonPoint).
-	 *  Reads the LIVE zone geometry straight off the AST every frame rather
+	 *  Reads the live zone model geometry every frame rather
 	 *  than tracking separate drag-preview state — the drag handlers below
-	 *  already commit each mousemove via commitAstMutation() (the same
+	 *  already commit each mousemove through the model (the same
 	 *  established pattern moveCurveAnchorById uses on the schematic side),
 	 *  so the handles simply track whatever the zone's outline currently is. */
 	protected drawZoneEditHandles(renderer: Renderer): void {

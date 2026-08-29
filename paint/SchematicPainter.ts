@@ -1,4 +1,5 @@
 import { Vec2 } from '../math/Vec2';
+import { buildModelLibSymbols } from '@kicad-model/src/schematic/LibSymbolAdapter';
 import {
 	Angle
 }               from '../math/Angle';
@@ -203,25 +204,6 @@ export class SchematicPainter {
 			}
 		}
 		return sheets;
-	}
-
-	/**
-	 * Find a placed symbol instance by its Reference designator (e.g.
-	 * "CBST1") in an already-parsed document — used by the editor to
-	 * move/rotate a specific symbol (KicadRenderSession.moveSymbolByRef)
-	 * without re-parsing the whole schematic text.
-	 */
-	findSymbolInstanceByReference(schematic: any, reference: string): any | null {
-		const root = schematic.rootElement;
-		if (!getSymbolClass()) {
-			return null;
-		}
-		for (const instance of root.findChildrenByClass(getSymbolClass())) {
-			if (typeof instance.getReference === 'function' && instance.getReference() === reference) {
-				return instance;
-			}
-		}
-		return null;
 	}
 
 	build(schematic: any, docInfo?: SchematicDocInfo): SchematicScene {
@@ -431,16 +413,157 @@ export class SchematicPainter {
 		return { layersPresent, layerBuckets, hitTestItems, sheets };
 	}
 
+	/** Build a SchematicScene from a kicad-model Schematic (Phase 5 — model-
+	 *  backed render). Reuses the same per-element painters as build(), driven
+	 *  from the typed schematic items (which expose the kicad-io-style mm
+	 *  accessors this codebase's painters consume). Symbols render their body +
+	 *  pins; wires/buses/junctions/no-connects/labels render as the AST path. */
+	buildSchematicFromModel(schematic: import('@kicad-model/src/schematic/Schematic').Schematic, docInfo?: SchematicDocInfo): SchematicScene {
+		// NOTE: callers must have called registerDefaultKicadClasses() once
+		// (same requirement as the AST build() — it reads the registered
+		// @kicad-io schema classes via getPinClass()/getRectClass()/etc.).
+		const layerBuckets = new Map<string, SchPaintedItem[]>();
+		const pushItem = (item: SchPaintedItem) => {
+			const bucket = layerBuckets.get(item.layer);
+			if (bucket) bucket.push(item);
+			else layerBuckets.set(item.layer, [item]);
+		};
+		const sheets: SchematicSheetRef[] = [];
+
+		// prepareTextVars()/buildDrawingSheet() are AST-shaped
+		// (`root.findFirstChildByName('paper'/'title_block')`) — build a
+		// minimal duck-typed shim from the model's own SchematicScreen.page/
+		// titleBlock (same pattern as BoardDimension.getTextItem() on the
+		// PCB side) rather than rewriting either method for the model.
+		const rootScreen = schematic.rootSheet.screen;
+		const tb = rootScreen?.titleBlock;
+		const modelRootShim = {
+			findFirstChildByName: (name: string) => {
+				if (name === 'paper') return { attributes: [{ value: rootScreen?.page.name ?? 'A4' }] };
+				if (name === 'title_block' && tb) {
+					return {
+						getTitle: () => tb.title, getDate: () => tb.date, getRev: () => tb.rev, getCompany: () => tb.company,
+						getComment: (i: number) => tb.comments.get(i) ?? '',
+					};
+				}
+				return undefined;
+			},
+			// prepareTextVars()'s symbolFieldsByRef loop only cares that this
+			// returns "symbol instances" (getReference()/getProperties()) —
+			// SchematicSymbol already implements both, so the class arg is
+			// unused; walk every screen the same way build()'s AST loop below
+			// (kind === 70) does.
+			findChildrenByClass: (_cls: unknown) => {
+				const out: import('@kicad-model/src/schematic/SchematicSymbol').SchematicSymbol[] = [];
+				for (const screen of schematic.allScreens()) {
+					for (const item of screen.items) {
+						if ((item as any).type === 70 /* SCH_SYMBOL_T */) out.push(item as any);
+					}
+				}
+				return out;
+			},
+		};
+		this.prepareTextVars(modelRootShim, docInfo);
+
+		// Symbol bodies + pins + fields render via a model LibSymbol adapter.
+		const libSymbols = buildModelLibSymbols(schematic);
+
+		for (const screen of schematic.allScreens()) {
+			for (const item of screen.items) {
+				const kind = (item as any).type;
+				if (kind === 61 /* SCH_LINE_T wire/bus */) {
+					const w = item as any;
+					const isBus = w.isBus === true;
+					const it = isBus ? this.buildBus(w) : this.buildWireLike(w, 'Wires', schColors.wire);
+					if (it) pushItem(it);
+				} else if (kind === 59 /* SCH_BUS_WIRE_ENTRY_T */ || kind === 60 /* SCH_BUS_BUS_ENTRY_T */) {
+					const it = this.buildBusEntry(item);
+					if (it) pushItem(it);
+				} else if (kind === 57 /* SCH_JUNCTION_T */) {
+					const it = this.buildJunction(item);
+					if (it) pushItem(it);
+				} else if (kind === 58 /* SCH_NO_CONNECT_T */) {
+					const it = this.buildNoConnect(item);
+					if (it) pushItem(it);
+				} else if (kind === 65 /* SCH_LABEL_T */) {
+					const it = this.buildLocalLabel(item);
+					if (it) pushItem(it);
+				} else if (kind === 66 /* SCH_GLOBAL_LABEL_T */) {
+					for (const it of this.buildGlobalLabel(item)) pushItem(it);
+				} else if (kind === 67 /* SCH_HIER_LABEL_T */) {
+					for (const it of this.buildHierLabel(item)) pushItem(it);
+				} else if (kind === 70 /* SCH_SYMBOL_T */) {
+					for (const it of this.buildSymbolInstance(item, libSymbols)) pushItem(it);
+				} else if (kind === 53 /* SCH_TEXT_T */) {
+					const it = this.buildSchText(item);
+					if (it) pushItem(it);
+				} else if (kind === 54 /* SCH_TEXTBOX_T */) {
+					const it = this.buildSchTextBox(item);
+					if (it) pushItem(it);
+				} else if (kind === 62 /* SCH_BITMAP_T */) {
+					const it = this.buildSchImage(item, (schematic as any).version ?? 0);
+					if (it) pushItem(it);
+				} else if (kind === 51 /* SCH_SHAPE_T — standalone root-level graphic */) {
+					const s = item as any;
+					let it: SchPaintedItem | null = null;
+					switch (s.shapeKind) {
+						case 1 /* RECTANGLE */: it = this.buildSchRect(s); break;
+						case 2 /* CIRCLE */: it = this.buildSchCircle(s); break;
+						case 3 /* ARC */: it = this.buildSchArc(s); break;
+						case 5 /* BEZIER */: it = this.buildSchBezier(s); break;
+						default /* SEGMENT/POLY */: it = this.buildSchPolyline(s); break;
+					}
+					if (it) pushItem(it);
+				} else if (kind === 68 /* SCH_RULE_AREA_T */) {
+					const it = this.buildRuleArea(item);
+					if (it) pushItem(it);
+				} else if (kind === 69 /* SCH_DIRECTIVE_LABEL_T (netclass_flag) */) {
+					for (const it of this.buildNetclassFlag(item)) pushItem(it);
+				} else if (kind === 63 /* SCH_TABLE_T */) {
+					for (const it of this.buildTable(wrapSchTableForPaint(item))) pushItem(it);
+				} else if (kind === 73 /* SCH_SHEET_T */) {
+					for (const it of this.buildSheet(item)) pushItem(it);
+					const ref = this.extractSheetRef(item);
+					if (ref) sheets.push(ref);
+				}
+			}
+		}
+
+		if (docInfo?.showDrawingSheet !== false) {
+			for (const item of this.buildDrawingSheet(modelRootShim, docInfo)) {
+				pushItem(item);
+			}
+		}
+
+		for (const item of this.buildDanglingFlags(layerBuckets)) {
+			pushItem(item);
+		}
+
+		const layersPresent = schematicLayerOrder.filter(l => layerBuckets.has(l));
+		const hitTestItems: SchPaintedItem[] = [];
+		for (const layer of layersPresent) {
+			for (const item of layerBuckets.get(layer)!) {
+				if (item.hitTestable) hitTestItems.push(item);
+			}
+		}
+
+		return { layersPresent, layerBuckets, hitTestItems, sheets };
+	}
+
 	/** Pulls the (Sheetname, Sheetfile) pair + box bbox out of a `sheet`
 	 * element for hierarchy navigation — separate from buildSheet()'s own
 	 * property loop since that one is building PAINT items (with visibility/
 	 * hidden-property filtering) and this needs the raw Sheetfile value
 	 * regardless of whether it's set to render. */
 	protected extractSheetRef(sheet: any): SchematicSheetRef | null {
-		const atEl = getAtClass() ? sheet.findFirstChildByClass(getAtClass()) : null;
-		const sizeEl = getSizeClass() ? sheet.findFirstChildByClass(getSizeClass()) : null;
-		const x = atEl?.x ?? 0, y = atEl?.y ?? 0;
-		const w = sizeEl?.width ?? 10, h = sizeEl?.height ?? 10;
+		const atEl = typeof sheet.findFirstChildByClass === 'function' && getAtClass()
+			? sheet.findFirstChildByClass(getAtClass()) : null;
+		const sizeEl = typeof sheet.findFirstChildByClass === 'function' && getSizeClass()
+			? sheet.findFirstChildByClass(getSizeClass()) : null;
+		const modelOrigin = atEl ? null : (typeof sheet.getOrigin === 'function' ? sheet.getOrigin() : null);
+		const modelSize = sizeEl ? null : (typeof sheet.getSize === 'function' ? sheet.getSize() : null);
+		const x = atEl?.x ?? modelOrigin?.x ?? 0, y = atEl?.y ?? modelOrigin?.y ?? 0;
+		const w = sizeEl?.width ?? modelSize?.width ?? 10, h = sizeEl?.height ?? modelSize?.height ?? 10;
 		const uuid = sheet.getUuid() ?? `sheet:${ x },${ y }`;
 
 		let name = '';
@@ -1222,6 +1345,7 @@ export class SchematicPainter {
 		const instanceMatrix = buildInstanceMatrix(origin.x, origin.y, origin.rotation ?? 0, mirror);
 		const instanceId = instance.getUuid() ?? `sym:${ origin.x },${ origin.y }`;
 		const placedUnit: number = typeof instance.getUnitId === 'function' ? instance.getUnitId() : 0;
+		const placedBodyStyle: number = typeof instance.getBodyStyle === 'function' ? (instance.getBodyStyle() || 1) : 1;
 		const instanceRef: string = typeof instance.getReference === 'function' ?
 			(String(instance.getReference() ?? '').trim()) : '';
 		// Real KiCad's unit count gates the "U1" → "U1A" reference suffix
@@ -1248,7 +1372,7 @@ export class SchematicPainter {
 			? !!instance.isDnp()
 			: !!instance.findFirstChildByName?.('dnp')?.value;
 
-		const subUnits = this.relevantSubUnits(libDef, placedUnit, libSymbols);
+		const subUnits = this.relevantSubUnits(libDef, placedUnit, libSymbols, placedBodyStyle);
 		// Two passes across ALL sub-units, not one pass per sub-unit: a
 		// gate symbol's filled outline (e.g. the AND-gate rectangle/D-shape)
 		// and its body markings ("&", ">=1", "1", ...) commonly live in
@@ -1587,7 +1711,18 @@ export class SchematicPainter {
 	 * one level (matches addLibrarySymbolFromText's own one-level embed —
 	 * real-world libraries don't chain `extends`), by name within the SAME
 	 * lib_symbols block the placed instance's own libId resolved against. */
-	protected relevantSubUnits(libDef: any, placedUnit: number, libSymbols?: any): any[] {
+	// `placedBodyStyle` defaults to 1 (BASE) to match a real placed
+	// SCH_SYMBOL's own default when the file omits `(convert ...)` — see
+	// SCH_PAINTER::draw(LIB_SYMBOL*, ...) in sch_painter.cpp, whose item
+	// filter this mirrors: `unit === 0 || unit === aUnit` AND
+	// `bodyStyle === 0 || bodyStyle === aBodyStyle` (0 on the item side means
+	// "common to every unit/style", never filtered). Previously hardcoded to
+	// `deMorgan === 0 || deMorgan === 1`, which is true for every real value
+	// and so never actually filtered by body style at all — any symbol with
+	// real content in more than one body style (confirmed real example:
+	// Power_Protection:ESD224DQA) had every style painted on top of every
+	// other one, not just the one actually selected.
+	protected relevantSubUnits(libDef: any, placedUnit: number, libSymbols?: any, placedBodyStyle = 1): any[] {
 		let graphicsSource = libDef;
 		if (typeof libDef.isDerived === 'function' && libDef.isDerived() && typeof libDef.getLayers === 'function'
 			&& libDef.getLayers().length === 0) {
@@ -1606,7 +1741,7 @@ export class SchematicPainter {
 				return true;
 			}
 			const { unit, deMorgan } = s.deconstructSymbolName();
-			return (unit === 0 || unit === placedUnit) && (deMorgan === 0 || deMorgan === 1);
+			return (unit === 0 || unit === placedUnit) && (deMorgan === 0 || deMorgan === placedBodyStyle);
 		});
 	}
 
@@ -1822,15 +1957,22 @@ export class SchematicPainter {
 	protected buildSchTextBox(textBox: any): SchPaintedItem | null {
 		const value = this.expandText(textBox.value ?? '');
 		const origin = typeof textBox.getOrigin === 'function' ? textBox.getOrigin() : { x: 0, y: 0, rotation: 0 };
-		const size = textBox.findFirstChildByName?.('size');
-		const width = Number(size?.width ?? size?.attributes?.[0]?.value) || 0;
-		const height = Number(size?.height ?? size?.attributes?.[1]?.value) || 0;
+		// Model items (kicad-model's SchTextBox) have no findFirstChildByName;
+		// they expose getSize()/getMargins() mm accessors instead, used only
+		// when the AST-shaped lookup comes up empty (keeps the AST path's
+		// resolution order byte-identical to before).
+		const sizeNode = textBox.findFirstChildByName?.('size');
+		const sizeMm = !sizeNode && typeof textBox.getSize === 'function' ? textBox.getSize() : null;
+		const width = sizeMm ? sizeMm.width : (Number(sizeNode?.width ?? sizeNode?.attributes?.[0]?.value) || 0);
+		const height = sizeMm ? sizeMm.height : (Number(sizeNode?.height ?? sizeNode?.attributes?.[1]?.value) || 0);
 		if (!(width > 0) || !(height > 0)) {
 			return null;
 		}
 		const x = origin.x, y = origin.y;
-		const margins = textBox.findFirstChildByName?.('margins')?.attributes ?? [];
-		const margin = (index: number) => Number(margins[index]?.value) || 0;
+		const marginsNode = textBox.findFirstChildByName?.('margins');
+		const marginsMm = !marginsNode && typeof textBox.getMargins === 'function' ? textBox.getMargins() : null;
+		const margins = marginsNode?.attributes ?? [];
+		const margin = (index: number) => marginsMm ? (marginsMm[index] ?? 0) : (Number(margins[index]?.value) || 0);
 		const left = margin(0), top = margin(1), right = margin(2), bottom = margin(3);
 		const contentW = Math.max(0, width - left - right);
 		const contentH = Math.max(0, height - top - bottom);
@@ -1856,14 +1998,20 @@ export class SchematicPainter {
 		const effectiveStrokeWidth = strokeWidth || pinThickness;
 		const fillType = typeof textBox.getFill === 'function' ? textBox.getFill() : 'none';
 		const fillNode = textBox.findFirstChildByName?.('fill');
+		// Model items have no fill child node — fall back to their
+		// getFillColorOverride() mm-accessor instead.
 		const fillColor = fillType === 'color'
-			? fillNode?.getColor?.() ?? schColors.componentBody
+			? (fillNode ? (fillNode.getColor?.() ?? schColors.componentBody)
+				: (textBox.getFillColorOverride?.() ?? schColors.componentBody))
 			: fillType === 'background' ? schematicBackgroundColor : undefined;
 		const strokeNode = textBox.findFirstChildByName?.('stroke');
 		// KicadElementStroke.getColor() intentionally falls back to transparent
 		// when a color child is absent. For a text box that means “use the
-		// Notes-layer color”, not a transparent border.
-		const strokeColor = strokeNode?.findFirstChildByName?.('color')?.getColor?.() as string | undefined;
+		// Notes-layer color”, not a transparent border. Model items fall back
+		// to their getStrokeColorOverride() accessor (undefined when unset).
+		const strokeColor = strokeNode
+			? (strokeNode.findFirstChildByName?.('color')?.getColor?.() as string | undefined)
+			: textBox.getStrokeColorOverride?.();
 		const id = textBox.getUuid?.() ?? `sch-text-box:${ x },${ y }`;
 		// Same hit-test contract as ordinary schematic rectangles: an unfilled
 		// text box is selectable by its border only, so it cannot steal clicks
@@ -2264,8 +2412,14 @@ export class SchematicPainter {
 		if (!name) {
 			return null;
 		}
-		const atEl = getAtClass() ? label.findFirstChildByClass(getAtClass()) : null;
-		const x = atEl?.x ?? 0, y = atEl?.y ?? 0, rotation = atEl?.rotation ?? 0;
+		// Model items (kicad-model's SchLabel) have no findFirstChildByClass —
+		// they expose getOrigin() instead, used only when the AST-shaped
+		// lookup comes up empty (keeps the AST path's own resolution
+		// untouched).
+		const atEl = typeof label.findFirstChildByClass === 'function' && getAtClass()
+			? label.findFirstChildByClass(getAtClass()) : null;
+		const origin = atEl ? null : (typeof label.getOrigin === 'function' ? label.getOrigin() : null);
+		const x = atEl?.x ?? origin?.x ?? 0, y = atEl?.y ?? origin?.y ?? 0, rotation = atEl?.rotation ?? origin?.rotation ?? 0;
 		const { size: textSize, thickness, italic } = readElementFontMetrics(label);
 		// Real KiCad (SCH_LABEL_BASE::GetSchematicTextOffset) lifts a plain
 		// net label clear of the wire it's attached to by text_offset_ratio
@@ -2706,10 +2860,17 @@ export class SchematicPainter {
 	 * name, filename, and pin markers. */
 	protected buildSheet(sheet: any): SchPaintedItem[] {
 		const items: SchPaintedItem[] = [];
-		const atEl = getAtClass() ? sheet.findFirstChildByClass(getAtClass()) : null;
-		const sizeEl = getSizeClass() ? sheet.findFirstChildByClass(getSizeClass()) : null;
-		const x = atEl?.x ?? 0, y = atEl?.y ?? 0;
-		const w = sizeEl?.width ?? 10, h = sizeEl?.height ?? 10;
+		// Model items (kicad-model's SchematicSheet) have no
+		// findFirstChildByClass — they expose getOrigin()/getSize() mm
+		// accessors instead, used only when the AST-shaped lookup is absent.
+		const atEl = typeof sheet.findFirstChildByClass === 'function' && getAtClass()
+			? sheet.findFirstChildByClass(getAtClass()) : null;
+		const sizeEl = typeof sheet.findFirstChildByClass === 'function' && getSizeClass()
+			? sheet.findFirstChildByClass(getSizeClass()) : null;
+		const modelOrigin = atEl ? null : (typeof sheet.getOrigin === 'function' ? sheet.getOrigin() : null);
+		const modelSize = sizeEl ? null : (typeof sheet.getSize === 'function' ? sheet.getSize() : null);
+		const x = atEl?.x ?? modelOrigin?.x ?? 0, y = atEl?.y ?? modelOrigin?.y ?? 0;
+		const w = sizeEl?.width ?? modelSize?.width ?? 10, h = sizeEl?.height ?? modelSize?.height ?? 10;
 		const id = sheet.getUuid() ?? `sheet:${ x },${ y }`;
 
 		const shape: PaintedShape = { type: 'rect', x, y, w, h };
@@ -2791,14 +2952,22 @@ export class SchematicPainter {
 		// flag body point into the sheet while its text remains outside.  If
 		// the raw electrical shape is used directly, left/top pins visibly
 		// render outside the sheet (and right/bottom pins point the wrong way).
-		if (getPinClass()) {
-			for (const pin of sheet.findChildrenByClass(getPinClass())) {
-				const pinName = pin.attributes?.[0]?.value as string | undefined;
+		// Model items (kicad-model's SchematicSheetPin) have no
+		// findChildrenByClass — fall back to the sheet's own `.pins` array,
+		// whose items expose `.getText()`/`.shape`/`getOrigin()` directly
+		// instead of the AST's raw attributes[0]/[1].
+		const pinList: any[] = typeof sheet.findChildrenByClass === 'function' && getPinClass()
+			? sheet.findChildrenByClass(getPinClass())
+			: (sheet.pins ?? []);
+		if (pinList.length) {
+			for (const pin of pinList) {
+				const isModelPin = typeof pin.getText === 'function';
+				const pinName = isModelPin ? pin.getText() : (pin.attributes?.[0]?.value as string | undefined);
 				if (!pinName) {
 					continue;
 				}
 				const pinOrigin = typeof pin.getOrigin === 'function' ? pin.getOrigin() : { x, y, rotation: 0 };
-				const pinShape = (pin.attributes?.[1]?.value as string) ?? 'passive';
+				const pinShape = (isModelPin ? pin.shape : (pin.attributes?.[1]?.value as string)) || 'passive';
 				const sheetPinShape = pinShape === 'input'
 					? 'output'
 					: pinShape === 'output' ? 'input' : pinShape;
@@ -3181,6 +3350,66 @@ const DANGLING_CIRCLE_RADIUS = 0.381; // mm — 15 mils
 const DANGLING_STROKE_WIDTH = pinThickness;
 // 0.001mm — matches the precision real schematic coordinates actually carry.
 const JUNCTION_POINT_EPS = 1e-3;
+
+/** Wraps a kicad-model `SchTable`/`SchTableCell` in the AST-shaped
+ *  `findFirstChildByName` surface `buildTable()` expects. Much of what that
+ *  builder reads already has a model-friendly fast path (`getFont()`,
+ *  `getAnchorPoint()`, `getOrigin()` are all read via `typeof x.getFn ===
+ *  'function'` checks before falling back to AST tree-walking — every one of
+ *  those already exists on `SchTableCell` via `SchTextBase`), so this shim
+ *  only needs to cover the handful of reads that skip straight to
+ *  `findFirstChildByName` with no fast path: cells/column_count/border/
+ *  separators/size/span/margins/fill. Same reasoning as `BoardTable`'s
+ *  equivalent wrapper in `BoardPainter.ts` — the border/separator/span
+ *  layout math itself is reused unchanged, not re-derived. */
+function wrapSchTableForPaint(table: any): any {
+	const mmSch = (v: number) => v / 1e4; // SCH_IU_PER_MM
+	const strokeNode = (widthMm: number, type: string) => ({
+		getWidth: () => widthMm,
+		getType: () => type,
+	});
+	const flagNode = (flags: Record<string, boolean>, widthMm: number, type: string) => ({
+		findFirstChildByName: (name: string) => {
+			if (name in flags) return { attributes: [{ value: flags[name] }] };
+			if (name === 'stroke') return strokeNode(widthMm, type);
+			return undefined;
+		},
+	});
+	return {
+		getUuid: () => table.uuid.asString(),
+		findFirstChildByName: (name: string) => {
+			if (name === 'cells') {
+				return { findChildrenByName: (n: string) => (n === 'table_cell' ? table.cells.map(wrapSchTableCellForPaint) : []) };
+			}
+			if (name === 'column_count') return { attributes: [{ value: table.columnCount }] };
+			if (name === 'border') return flagNode({ external: table.borderExternal, header: table.borderHeader }, mmSch(table.borderStrokeWidth), table.borderStrokeType);
+			if (name === 'separators') return flagNode({ rows: table.separatorRows, cols: table.separatorCols }, mmSch(table.separatorStrokeWidth), table.separatorStrokeType);
+			return undefined;
+		},
+	};
+}
+
+function wrapSchTableCellForPaint(cell: any): any {
+	return {
+		value: cell.getText(),
+		getFont: () => cell.getFont(),
+		getAnchorPoint: () => cell.getAnchorPoint(),
+		getOrigin: () => cell.getOrigin(),
+		getUuid: () => cell.getUuid(),
+		findFirstChildByName: (name: string) => {
+			if (name === 'size') { const s = cell.getSize(); return { width: s.width, height: s.height }; }
+			if (name === 'span') return { attributes: [{ value: cell.colSpan }, { value: cell.rowSpan }] };
+			if (name === 'margins') return { attributes: cell.getMarginsMM().map((v: number) => ({ value: v })) };
+			if (name === 'fill') {
+				return {
+					getType: () => cell.getFill(),
+					findFirstChildByName: (n: string) => (n === 'color' ? { getColor: () => cell.getFillColorOverride() } : undefined),
+				};
+			}
+			return undefined;
+		},
+	};
+}
 
 /** Spreadsheet-style 0-based column → letter(s): 0→A, 25→Z, 26→AA, ... —
  *  used by ${ADDR} in table-cell text expansion. */

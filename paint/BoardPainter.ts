@@ -33,6 +33,16 @@ export interface PaintedItem {
 	element: any;
 	netId?: number | null;
 	netName?: string | null;
+	/** Drill hole size, mm — only present for `'pad'`/`'via'` items with a
+	 *  real hole (KiCad's `PAD::GetDrillSize()`/`PCB_VIA::GetDrillValue()`).
+	 *  `height` equals `width` for a round hole; a taller `height` means an
+	 *  oval/slot drill. Added specifically so DRC hole-size checks
+	 *  (`DrcTestProviderHoleSize.ts`) don't need to reach into `element`. */
+	drillSize?: { width: number; height: number } | null;
+	/** Exact world-space grid-helper anchors for geometry whose painted shape
+	 *  intentionally loses information (notably arcs represented by a circle
+	 *  broad-phase shape). */
+	snapAnchors?: { x: number; y: number }[];
 	/** Zone geometry belongs to one of Pcbnew's primary display modes. */
 	zoneDisplayMode?: ZoneDisplayMode;
 	// Captures whatever geometry this item needs to redraw itself — built
@@ -396,6 +406,113 @@ export class BoardPainter {
 		return { layersPresent, layerBuckets, hitTestItems, zoneFills, boardBodyRings, copperLayerStack, declaredLayers: globalLayers };
 	}
 
+	/** Build a LayeredBoardScene from a kicad-model Board (Phase 3 — model-backed
+	 *  render). Covers the electrical board the model fully represents (tracks,
+	 *  vias, zones, footprints + pads); per-element buildX reuse keeps the output
+	 *  identical to the AST path for those items. Zone fills and the board-body
+	 *  outline are computed from the model where possible; ported drawings are
+	 *  dispatched below by their native KicadT. */
+	buildFromModel(board: import('@kicad-model/src/pcb/Board').Board): LayeredBoardScene {
+		const layerBuckets = new Map<string, PaintedItem[]>();
+		const pushItem = (item: PaintedItem) => {
+			const bucket = layerBuckets.get(item.layer);
+			if (bucket) bucket.push(item);
+			else layerBuckets.set(item.layer, [item]);
+		};
+
+		// Copper layer id -> name from the model's design settings.
+		const copperIdToName = new Map<number, string>();
+		for (const [id, def] of board.designSettings.layers) {
+			if (def.name.endsWith('.Cu')) copperIdToName.set(id, def.name);
+		}
+		if (copperIdToName.size === 0) {
+			copperIdToName.set(0, 'F.Cu');
+			copperIdToName.set(2, 'B.Cu');
+		}
+		const copperLayerStack = [...copperIdToName.values()];
+		const globalLayers = [...board.designSettings.layers.values()]
+			.sort((a, b) => a.number - b.number).map(layer => layer.name);
+		if (globalLayers.length === 0) globalLayers.push(...copperLayerStack);
+
+		const fakeBoard = { rootElement: {} };
+		for (const track of board.tracks) {
+			for (const item of (track.type === 15 /* PCB_ARC_T */
+				? this.buildTrackArc(track, board) : this.buildTrack(track, fakeBoard))) pushItem(item);
+		}
+		for (const via of board.vias) {
+			for (const item of this.buildVia(via, fakeBoard)) pushItem(item);
+		}
+		for (const zone of board.zones) {
+			for (const item of this.buildZone(zone)) pushItem(item);
+		}
+		for (const fp of board.footprints) {
+			for (const item of this.buildFootprint(fp, globalLayers, fakeBoard)) pushItem(item);
+		}
+		for (const g of board.drawings ?? []) {
+			// Dispatch by the model's own KicadT (PCB_SHAPE_T=5/PCB_REFERENCE_IMAGE_T=6/PCB_TEXT_T=9/
+			// PCB_TEXTBOX_T=10/PCB_TABLE_T=11/PCB_DIMENSION_T=17/PCB_BARCODE_T=18), same pattern
+			// used for the schematic model-backed painter dispatch.
+			const kind = (g as any).type;
+			let item: PaintedItem | PaintedItem[] | null = null;
+			if (kind === 5 /* PCB_SHAPE_T */) {
+				const shapeKind = (g as any).shapeKind;
+				item = shapeKind === 1 /* RECTANGLE */ ? this.buildGrRect(g)
+					: shapeKind === 2 /* CIRCLE */ ? this.buildGrCircle(g)
+						: shapeKind === 3 /* ARC */ ? this.buildGrArc(g)
+							: shapeKind === 4 /* POLY */ ? this.buildGrPoly(g)
+								: shapeKind === 5 /* BEZIER */ ? this.buildGrCurve(g)
+									: this.buildGrLine(g);
+			}
+			else if (kind === 6 /* PCB_REFERENCE_IMAGE_T */) {
+				item = this.buildBoardImage(g, board.fileVersion);
+			}
+			else if (kind === 9 /* PCB_TEXT_T */) {
+				item = this.buildTextElement(g, null);
+			}
+			else if (kind === 10 /* PCB_TEXTBOX_T */) {
+				item = this.buildGrTextBox(g);
+			}
+			else if (kind === 17 /* PCB_DIMENSION_T */) {
+				item = this.buildDimension(g);
+			}
+			else if (kind === 18 /* PCB_BARCODE_T */) {
+				item = this.buildBarcode(g);
+			}
+			else if (kind === 11 /* PCB_TABLE_T */) {
+				item = this.buildTable(wrapBoardTableForPaint(
+					g as unknown as import('@kicad-model/src/pcb/BoardTable').BoardTable));
+			}
+			if (Array.isArray(item)) { for (const it of item) pushItem(it); }
+			else if (item) pushItem(item);
+		}
+
+		const layersPresent = layerPaintOrder.filter(l => layerBuckets.has(l) || globalLayers.includes(l));
+		const hitTestItems: PaintedItem[] = [];
+		for (const layer of layersPresent) {
+			for (const item of layerBuckets.get(layer) ?? []) {
+				if (item.hitTestable) hitTestItems.push(item);
+			}
+		}
+
+		// Zone fills from the model's per-layer filled polygons.
+		const zoneFills: ZoneFillRegion[] = [];
+		for (const zone of board.zones) {
+			const netId = zone.getNetCode();
+			if (netId <= 0) continue;
+			for (const [layerId, regions] of zone.filledPolygons) {
+				const layerName = copperIdToName.get(layerId) ?? copperLayerStack[0] ?? 'F.Cu';
+				for (const region of regions) {
+					if (region.outline.length >= 3) {
+						zoneFills.push({ netId, layer: layerName, points: region.outline.map(p => new Vec2(p.x / 1e6, p.y / 1e6)) });
+					}
+				}
+			}
+		}
+
+		const boardBodyRings = this.buildBoardBodyRings(board);
+		return { layersPresent, layerBuckets, hitTestItems, zoneFills, boardBodyRings, copperLayerStack, declaredLayers: globalLayers };
+	}
+
 	protected buildBoardBodyRings(board: any): Vec2[][] {
 		return buildBoardOutlineRingsMm(board)
 			.filter(ring => ring.length >= 3)
@@ -698,6 +815,10 @@ export class BoardPainter {
 	}
 
 	protected getGlobalLayerNames(board: any): string[] {
+		if (board?.designSettings?.layers instanceof Map) {
+			return [...board.designSettings.layers.values()]
+				.sort((a: any, b: any) => a.number - b.number).map((layer: any) => layer.name);
+		}
 		const layersEl = board.rootElement.findFirstChildByClass(getLayersClass());
 		if (!layersEl) {
 			return [];
@@ -945,7 +1066,11 @@ export class BoardPainter {
 
 		let pads: any[] = [];
 		try {
-			pads = footprint.findChildrenByClass(getPadClass());
+			// Model items (kicad-model's Footprint) expose getPads() directly —
+			// preferred over findChildrenByClass(), which for a model
+			// footprint can't discriminate "give me pads" from "give me
+			// fp_line/fp_rect/..." the way real class-registry lookup does.
+			pads = typeof footprint.getPads === 'function' ? footprint.getPads() : footprint.findChildrenByClass(getPadClass());
 		}
 		catch {
 			// A parser gap on one footprint (e.g. an unsupported pad attribute)
@@ -1122,6 +1247,75 @@ export class BoardPainter {
 			if (getTableClass()) {
 				for (const table of footprint.findChildrenByClass(getTableClass())) {
 					items.push(...this.buildTable(table, footprintMatrix, footprintId, origin.rotation ?? 0));
+				}
+			}
+		}
+
+		// Model path: footprint.findChildrenByClass() above is a deliberate
+		// empty-array stub for a kicad-model Footprint (it can't discriminate
+		// "give me fp_line" from "give me pads" via AST-style class lookup —
+		// see Footprint.findChildrenByClass's own doc comment), so real
+		// footprint-body graphics come from the model's own `drawings` array
+		// instead, dispatched by FpGraphic.kind and wrapped to the same
+		// AST-shaped accessors via wrapFpGraphicForPaint().
+		if (Array.isArray(footprint.drawings)) {
+			for (const g of footprint.drawings) {
+				if (g.kind === 'line') {
+					items.push(this.buildFpLine(wrapFpGraphicForPaint(g), footprintMatrix, footprintId));
+				}
+				else if (g.kind === 'rect') {
+					items.push(this.buildFpRect(wrapFpGraphicForPaint(g), footprintMatrix, footprintId));
+				}
+				else if (g.kind === 'circle') {
+					items.push(this.buildFpCircle(wrapFpGraphicForPaint(g), footprintMatrix, footprintId));
+				}
+				else if (g.kind === 'arc') {
+					const item = this.buildFpArc(wrapFpGraphicForPaint(g), footprintMatrix, origin.rotation ?? 0, footprintId);
+					if (item) items.push(item);
+				}
+				else if (g.kind === 'poly') {
+					const item = this.buildFpPoly(wrapFpGraphicForPaint(g), footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+				else if (g.kind === 'bezier') {
+					const item = this.buildCurve(wrapFpGraphicForPaint(g), footprintMatrix, footprintId);
+					if (item) items.push(item);
+				}
+				else if (g.kind === 'text') {
+					const item = this.buildTextElement(wrapFpGraphicForPaint(g), footprintMatrix, footprintId, origin.rotation ?? 0, footprint);
+					if (item) items.push(item);
+				}
+				else if (g.kind === 'textbox') {
+					const item = this.buildPcbTextBox(wrapFpGraphicForPaint(g), footprintMatrix, footprintId, origin.rotation ?? 0);
+					if (item) items.push(item);
+				}
+			}
+		}
+
+		// Footprint-embedded dimensions (kicad-model's Footprint.dimensions) —
+		// UNLIKE fp_line/fp_rect/etc, a real file stores these in ABSOLUTE
+		// board coordinates even when nested inside a footprint (confirmed
+		// against GigaMicroEPCV2.kicad_pcb: a footprint-embedded dimension's
+		// `pts` sit at board-scale mm like 154.5/151.5, while that same
+		// footprint's fp_line/fp_circle siblings sit at small part-local
+		// offsets near 0,0) — a mechanical measurement is meaningless in a
+		// rotate/mirror-relative local frame. So no footprintMatrix transform
+		// here, unlike every other fp-graphic builder above: same call as a
+		// board-root dimension.
+		if (Array.isArray((footprint as any).dimensions)) {
+			for (const dim of (footprint as any).dimensions) {
+				for (const item of this.buildDimension(dim)) items.push(item);
+			}
+		}
+
+		// Footprint-embedded tables (kicad-model's Footprint.tables) — UNLIKE
+		// dimensions, these ARE footprint-local (see Footprint.tables' own
+		// doc comment), so footprintMatrix is passed through to buildTable()
+		// same as every other fp-graphic builder above.
+		if (Array.isArray((footprint as any).tables)) {
+			for (const table of (footprint as any).tables) {
+				for (const item of this.buildTable(wrapBoardTableForPaint(table), footprintMatrix, footprintId, origin.rotation ?? 0)) {
+					items.push(item);
 				}
 			}
 		}
@@ -1370,11 +1564,18 @@ export class BoardPainter {
 		// Namespaced under footprintId — see buildFpLine's doc comment.
 		const id = `${ footprintId }:${ arc.getUuid() ?? `fp-arc:${ layer }:${ centerX },${ centerY }` }`;
 		const shape: PaintedShape = { type: 'circle', cx: worldCenter.x, cy: worldCenter.y, r: radius };
+		const localArcPoints = typeof arc.getStartMidEnd === 'function' ? arc.getStartMidEnd() : null;
+		const snapAnchors = localArcPoints
+			? [localArcPoints.start, localArcPoints.mid, localArcPoints.end]
+				.map((p: { x: number; y: number }) => footprintMatrix.transform(new Vec2(p.x, p.y)))
+				.map((p: Vec2) => ({ x: p.x, y: p.y }))
+			: [];
+		snapAnchors.push({ x: worldCenter.x, y: worldCenter.y });
 
 		return {
 			// Not selectable outside the footprint editor — see buildFpLine's
 			// doc comment.
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: false, element: arc, snapAnchors,
 			draw: (renderer, color) => {
 				renderer.arc(
 					worldCenter, radius,
@@ -1484,6 +1685,7 @@ export class BoardPainter {
 					id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 					netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 					netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
+					drillSize: drill ? { width: drill.width, height: drill.height ?? drill.width } : null,
 					draw: (renderer, color, displayMode) => {
 						if (displayMode === 'outline') {
 							renderer.circle(worldCenter, size.width / 2, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
@@ -1518,6 +1720,7 @@ export class BoardPainter {
 						id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 						netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 						netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
+						drillSize: drill ? { width: drill.width, height: drill.height ?? drill.width } : null,
 						draw: (renderer, color, displayMode) => {
 							if (displayMode === 'outline') {
 								renderer.polygon(worldCorners, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
@@ -1544,6 +1747,7 @@ export class BoardPainter {
 							id: `${ id }:poly${ ri }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 							netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 							netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
+							drillSize: drill ? { width: drill.width, height: drill.height ?? drill.width } : null,
 							draw: (renderer, color, displayMode) => {
 								if (displayMode === 'outline') {
 									renderer.polygon(worldCorners, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
@@ -1599,6 +1803,7 @@ export class BoardPainter {
 					id: `${ id }:${ layer }`, layer, kind: 'pad', shape, bbox: shapeToBBox(shape), hitTestable: true, element: pad,
 					netId: typeof pad.getNetId === 'function' ? pad.getNetId() : null,
 					netName: typeof pad.getNetName === 'function' ? pad.getNetName() : null,
+					drillSize: drill ? { width: drill.width, height: drill.height ?? drill.width } : null,
 					draw: (renderer, color, displayMode) => {
 						if (displayMode === 'outline') {
 							renderer.polygon(worldCorners, { strokeColor: isNpth ? npthOutlineColor : color, strokeWidth: SKETCH_STROKE_WIDTH });
@@ -1872,6 +2077,7 @@ export class BoardPainter {
 			id, layer: 'Vias', kind: 'via', shape, bbox: shapeToBBox(shape), hitTestable: true, element: via,
 			netId: typeof via.getNetId === 'function' ? via.getNetId() : null,
 			netName: typeof via.getNetName === 'function' ? via.getNetName() : null,
+			drillSize: drill.width > 0 ? { width: drill.width, height: drill.height ?? drill.width } : null,
 			draw: (renderer, color, displayMode) => {
 				// The outer ring is normally colored by the via's own (front)
 				// copper layer, matching real KiCad's PCB_RENDER_SETTINGS::
@@ -1914,7 +2120,12 @@ export class BoardPainter {
 		if (label) {
 			items.push(label);
 		}
-		const viaLayers = getElementLayers(via);
+		// getElementLayers() is AST-shaped (via.findFirstChildByName('layers'))
+		// — a model Via has no such method, so this silently returned []
+		// there, skipping via mask-aperture rendering for every via on the
+		// model path (see this.getLayers() usage a few lines up for the same
+		// duck-typed-fallback pattern already established in this function).
+		const viaLayers = typeof via.getLayers === 'function' ? via.getLayers() : getElementLayers(via);
 		const maskMargin = getBoardMaskExpansion(board);
 		for (const layer of getViaMaskLayers(via, board, viaLayers)) {
 			const radius = Math.max(0, outerRadius + maskMargin);
@@ -2008,9 +2219,13 @@ export class BoardPainter {
 		const id = arc.getUuid() ?? `gr-arc:${ layer }:${ centerX },${ centerY }`;
 		// filled: false — same reasoning as buildTrackArc's own comment.
 		const shape: PaintedShape = { type: 'circle', cx: centerX, cy: centerY, r: radius, filled: false, strokeWidth: width };
+		const points = typeof arc.getStartMidEnd === 'function' ? arc.getStartMidEnd() : null;
+		const snapAnchors = points
+			? [points.start, points.mid, points.end, { x: centerX, y: centerY }]
+			: [{ x: centerX, y: centerY }];
 
 		return {
-			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc,
+			id, layer, kind: 'graphic', shape, bbox: shapeToBBox(shape), hitTestable: true, element: arc, snapAnchors,
 			draw: (renderer, color) => {
 				renderer.arc(new Vec2(centerX, centerY), radius, startAngle, endAngle, { strokeColor: color, strokeWidth: width || 0.1 });
 			},
@@ -2191,9 +2406,13 @@ export class BoardPainter {
 			});
 		}
 
+		// Model items (kicad-model's BoardDimension) have no
+		// findFirstChildByClass — they expose getTextItem() instead, used
+		// only when the AST-shaped lookup is absent (keeps the AST path's
+		// own resolution untouched).
 		const textEl = (typeof dim.findFirstChildByClass === 'function' && getGrTextClass())
 			? dim.findFirstChildByClass(getGrTextClass())
-			: null;
+			: (typeof dim.getTextItem === 'function' ? dim.getTextItem() : null);
 		if (textEl?.value) {
 			const textOrigin = typeof textEl.getOrigin === 'function' ? textEl.getOrigin() : { x: points[0]?.x ?? 0, y: points[0]?.y ?? 0, rotation: 0 };
 			const font = typeof textEl.getFont === 'function' ? textEl.getFont() : { height: 1 };
@@ -3103,6 +3322,203 @@ function getBoardVersion(root: any): number {
 	return typeof version?.value === 'number' ? version.value : Number(version?.attributes?.[0]?.value ?? 0);
 }
 
+// --- kicad-model Footprint.drawings (FpGraphic) — model-path rendering ----
+// This module deliberately has no compile-time dependency on kicad-model
+// (see the file-top note on PaintedItem) — buildFromModel() only receives
+// typed model VALUES already resolved by its caller, never imports a
+// kicad-model type. Duplicating the tiny layer-name table and IU/mm
+// conversion (both already duplicated a second time inside kicad-model
+// itself, between BoardSerializer.ts and layerNames.ts) keeps that
+// boundary intact rather than adding a new cross-package import for it;
+// `/ 1e6` for PCB IU->mm is the same literal already used a few lines up in
+// this file (the zoneFills loop in buildFromModel).
+const FP_LAYER_NAME: Record<number, string> = {
+	0: 'F.Cu', 2: 'B.Cu', 1: 'F.Mask', 3: 'B.Mask', 5: 'F.SilkS', 7: 'B.SilkS',
+	9: 'F.Adhes', 11: 'B.Adhes', 13: 'F.Paste', 15: 'B.Paste',
+	17: 'Dwgs.User', 19: 'Cmts.User', 21: 'Eco1.User', 23: 'Eco2.User',
+	25: 'Edge.Cuts', 27: 'Margin', 29: 'B.CrtYd', 31: 'F.CrtYd', 33: 'B.Fab', 35: 'F.Fab', 37: 'Rescue',
+	39: 'User.1', 41: 'User.2', 43: 'User.3', 45: 'User.4',
+	47: 'User.5', 49: 'User.6', 51: 'User.7', 53: 'User.8', 55: 'User.9', 57: 'User.10',
+};
+function fpLayerName(id: number): string {
+	return FP_LAYER_NAME[id] ?? 'F.SilkS';
+}
+
+/** Pure port of kicad-io's WithStartMidEnd.getArcCenterRadiusAngles() (same
+ *  three-point circumcenter + forward-sweep-through-mid disambiguation) —
+ *  duplicated rather than imported for the same no-hard-dependency reason
+ *  as FP_LAYER_NAME above. Inputs/outputs are mm, matching buildFpArc's
+ *  expectations. */
+function fpArcCenterRadiusAngles(start: { x: number; y: number }, mid: { x: number; y: number }, end: { x: number; y: number }) {
+	const ax = start.x, ay = start.y, bx = mid.x, by = mid.y, cx = end.x, cy = end.y;
+	const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+	if (Math.abs(d) < 1e-10) {
+		throw new Error('Points are collinear, cannot form an arc');
+	}
+	const centerX = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+	const centerY = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+	const radius = Math.hypot(ax - centerX, ay - centerY);
+	const angleOf = (x: number, y: number) => Math.atan2(y - centerY, x - centerX);
+	const rawStartAngle = angleOf(ax, ay);
+	const rawMidAngle = angleOf(bx, by);
+	const rawEndAngle = angleOf(cx, cy);
+	const normalize = (a: number) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+	const forward = (from: number, to: number) => normalize(to - from);
+	const forwardStartToMid = forward(rawStartAngle, rawMidAngle);
+	const forwardStartToEnd = forward(rawStartAngle, rawEndAngle);
+	let startAngle: number, endAngle: number;
+	if (forwardStartToMid < forwardStartToEnd) {
+		startAngle = rawStartAngle;
+		endAngle = rawStartAngle + forwardStartToEnd;
+	}
+	else {
+		startAngle = rawEndAngle;
+		endAngle = rawEndAngle + (2 * Math.PI - forwardStartToEnd);
+	}
+	return { centerX, centerY, radius, startAngle, endAngle };
+}
+
+/** Wraps one kicad-model FpGraphic (plain IU data) in the AST-element-shaped
+ *  accessor methods buildFpLine/buildFpRect/buildFpCircle/buildFpArc/
+ *  buildFpPoly/buildTextElement already expect — same duck-typed-shim
+ *  pattern as SchematicPainter's modelRootShim, reusing those render/hit-
+ *  test/draw methods unchanged rather than re-deriving the geometry math a
+ *  second time for the model path. */
+function wrapFpGraphicForPaint(g: import('@kicad-model/src/pcb/FpGraphic').FpGraphic): any {
+	const mm = (v: number) => v / 1e6;
+	const pt = (p: { x: number; y: number }) => ({ x: mm(p.x), y: mm(p.y) });
+	if (g.kind === 'line' || g.kind === 'rect') {
+		return {
+			getStartEnd: () => ({ start: pt(g.start), end: pt(g.end) }),
+			getLayer: () => fpLayerName(g.layer),
+			getStroke: () => ({ width: mm(g.width) }),
+			getUuid: () => undefined,
+		};
+	}
+	if (g.kind === 'circle') {
+		return {
+			getCenter: () => pt(g.center),
+			getEnd: () => pt({ x: g.center.x + g.radius, y: g.center.y }),
+			getLayer: () => fpLayerName(g.layer),
+			getStroke: () => ({ width: mm(g.width) }),
+			getUuid: () => undefined,
+		};
+	}
+	if (g.kind === 'arc') {
+		return {
+			getStartMidEnd: () => ({ start: pt(g.start), mid: pt(g.mid), end: pt(g.end) }),
+			getArcCenterRadiusAngles: () => fpArcCenterRadiusAngles(pt(g.start), pt(g.mid), pt(g.end)),
+			getLayer: () => fpLayerName(g.layer),
+			getStroke: () => ({ width: mm(g.width) }),
+			getUuid: () => undefined,
+		};
+	}
+	if (g.kind === 'poly') {
+		return {
+			getPoints: () => g.points.map(pt),
+			getLayer: () => fpLayerName(g.layer),
+			getStroke: () => ({ width: mm(g.width) }),
+			getSimpleChildValue: (name: string) => (name === 'fill' ? g.filled : undefined),
+			getUuid: () => undefined,
+		};
+	}
+	if (g.kind === 'bezier') {
+		return {
+			getPoints: () => g.points.map(pt),
+			getLayer: () => fpLayerName(g.layer),
+			getStroke: () => ({ width: mm(g.width) }),
+			getUuid: () => undefined,
+		};
+	}
+	if (g.kind === 'textbox') {
+		return {
+			value: g.value,
+			getStartEnd: () => ({ start: pt(g.start), end: pt(g.end) }),
+			getLayer: () => fpLayerName(g.layer),
+			getFont: () => ({ height: Math.max(mm(g.fontSize.x), mm(g.fontSize.y)) || 1, thickness: mm(g.fontThickness) || 0.15 }),
+			getAnchorPoint: () => ({
+				x: g.hJustify === -1 ? 0 : g.hJustify === 1 ? 1 : 0.5,
+				y: g.vJustify === -1 ? 0 : g.vJustify === 1 ? 1 : 0.5,
+			}),
+			getStroke: () => ({ width: mm(g.strokeWidth) || 0.1 }),
+			getSimpleChildValue: (name: string) => (name === 'border' ? g.border : name === 'knockout' ? g.knockout : undefined),
+			findFirstChildByName: (name: string) => {
+				if (name === 'angle') return { value: g.angleDeg };
+				if (name === 'margins') return { attributes: g.margins.map((v: number) => ({ value: mm(v) })) };
+				return undefined;
+			},
+			getUuid: () => undefined,
+		};
+	}
+	if (g.kind !== 'text') return null;
+	// text
+	return {
+		value: g.text,
+		getLayer: () => fpLayerName(g.layer),
+		getUuid: () => undefined,
+		getOrigin: () => ({ x: mm(g.pos0.x), y: mm(g.pos0.y), rotation: g.orientationDegrees }),
+		getFont: () => ({ height: Math.max(mm(g.fontSize.x), mm(g.fontSize.y)) || 1 }),
+		getAnchorPoint: () => ({
+			x: g.justifyX === 'left' ? 0 : g.justifyX === 'right' ? 1 : 0.5,
+			y: g.justifyY === 'top' ? 0 : g.justifyY === 'bottom' ? 1 : 0.5,
+		}),
+		isHidden: () => g.hide,
+	};
+}
+
+/** Wraps a kicad-model `BoardTable`/`BoardTableCell` in the AST-shaped
+ *  accessor surface `buildTable()`/`buildPcbTextBox()` expect (tree-walking
+ *  `findFirstChildByName`, not flat accessors — a denser shim than
+ *  `wrapFpGraphicForPaint()`'s others, but `buildTable()`'s own border/
+ *  separator/span layout math is reused completely unchanged, only its
+ *  AST-read surface is shimmed). Used for both a board-root table (no
+ *  footprintMatrix) and a footprint-nested one (world-transform applied
+ *  inside buildTable() itself via its footprintMatrix param — a
+ *  footprint-nested table IS footprint-local, unlike a footprint-nested
+ *  dimension; see Footprint.tables' own doc comment). */
+function wrapBoardTableForPaint(table: import('@kicad-model/src/pcb/BoardTable').BoardTable): any {
+	const mm = (v: number) => v / 1e6;
+	const flagNode = (flags: Record<string, boolean>, strokeWidthIu: number) => ({
+		findFirstChildByName: (name: string) => {
+			if (name in flags) return { value: flags[name] };
+			if (name === 'stroke') return { getWidth: () => mm(strokeWidthIu) };
+			return undefined;
+		},
+	});
+	return {
+		getLayer: () => table.getLayer(),
+		getUuid: () => table.getUuid(),
+		findFirstChildByName: (name: string) => {
+			if (name === 'cells') {
+				return { findChildrenByName: (n: string) => (n === 'table_cell' ? table.cells.map(wrapBoardTableCellForPaint) : []) };
+			}
+			if (name === 'column_count') return { value: table.columnCount };
+			if (name === 'border') return flagNode({ external: table.borderExternal, header: table.borderHeader }, table.borderStrokeWidth);
+			if (name === 'separators') return flagNode({ rows: table.separatorRows, cols: table.separatorCols }, table.separatorStrokeWidth);
+			return undefined;
+		},
+	};
+}
+
+function wrapBoardTableCellForPaint(cell: import('@kicad-model/src/pcb/BoardTableCell').BoardTableCell): any {
+	const mm = (v: number) => v / 1e6;
+	return {
+		value: cell.value,
+		getStartEnd: () => cell.getStartEnd(),
+		getLayer: () => cell.getLayer(),
+		getFont: () => cell.getFont(),
+		getAnchorPoint: () => cell.getAnchorPoint(),
+		getStroke: () => cell.getStroke(),
+		getUuid: () => cell.getUuid(),
+		findFirstChildByName: (name: string) => {
+			if (name === 'margins') return { attributes: cell.margins.map((v: number) => ({ value: mm(v) })) };
+			if (name === 'angle') return { value: cell.angleDeg };
+			if (name === 'span') return { attributes: [{ value: cell.colSpan }, { value: cell.rowSpan }] };
+			return undefined;
+		},
+	};
+}
+
 /** Matches PCB_TEXT::GetDrawRotation() for text owned by a footprint. */
 function footprintTextDrawAngle(text: any, footprintRotation: number): number {
 	const textRotation = typeof text?.getOrigin === 'function' ? text.getOrigin().rotation ?? 0 : 0;
@@ -3215,7 +3631,11 @@ function offsetCustomPadLocalRings(
  * only surfaces the layer name itself, so this reaches into the raw child
  * directly rather than extending that mixin. */
 function isKnockoutLayer(el: any): boolean {
-	const layerChild = typeof el.findFirstChildByName === 'function' ? el.findFirstChildByName('layer') : null;
+	if (typeof el.findFirstChildByName !== 'function') {
+		// Model items (kicad-model's BoardText) expose isKnockout() instead.
+		return typeof el.isKnockout === 'function' ? el.isKnockout() : false;
+	}
+	const layerChild = el.findFirstChildByName('layer');
 	return layerChild?.attributes?.[1]?.value === 'knockout';
 }
 

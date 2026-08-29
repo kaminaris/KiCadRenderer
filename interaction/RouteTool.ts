@@ -189,6 +189,12 @@ export class ROUTE_TOOL {
 		this.router.setSettings({ ...this.router.getSettings(), allowDrcViolations: allow });
 	}
 
+	/** Mirrors RouterSettings.shoveVias — real KiCad's own "Shove Vias"
+	 *  checkbox (Settings().ShoveVias()). */
+	SetShoveVias(shove: boolean): void {
+		this.router.setSettings({ ...this.router.getSettings(), shoveVias: shove });
+	}
+
 	/** Sets whether redundant/collinear points are merged on commit. */
 	SetRemoveRedundantTracks(remove: boolean): void {
 		this.router.setSettings({ ...this.router.getSettings(), removeRedundantTracks: remove });
@@ -246,7 +252,16 @@ export class ROUTE_TOOL {
 			commit.Add(seg);
 		}
 		for (const shoved of c.shoved) {
-			commit.Modify(shoved.obstacle.element, null, shoved.segments);
+			// A shoved via touches multiple elements at once (the via itself
+			// plus every dragged fanout line, applied atomically by
+			// KicadRenderSession.shoveVia's own commitViaDrag call) — no
+			// single-element Modify() captures that, and this generic
+			// COMMIT/UNDO_REDO_ITEM path is currently unused by any live
+			// caller anyway (every real caller applies shove directly via
+			// KicadRenderSession, which pushes its own undo snapshot).
+			if (shoved.kind === 'track') {
+				commit.Modify(shoved.obstacle.element, null, shoved.segments);
+			}
 		}
 		return commit.Commit();
 	}
