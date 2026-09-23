@@ -4489,7 +4489,7 @@ export class KicadRenderSession {
 					if (anchors.length < 2) continue;
 					anchorsByNet[String(netId)] = anchors;
 				}
-				const worker = new Worker(new URL('./paint/BoardRatsnestWorker.ts', import.meta.url), { type: 'module' });
+				const worker = new Worker(new URL('./paint/legacy/BoardRatsnestWorker.ts', import.meta.url), { type: 'module' });
 				worker.postMessage({ anchorsByNet, bench: false });
 				worker.onmessage = (ev: MessageEvent) => {
 					if (ev.data?.lines) {

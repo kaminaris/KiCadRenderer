@@ -3650,14 +3650,14 @@ function isKnockoutLayer(el: any): boolean {
 function footprintTextVars(footprint: any): Record<string, string> {
 	const vars: Record<string, string> = typeof footprint.getAllProperties === 'function'
 		? { ...footprint.getAllProperties() } : {};
-	if (vars.Reference !== undefined) {
-		vars.REFERENCE = vars.Reference;
+	if (vars['Reference'] !== undefined) {
+		vars['REFERENCE'] = vars['Reference'];
 	}
-	if (vars.Value !== undefined) {
-		vars.VALUE = vars.Value;
+	if (vars['Value'] !== undefined) {
+		vars['VALUE'] = vars['Value'];
 	}
 	if (typeof footprint.getLayer === 'function') {
-		vars.LAYER = footprint.getLayer();
+		vars['LAYER'] = footprint.getLayer();
 	}
 	return vars;
 }
